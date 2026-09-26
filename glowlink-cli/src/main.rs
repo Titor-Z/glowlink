@@ -13,7 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
 use glowlink_cli::config;
-use glowlink_cli::daemon::{self, IpcHost, PendingSlot, State};
+use glowlink_cli::daemon;
+use glowlink_cli::ipc::{self, IpcHost};
+use glowlink_cli::pending::{PendingOffer, PendingQueue};
+use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::DaemonView;
 use glowlink_cli::CliView;
@@ -71,8 +74,8 @@ fn run() -> Result<()> {
         Some(daemon::DAEMON_COMMAND) => cmd_daemon(&config, &args[1..]),
         Some("on") => cmd_on(&config, &args[1..]),
         Some("off") => cmd_off(&config, &args[1..]),
-        Some("accept") => cmd_decide(true),
-        Some("reject") => cmd_decide(false),
+        Some("accept") => cmd_decide(true, &args[1..]),
+        Some("reject") => cmd_decide(false, &args[1..]),
         Some("send") => cmd_send(&config, &args[1..]),
         Some("config") => cmd_config(&config),
         Some("help") | None => {
@@ -153,7 +156,7 @@ fn list_via_daemon(state: &State, timeout: Duration, watch: bool) -> Result<()> 
         state.receive_dir.display()
     );
 
-    let mut client = daemon::IpcClient::connect(state)?;
+    let mut client = ipc::IpcClient::connect(state)?;
     if !watch {
         let devices = ipc_devices(&client.call("DEVICES")?);
         print_devices(&devices, timeout);
@@ -178,7 +181,7 @@ fn ipc_devices(lines: &[String]) -> Vec<glowlink_core::Device> {
     lines
         .iter()
         .skip(1)
-        .filter_map(|line| daemon::parse_device_line(line))
+        .filter_map(|line| ipc::parse_device_line(line))
         .map(|(name, id, addr, age_ms)| glowlink_core::Device {
             id: glowlink_core::DeviceId::new(id),
             name,
@@ -189,25 +192,27 @@ fn ipc_devices(lines: &[String]) -> Vec<glowlink_core::Device> {
         .collect()
 }
 
-/// 有待确认的接收请求时提醒一句（守护进程不会自己弹窗）。
-fn print_pending(client: &mut daemon::IpcClient) -> Result<()> {
+/// 有待确认的接收请求时逐条列出（守护进程不会自己弹窗）。
+fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
     let lines = client.call("PENDING")?;
     let count = lines
         .first()
-        .map(|line| daemon::ok_payload(line).parse::<usize>().unwrap_or(0))
+        .map(|line| ipc::ok_payload(line).parse::<usize>().unwrap_or(0))
         .unwrap_or(0);
     if count == 0 {
         return Ok(());
     }
-    let Some(line) = lines.get(1) else { return Ok(()) };
-    let mut parts = line.split('\t');
-    let peer = parts.next().unwrap_or("?");
-    let name = parts.next().unwrap_or("?");
-    let size = parts.next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
-    println!(
-        "\n[等待确认] {peer} 想发来「{name}」（{}）：glowlink accept 或 glowlink reject",
-        human_size(size)
-    );
+    println!();
+    for line in lines.iter().skip(1) {
+        let Some((token, peer, name, size)) = ipc::parse_pending_line(line) else {
+            continue;
+        };
+        println!(
+            "[等待确认 #{token}] {peer} 想发来「{name}」（{}）：\
+             glowlink accept {token} / glowlink reject {token}",
+            human_size(size)
+        );
+    }
     Ok(())
 }
 
@@ -404,8 +409,8 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
             let peer_key = peer_key.expect("非直连模式必有设备名");
             // 守护进程在跑就直接向它要地址：省一轮扫描，也不和它抢发现端口。
             if let Some(state) = daemon::running_state() {
-                let mut client = daemon::IpcClient::connect(&state)?;
-                let (name, id, addr) = daemon::parse_resolve(&client.call_first(&format!("RESOLVE {peer_key}"))?)?;
+                let mut client = ipc::IpcClient::connect(&state)?;
+                let (name, id, addr) = ipc::parse_resolve(&client.call_first(&format!("RESOLVE {peer_key}"))?)?;
                 println!("目标：{}（{}）@ {}", name, truncate(&id, 8), addr);
                 addr
             } else {
@@ -469,9 +474,9 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
     }
 
     // 残留状态文件先清掉，免得客户端读到不存在的 IPC 端口。
-    daemon::remove_state()?;
+    state::remove_state()?;
 
-    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(daemon::IPC_PORT);
+    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
     let mut child_args = vec![daemon::DAEMON_COMMAND.to_string()];
     for flag in ["--dir", "--port", "--discovery-port"] {
         if let Some(value) = flag_value(args, flag) {
@@ -496,7 +501,7 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
     Err(GlowError::Usage(format!(
         "守护进程未能就绪（PID {}）。日志：{}",
         child.id(),
-        daemon::log_path().display()
+        state::log_path().display()
     )))
 }
 
@@ -511,19 +516,19 @@ fn print_on_summary(state: &State, prefix: &str) {
     );
     println!(
         "收到文件时会等待人工确认：glowlink accept / glowlink reject；日志 {}",
-        daemon::log_path().display()
+        state::log_path().display()
     );
     println!("停止：glowlink off");
 }
 
 /// `glowlink off`：优先优雅停止，IPC 不通时兜底强杀。
 fn cmd_off(_config: &Config, _args: &[String]) -> Result<()> {
-    let Some(state) = daemon::read_state()? else {
+    let Some(state) = state::read_state()? else {
         println!("萤光守护进程未在运行。");
         return Ok(());
     };
 
-    let stopping = match daemon::IpcClient::connect(&state) {
+    let stopping = match ipc::IpcClient::connect(&state) {
         Ok(mut client) => client.call("STOP").is_ok(),
         Err(_) => false,
     };
@@ -540,19 +545,27 @@ fn cmd_off(_config: &Config, _args: &[String]) -> Result<()> {
         daemon::terminate(state.pid);
         std::thread::sleep(Duration::from_millis(200));
     }
-    daemon::remove_state()?;
+    state::remove_state()?;
     println!("萤光守护进程（PID {}）已停止。", state.pid);
     Ok(())
 }
 
-/// `glowlink accept` / `glowlink reject`：为守护进程里挂起的接收请求落决定。
-fn cmd_decide(accept: bool) -> Result<()> {
+/// `glowlink accept [编号]` / `glowlink reject [编号]`：
+/// 为守护进程里挂起的接收请求落决定；有多个请求时必须给编号。
+fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
     let state = daemon::running_state().ok_or_else(|| {
         GlowError::Usage("守护进程未在运行；接收确认只对守护进程有效。".into())
     })?;
-    let mut client = daemon::IpcClient::connect(&state)?;
-    let line = client.call_first(if accept { "ACCEPT" } else { "REJECT" })?;
-    println!("{}", daemon::ok_payload(&line));
+    let token = positional_args(args).first().cloned();
+    let command = match (&token, accept) {
+        (Some(token), true) => format!("ACCEPT {token}"),
+        (Some(token), false) => format!("REJECT {token}"),
+        (None, true) => "ACCEPT".to_string(),
+        (None, false) => "REJECT".to_string(),
+    };
+    let mut client = ipc::IpcClient::connect(&state)?;
+    let line = client.call_first(&command)?;
+    println!("{}", ipc::ok_payload(&line));
     Ok(())
 }
 
@@ -564,7 +577,7 @@ fn cmd_decide(accept: bool) -> Result<()> {
 struct DaemonShared {
     state: Mutex<State>,
     devices: Mutex<Vec<glowlink_core::Device>>,
-    pending: Arc<PendingSlot>,
+    pending: Arc<PendingQueue>,
     stop: AtomicBool,
 }
 
@@ -586,12 +599,12 @@ impl IpcHost for DaemonShared {
             .cloned()
     }
 
-    fn pending(&self) -> Option<glowlink_cli::daemon::PendingOffer> {
-        self.pending.current()
+    fn pending(&self) -> Vec<(String, PendingOffer)> {
+        self.pending.list()
     }
 
-    fn decide(&self, accept: bool) -> Result<()> {
-        self.pending.decide(accept)
+    fn decide(&self, token: Option<&str>, accept: bool) -> Result<String> {
+        self.pending.decide(token, accept)
     }
 
     fn request_stop(&self) {
@@ -608,7 +621,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         None => config.transfer_port,
     };
     let discovery_port = discovery_port(config, args)?;
-    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(daemon::IPC_PORT);
+    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
     let dir = match flag_value(args, "--dir") {
         Some(value) => PathBuf::from(value),
         None => config.receive_dir.clone(),
@@ -621,7 +634,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     // 与 serve 相同：发现端口被占时顺延，但已绑好的套接字不能重探
     let decision = glowlink_core::model::probe::decide_port(discovery_port)?;
     if let Some(notice) = decision.notice() {
-        daemon::append_log(&notice);
+        state::append_log(&notice);
     }
     // 顺延后要记实际端口：状态文件是客户端了解真实端口的唯一来源
     let bound_discovery_port = decision.port;
@@ -633,7 +646,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         device_timeout(config),
         query_interval(config),
     );
-    let (ipc_listener, ipc_port) = daemon::bind_ipc(ipc_port)?;
+    let (ipc_listener, ipc_port) = ipc::bind_ipc(ipc_port)?;
 
     let state = State {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -647,8 +660,8 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
             .map(|d| d.as_secs())
             .unwrap_or(0),
     };
-    daemon::write_state(&state)?;
-    daemon::append_log(&format!(
+    state::write_state(&state)?;
+    state::append_log(&format!(
         "守护进程已启动：PID {}，传输端口 {port}，IPC 端口 {ipc_port}，接收目录 {}",
         state.pid,
         dir.display()
@@ -657,7 +670,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     let shared = Arc::new(DaemonShared {
         state: Mutex::new(state),
         devices: Mutex::new(Vec::new()),
-        pending: Arc::new(PendingSlot::new()),
+        pending: Arc::new(PendingQueue::new()),
         stop: AtomicBool::new(false),
     });
 
@@ -667,9 +680,9 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         std::thread::spawn(move || {
             for stream in ipc_listener.incoming() {
                 match stream {
-                    Ok(stream) => daemon::serve_connection(shared.as_ref(), stream),
+                    Ok(stream) => ipc::serve_connection(shared.as_ref(), stream),
                     Err(e) => {
-                        daemon::append_log(&format!("IPC 连接失败：{e}"));
+                        state::append_log(&format!("IPC 连接失败：{e}"));
                         continue;
                     }
                 }
@@ -677,8 +690,8 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                     break;
                 }
             }
-            daemon::append_log("收到停止指令，正在退出");
-            let _ = daemon::remove_state();
+            state::append_log("收到停止指令，正在退出");
+            let _ = state::remove_state();
             std::process::exit(0);
         });
     }
@@ -687,18 +700,26 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     {
         let listener: Arc<Box<dyn TransferListener>> = Arc::from(listener);
         let view = Arc::new(DaemonView::new(Arc::clone(&shared.pending), PENDING_TIMEOUT));
-        let transfer = TransferController::new(config.chunk_size(), config.ring_capacity());
+        let chunk_size = config.chunk_size();
+        let ring_capacity = config.ring_capacity();
         let dir = dir.clone();
         std::thread::spawn(move || loop {
             match listener.accept() {
+                // 每个到达的连接单开一个线程：等待确认期间不能挡住后面来的设备，
+                // 否则第二个发送方只会静默挂在 backlog 里（就是单槽版本的毛病）。
                 Ok((mut stream, peer)) => {
-                    let label = peer.ip().to_string();
-                    match transfer.receive_file(stream.as_mut(), &dir, &label, view.as_ref()) {
-                        Ok(path) => daemon::append_log(&format!("已接收：{}", path.display())),
-                        Err(e) => daemon::append_log(&format!("接收失败：{e}")),
-                    }
+                    let view = Arc::clone(&view);
+                    let dir = dir.clone();
+                    std::thread::spawn(move || {
+                        let transfer = TransferController::new(chunk_size, ring_capacity);
+                        let label = peer.ip().to_string();
+                        match transfer.receive_file(stream.as_mut(), &dir, &label, view.as_ref()) {
+                            Ok(path) => state::append_log(&format!("已接收：{}", path.display())),
+                            Err(e) => state::append_log(&format!("接收失败：{e}")),
+                        }
+                    });
                 }
-                Err(e) => daemon::append_log(&format!("接受连接失败：{e}")),
+                Err(e) => state::append_log(&format!("接受连接失败：{e}")),
             }
         });
     }
@@ -710,11 +731,11 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                 let snapshot = discovery.devices();
                 *shared.devices.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
             }
-            Err(e) => daemon::append_log(&format!("发现循环出错：{e}")),
+            Err(e) => state::append_log(&format!("发现循环出错：{e}")),
         }
     }
-    daemon::append_log("主循环退出");
-    daemon::remove_state()?;
+    state::append_log("主循环退出");
+    state::remove_state()?;
     Ok(())
 }
 
@@ -751,7 +772,7 @@ fn print_help() {
          守护进程：\n\
          \x20 glowlink on   [--dir 目录] [--ipc-port 端口]\n\
          \x20                                           后台常驻（只做人工确认，不自动接收）\n\
-         \x20 glowlink accept | reject                 确认/拒绝当前待接收的文件\n\
+         \x20 glowlink accept [编号] | reject [编号]   确认/拒绝待接收的文件（编号见 list）\n\
          \x20 glowlink off                           停止守护进程\n\n\
          配置文件：{}（工程默认）→ ~/.config/glowlink/config.toml（用户覆盖）\n\
          也可用 $GLOWLINK_CONFIG 指定用户配置文件路径。\n\
