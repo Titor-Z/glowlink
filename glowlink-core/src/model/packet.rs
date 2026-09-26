@@ -26,6 +26,7 @@ const KIND_ACCEPT: u8 = 3;
 const KIND_REJECT: u8 = 4;
 const KIND_CHUNK: u8 = 5;
 const KIND_DONE: u8 = 6;
+const KIND_QUERY: u8 = 7;
 
 /// 设备广播报文。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,6 +39,9 @@ pub struct Hello {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Frame {
+    /// 广播查询：向广播地址发出，携带自身身份与传输端口。
+    Query(Hello),
+    /// 单播应答：对收到的查询回给其来源地址。
     Hello(Hello),
     /// 发送方声明即将发送的文件。
     Offer { name: String, size: u64 },
@@ -55,6 +59,12 @@ impl Frame {
         w.raw(&MAGIC);
         w.u8(VERSION);
         match self {
+            Frame::Query(h) => {
+                w.u8(KIND_QUERY);
+                w.str(&h.id)?;
+                w.str(&h.name)?;
+                w.u16(h.port);
+            }
             Frame::Hello(h) => {
                 w.u8(KIND_HELLO);
                 w.str(&h.id)?;
@@ -96,12 +106,16 @@ impl Frame {
         if version != VERSION {
             return Err(GlowError::Protocol(format!("协议版本不支持：{version}")));
         }
-        let frame = match r.u8()? {
-            KIND_HELLO => Frame::Hello(Hello {
-                id: r.str()?,
-                name: r.str()?,
-                port: r.u16()?,
-            }),
+        let kind = r.u8()?;
+        let frame = match kind {
+            KIND_QUERY | KIND_HELLO => {
+                let hello = Hello { id: r.str()?, name: r.str()?, port: r.u16()? };
+                if kind == KIND_QUERY {
+                    Frame::Query(hello)
+                } else {
+                    Frame::Hello(hello)
+                }
+            }
             KIND_OFFER => Frame::Offer {
                 name: r.str()?,
                 size: r.u64()?,

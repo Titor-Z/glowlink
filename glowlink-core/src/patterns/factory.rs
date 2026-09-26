@@ -10,7 +10,8 @@ use crate::patterns::adapter::{TcpListenerAdapter, TcpTransportAdapter, UdpDisco
 
 /// 发现通道工厂。
 pub trait DiscoveryTransportFactory {
-    fn create(&self, broadcast_port: u16) -> Result<Box<dyn DiscoveryTransport>>;
+    /// `port` 为本机发现端口（局域网内应统一）。
+    fn create(&self, port: u16) -> Result<Box<dyn DiscoveryTransport>>;
 }
 
 /// 传输通道工厂。
@@ -25,8 +26,8 @@ pub trait TransferTransportFactory {
 pub struct NativeTransportFactory;
 
 impl DiscoveryTransportFactory for NativeTransportFactory {
-    fn create(&self, broadcast_port: u16) -> Result<Box<dyn DiscoveryTransport>> {
-        Ok(Box::new(UdpDiscoveryAdapter::bind(broadcast_port)?))
+    fn create(&self, port: u16) -> Result<Box<dyn DiscoveryTransport>> {
+        Ok(Box::new(UdpDiscoveryAdapter::bind(port)?))
     }
 }
 

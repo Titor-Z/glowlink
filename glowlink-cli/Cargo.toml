@@ -3,6 +3,10 @@ name = "glowlink-cli"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "glowlink_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "glowlink"
 path = "src/main.rs"
