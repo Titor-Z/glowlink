@@ -1,7 +1,7 @@
 //! 萤光 GlowLink CLI：Phase 1 概念验证。
 //!
-//! 这里是唯一做装配（依赖注入）的地方：控制器由核心库提供，
-//! 通道实现由工厂提供，视图与参数解析由本 crate 的库部分提供。
+//! 这里是唯一做装配（依赖注入）的地方：配置来自配置文件 + 命令行覆盖，
+//! 控制器由核心库提供，通道实现由工厂提供，视图由本 crate 的库部分提供。
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -9,19 +9,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
+use glowlink_cli::config;
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::CliView;
 use glowlink_core::controller::transfer::TransferListener;
-use glowlink_core::model::packet::{CHUNK_SIZE, DISCOVERY_PORT};
 use glowlink_core::patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };
-use glowlink_core::{DeviceIdentity, DiscoveryController, GlowError, Result, TransferController};
-
-const DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
-const DEVICE_TIMEOUT: Duration = Duration::from_secs(6);
-const SCAN_TIMEOUT: Duration = Duration::from_secs(3);
-const RING_CAPACITY: usize = 1 << 20;
+use glowlink_core::{
+    Config, DeviceIdentity, DiscoveryController, GlowError, Result, TransferController,
+};
 
 fn main() {
     if let Err(e) = run() {
@@ -32,10 +29,12 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let config = config::load()?;
     match args.first().map(String::as_str) {
-        Some("list") => cmd_list(&args[1..]),
-        Some("serve") => cmd_serve(&args[1..]),
-        Some("send") => cmd_send(&args[1..]),
+        Some("list") => cmd_list(&config, &args[1..]),
+        Some("serve") => cmd_serve(&config, &args[1..]),
+        Some("send") => cmd_send(&config, &args[1..]),
+        Some("config") => cmd_config(&config),
         Some("help") | None => {
             print_help();
             Ok(())
@@ -44,14 +43,30 @@ fn run() -> Result<()> {
     }
 }
 
-fn cmd_list(args: &[String]) -> Result<()> {
-    let timeout = flag_secs(args, "--timeout").unwrap_or(SCAN_TIMEOUT);
-    let discovery_port = flag_u16(args, "--discovery-port")?.unwrap_or(DISCOVERY_PORT);
+fn cmd_config(config: &Config) -> Result<()> {
+    println!("生效配置（按 {} → 用户配置 顺序叠加）", config::PROJECT_CONFIG);
+    for path in config::config_paths() {
+        let mark = if path.is_file() { "已加载" } else { "不存在" };
+        println!("  {mark}  {}", path.display());
+    }
+    println!("{config:#?}");
+    Ok(())
+}
+
+fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
+    let timeout = search_timeout(config, args);
+    let discovery_port = discovery_port(config, args)?;
+    let query_every = query_interval(config);
     let factory = NativeTransportFactory;
     let identity = DeviceIdentity::global().clone();
     let transport = factory.create(discovery_port)?;
-    let mut discovery =
-        DiscoveryController::new(transport, identity.clone(), 0, DEVICE_TIMEOUT, DISCOVERY_INTERVAL);
+    let mut discovery = DiscoveryController::new(
+        transport,
+        identity.clone(),
+        0,
+        device_timeout(config),
+        query_every,
+    );
 
     println!("本机：{}（{}）", identity.name, truncate(&identity.id, 8));
     if discovery.degraded() {
@@ -83,10 +98,16 @@ fn cmd_list(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_serve(args: &[String]) -> Result<()> {
-    let port = flag_u16(args, "--port")?.unwrap_or(0);
-    let discovery_port = flag_u16(args, "--discovery-port")?.unwrap_or(DISCOVERY_PORT);
-    let dir = PathBuf::from(flag_value(args, "--dir").unwrap_or_else(|| "./received".to_string()));
+fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
+    let port = match flag_u16(args, "--port")? {
+        Some(port) => port,
+        None => config.transfer_port,
+    };
+    let discovery_port = discovery_port(config, args)?;
+    let dir = match flag_value(args, "--dir") {
+        Some(dir) => PathBuf::from(dir),
+        None => config.receive_dir.clone(),
+    };
     let auto_accept = has_flag(args, "--yes");
 
     let factory = NativeTransportFactory;
@@ -98,11 +119,11 @@ fn cmd_serve(args: &[String]) -> Result<()> {
         transport,
         identity.clone(),
         port,
-        DEVICE_TIMEOUT,
-        DISCOVERY_INTERVAL,
+        device_timeout(config),
+        query_interval(config),
     );
 
-    let transfer = TransferController::new(CHUNK_SIZE, RING_CAPACITY);
+    let transfer = TransferController::new(config.chunk_size(), config.ring_capacity());
     let view = Arc::new(CliView::new(auto_accept));
 
     println!(
@@ -144,9 +165,9 @@ fn cmd_serve(args: &[String]) -> Result<()> {
     }
 }
 
-fn cmd_send(args: &[String]) -> Result<()> {
-    let timeout = flag_secs(args, "--timeout").unwrap_or(SCAN_TIMEOUT);
-    let discovery_port = flag_u16(args, "--discovery-port")?.unwrap_or(DISCOVERY_PORT);
+fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
+    let timeout = search_timeout(config, args);
+    let discovery_port = discovery_port(config, args)?;
     let peer = flag_value(args, "--peer");
     let positional = positional_args(args);
 
@@ -182,8 +203,8 @@ fn cmd_send(args: &[String]) -> Result<()> {
                 transport,
                 identity,
                 0,
-                DEVICE_TIMEOUT,
-                DISCOVERY_INTERVAL,
+                device_timeout(config),
+                query_interval(config),
             );
             println!("正在搜索「{peer_key}」…");
             let deadline = Instant::now() + timeout;
@@ -201,14 +222,32 @@ fn cmd_send(args: &[String]) -> Result<()> {
         println!("直连目标：{target}");
     }
 
-    let transfer = TransferController::new(CHUNK_SIZE, RING_CAPACITY);
+    let transfer = TransferController::new(config.chunk_size(), config.ring_capacity());
+    let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
     let view = CliView::new(true);
     for file in &files {
-        let mut stream = factory.connect(target, Duration::from_secs(10))?;
+        let mut stream = factory.connect(target, connect_timeout)?;
         let sent = transfer.send_file(stream.as_mut(), file, &view)?;
         println!("\n已发送：{}（{}）", file.display(), human_size(sent));
     }
     Ok(())
+}
+
+fn search_timeout(config: &Config, args: &[String]) -> Duration {
+    flag_secs(args, "--timeout").unwrap_or_else(|| Duration::from_secs(config.scan_timeout_secs))
+}
+
+fn query_interval(config: &Config) -> Duration {
+    Duration::from_secs(config.query_interval_secs)
+}
+
+fn device_timeout(config: &Config) -> Duration {
+    Duration::from_secs(config.device_timeout_secs)
+}
+
+/// 发现端口：命令行 > 配置文件。
+fn discovery_port(config: &Config, args: &[String]) -> Result<u16> {
+    Ok(flag_u16(args, "--discovery-port")?.unwrap_or(config.discovery_port))
 }
 
 fn print_help() {
@@ -219,11 +258,16 @@ fn print_help() {
          \x20 glowlink list  [--discovery-port 端口] [--timeout 秒]\n\
          \x20                                           扫描局域网内的设备\n\
          \x20 glowlink serve [--port 传输端口] [--discovery-port 端口] [--dir 目录] [--yes]\n\
-         \x20                                           常驻接收方（传输端口默认自动分配）\n\
+         \x20                                           常驻接收方（端口默认自动分配）\n\
          \x20 glowlink send  <设备名|设备ID> <文件>… [--timeout 秒]\n\
          \x20 glowlink send  --peer ip:端口 <文件>…\n\
-         \x20                                           直连发送，绕过发现层\n\n\
-         发现端口默认 {DISCOVERY_PORT}；被占用时自动降级为主动查询模式。\n",
-        env!("CARGO_PKG_VERSION")
+         \x20                                           直连发送，绕过发现层\n\
+         \x20 glowlink config                          显示生效配置与配置文件位置\n\n\
+         配置文件：{}（工程默认）→ ~/.config/glowlink/config.toml（用户覆盖）\n\
+         也可用 $GLOWLINK_CONFIG 指定用户配置文件路径。\n\
+         发现端口默认 {}；被占用时自动降级为主动查询模式。\n",
+        env!("CARGO_PKG_VERSION"),
+        config::PROJECT_CONFIG,
+        Config::default().discovery_port
     );
 }

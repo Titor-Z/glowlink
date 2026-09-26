@@ -1,0 +1,107 @@
+## 编码规范：
+- 使用MVC开发模式，高内聚低耦合，使用设计模式，如单例模式、工厂模式、适配器模式等等来分模块。
+- 使用抽象类、接口、子类等等手段来设计整体架构
+- 无用的死代码直接删除
+- 每次修复代码、改BUG等等，不要在代码外包裹，而是重写
+- 任何时候，都不要偷懒
+- 使用中文和用户交流
+- 测试文件全部拆分，每个测试文件都针对单个模块、单个文件进行编写，不要全部汇入一个文件
+- 一个问题如果重复3次没有解决，立即停止，告诉用户遇到的问题，并和用户讨论接下来的做法
+- 认知纠正模块，用来存放我们在开发中已经遇到过的问题都总结
+- TAOLUN 存放我们每次对话的重心的总结
+
+
+## TAOLUN
+> 这里存放讨论记录
+
+### 2026-09-27 Phase 1 Rust CLI 概念验证
+
+- 决定：AGENTS.md 的编码规范是通用 Web 口径，本项目用 Rust 落地同一套思想，映射如下：
+  - 接口 / 抽象类 → `trait`（带默认实现的 trait 等同抽象基类）
+  - 子类 → `struct` + `impl Trait`
+  - 工厂模式 → `patterns/factory.rs`，控制器只持有 `Box<dyn Trait>`
+  - 适配器模式 → `patterns/adapter.rs`，包装 `UdpSocket` / `TcpStream` 实现控制器接口
+  - 单例模式 → `patterns/singleton.rs`，`OnceLock<DeviceIdentity>`
+  - MVC → Model 放纯数据结构与算法（零 IO），Controller 放业务编排（只依赖 trait），View 放终端/界面表现
+- 分层边界：`model` 不依赖 `controller`；`controller` 不依赖 `patterns`；只有 `patterns` 与 CLI 层做装配（依赖注入）。
+- 零第三方依赖：协议、CRC32、环形缓冲、CLI 解析全部手写，符合“闭源私有协议”定位。
+- 测试按模块拆文件：`tests/{crc,packet,device,ring,discovery,transfer,adapter}.rs`，一个文件只针对一个源文件（`adapter.rs` 针对真实套接字）；CLI 侧 `glowlink-cli/tests/args.rs` 针对参数解析模块。
+
+### 2026-09-27 【网络发现决策 - v1.0】查询-单播应答
+
+- 背景：`std::net::UdpSocket` 不暴露 `SO_REUSEPORT`，本机多实例绑定 8888 会报 `Address already in use`。
+- 决策：**放弃 `libc` / 多播**（避开各平台防火墙与沙盒差异），全面改为**查询 - 单播应答**：
+  - `QUERY` 帧广播到发现端口，携带自身 id / 名称 / TCP 传输端口；
+  - 收到 `QUERY` 的节点向**来源地址单播**回 `HELLO`，不做二次广播；
+  - 因此一次交互双方互相认识，无中心节点，也没有应答风暴（应答不再被广播）。
+- 降级策略：绑定发现端口失败（`AddrInUse`）时自动改用临时端口，进入“仅主动查询模式”，只发查询、收单播应答，不再监听广播。
+- 本机联调配套：`UdpDiscoveryAdapter::query` 在广播之外额外单发一份到 `127.0.0.1`（广播不保证回环），并对 ICMP 端口不可达（`ConnectionRefused`）静默续收。
+- 开发者妥协：`glowlink send --peer ip:端口` 绕过发现层直连；`--discovery-port` 可改本地发现端口（局域网内需统一）。
+- 结论：本机 `serve` + `list` + `send` 已实测互通（见下），不再需要 `SO_REUSEPORT`。
+
+### 2026-09-27 【配置加载决策 - v1.0】零依赖工程配置文件
+
+- 需求：提供一个“工程默认配置文件”，方便用户改默认端口等工程参数，不必重新编译。
+- 决策：**不引入 `toml` / `serde` 等依赖**，手写扁平 `key = value` 解析器；格式如下：
+  - `#` 起注释（双引号内的 `#` 不算），字符串可加双引号；
+  - 不支持 `[分节]`，写了就报错并提示改用扁平键名。
+- 优先级（低 → 高）：内置默认 → `./glowlink.toml`（随工程分发）→ `~/.config/glowlink/config.toml`（可由 `$GLOWLINK_CONFIG` 指定）→ 命令行开关。
+- 合并语义：`Config::apply` 以现有配置为底，只覆盖文本中**显式出现**的键，所以才能逐层叠加而不会被上层默认值洗掉。
+- 分层：纯解析 + 默认值放 `glowlink-core/src/model/config.rs`（零 IO）；文件定位与读取放 `glowlink-cli/src/config.rs`（IO 层）。
+- 容错原则：未知键名、非法数值、缺 `=`、分节一律**报错并指出行号**，绝不静默忽略（静默忽略会让用户以为改了却没生效）。
+- 防漂移：`glowlink-core/tests/config.rs` 用 `include_str!("../../glowlink.toml")` 断言分发的配置与内置默认完全一致。
+- 新增命令：`glowlink config` 打印生效配置与各配置文件加载状态。
+
+## CHANGELOG
+> 这里存放项目更新历史记录
+
+### 2026-09-27 v0.1.2 — 工程配置文件
+
+- 新增 `glowlink.toml`（工程默认配置）与 `glowlink-core/src/model/config.rs`（零依赖扁平解析器 + 内置默认）。
+- 新增 `glowlink-cli/src/config.rs`：按 `./glowlink.toml` → `$GLOWLINK_CONFIG`（默认 `~/.config/glowlink/config.toml`）逐层叠加。
+- 新增 `glowlink config` 子命令：打印生效配置与每个配置文件是否加载。
+- CLI 所有硬编码默认值收归配置：发现端口、传输端口、接收目录、查询周期、设备超时、搜索时长、连接超时、分块大小、环容量；命令行开关仍优先。
+- 新增 `GlowError::Config`，配置错误带文件名与行号。
+- `.gitignore` 增加 `received/`。
+- 实测：用 `$GLOWLINK_CONFIG` 把发现端口改为 8999、接收目录改为 `/tmp/glowlink-recv2`，`serve` + `list` + `send` 互通，4 MB 文件 SHA-1 一致。
+- 测试增至 56 个用例，新增 `glowlink-core/tests/config.rs`（解析/叠加/错报/防漂移）与 `glowlink-cli/tests/config.rs`（多层加载）。
+
+### 2026-09-27 v0.1.1 — 发现层改用查询-单播应答
+
+- `model/packet.rs`：新增 `QUERY` 帧（KIND=7），与 `HELLO` 同负载；`Frame::Query` / `Frame::Hello` 语义分离。
+- `controller/discovery.rs`：接口改为 `local_port` / `query` / `reply` / `poll` / `degraded`，新增 `DiscoveryEvent::{Query, Reply}`；`tick` 收到查询时单播应答并登记对方。
+- `patterns/adapter.rs`：`UdpDiscoveryAdapter` 支持端口被占用时降级为临时端口；查询同时发广播与回环；忽略非协议报文与 ICMP 端口不可达噪声。
+- `glowlink-cli`：拆成 lib + bin 以便测试；新增 `--discovery-port` 与 `send --peer ip:端口` 直连模式；端口降级时打印提示。
+- 实测（单机双进程）：`serve`（占 8888）+ `list`（降级）能互相发现，按名称发送与 `--peer` 直连各传 5 MB 随机文件，SHA-1 与源文件一致。
+- 测试增至 45 个用例，新增 `glowlink-cli/tests/args.rs` 参数解析用例与发现/适配器的真实 UDP 用例。
+
+### 2026-09-27 v0.1.0 — Phase 1：Rust CLI 概念验证
+
+- 新增 workspace：`glowlink-core`（库）+ `glowlink-cli`（二进制 `glowlink`）。
+- `model/packet.rs`：私有二进制协议（魔数 `GLWK` + 版本 + 帧类型），帧类型 QUERY / HELLO / OFFER / ACCEPT / REJECT / CHUNK / DONE。
+- `model/crc.rs`：增量 CRC32，用于分块与整文件校验。
+- `model/ring.rs`：`RingBuffer`（纯结构）+ `SharedRing`（`Mutex` + `Condvar` 阻塞封装），实现背压控制。
+- `model/device.rs`：`Device` / `DeviceBook`，广播合并、超时下线、按名称或 ID 查找。
+- `controller/discovery.rs`：UDP 发现控制器（查询-单播应答），只依赖 `DiscoveryTransport` 接口。
+- `controller/transfer.rs`：发送侧独立读盘线程 + 环形缓冲池（背压），接收侧逐帧校验偏移与 CRC32，拒绝接收时回 REJECT，失败清除残片。
+- `patterns/`：工厂 / 适配器 / 单例三件套，装配点集中在 CLI `main.rs`。
+- CLI 三个命令：`list`（扫描设备）、`serve`（常驻接收，默认询问确认，`--yes` 自动接收）、`send`（发现并发送，或 `--peer` 直连）。
+- 安全：接收文件名剥离上级路径（防 `../` 路径穿越）；单帧上限 1 MiB（防超长帧内存爆炸）；非协议报文静默忽略。
+- 测试：33 个用例，覆盖协议往返、截断/坏魔数/坏版本、环形缓冲回绕与背压、设备上下线、分块乱序与篡改检测、拒绝流程、路径穿越、真实 TCP 往返与真实 UDP 收发。
+
+## 认知纠正
+> 这里存放踩坑记录
+
+- **开关取值被当成位置参数（已修复）**：`positional_args` 用 `strip_prefix("--")` 之后的名字去 `VALUE_FLAGS.contains(&name)`，而表里存的是带 `--` 的完整开关名，比较永远为假。后果：`send --peer <文件>` 会把 ip:端口当成文件，`send 设备 文件 --timeout 4` 会额外尝试发送一个名为 `4` 的文件，报 `IO 错误：No such file or directory`。
+  - 纠正：开关比对一律用**完整开关名**；并为每个取值开关补一条“必须被登记”的测试（新增开关忘登记就会被测出来）。
+  - 教训：CLI 胶水层也需要单测；只靠端到端跑一次不会发现“多发了不存在的文件”这种偏差，它只在报错信息里暴露。
+- **UDP 发现端口 8888 同机只能一个进程绑定**：`std::net::UdpSocket` 不暴露 `SO_REUSEADDR` / `SO_REUSEPORT`，第二个实例 `bind` 报 `Address already in use`。
+  - 已按【网络发现决策 - v1.0】解决：降级为临时端口 + 查询-单播应答，本机双进程已实测互通。
+- **`&mut self` 方法返回内部引用时不能同时再借用集合**：`DeviceBook::observe` 先 `iter_mut().find()` 再 `push` 会触发 E0499/E0502，改为先求下标、再统一借用。
+- **`Condvar::wait` 的守卫生命周期必须显式命名**：封装 `fn wait<'a>(&self, condvar: &Condvar, state: MutexGuard<'a, State>) -> MutexGuard<'a, State>`，写成 `'_, '_` 会报“lifetime may not live long enough”。
+- **中文标识符/测试名不用**：Rust 虽允许，但工具链与日志对中文标识符不友好；代码内标识符用英文，注释、输出、文档用中文。
+- **配置文件千万不要静默忽略未知键**：用户把 `discovery_port` 拼错成 `discovery_prot` 时，若静默忽略，现象是“改了没生效”，排查成本极高。已按【配置加载决策 - v1.0】改为报错 + 行号 + 可用键名列表。
+- **分发出去的配置容易与代码里的默认值漂移**：同一份数值写在两个地方，改一处忘一处就会出现“配置文件加载了但值与默认不一致”的幽灵问题。用 `include_str!` 直接拿仓库里的配置文件做断言即可长期防漂移。
+
+## 其他
+[why.md](./why.md) 存放的是项目的产品设计书，不要更改。

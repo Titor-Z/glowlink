@@ -1,0 +1,33 @@
+# 萤光 GlowLink 工程配置
+#
+# 这是随工程分发的默认配置，用户可直接修改本文件。
+# 优先级：内置默认 < ./glowlink.toml（本文件）< ~/.config/glowlink/config.toml < 命令行开关。
+# 删掉某一行即回落到内置默认值；`#` 之后是注释，字符串可用双引号包裹。
+# 配置项写错（未知键名、非法数值）会直接报错并指出行号，不会静默忽略。
+
+# 发现端口：局域网内所有节点必须一致，否则互相看不见。
+discovery_port = 8888
+
+# TCP 传输端口：0 表示由系统自动分配（推荐，避免端口冲突）。
+transfer_port = 0
+
+# 接收文件的目录，相对当前工作目录或写绝对路径。
+receive_dir = "./received"
+
+# 主动查询周期（秒）：越小发现越快，广播也越频繁。
+query_interval_secs = 1
+
+# 多久收不到对方消息就判定设备离线（秒）。
+device_timeout_secs = 6
+
+# list / send 的默认搜索时长（秒），可被 --timeout 覆盖。
+scan_timeout_secs = 3
+
+# 建立 TCP 连接的超时（秒）。
+connect_timeout_secs = 10
+
+# 分块大小（KiB）：影响单帧体积与校验粒度。
+chunk_size_kib = 64
+
+# 环形缓冲容量（KiB）：背压控制的内存上限，会自动抬到至少两个分块。
+ring_capacity_kib = 1024

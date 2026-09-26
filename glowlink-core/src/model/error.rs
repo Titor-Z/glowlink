@@ -9,6 +9,7 @@ pub enum GlowError {
     Rejected(String),
     NotFound(String),
     Usage(String),
+    Config(String),
 }
 
 impl fmt::Display for GlowError {
@@ -19,6 +20,7 @@ impl fmt::Display for GlowError {
             GlowError::Rejected(m) => write!(f, "传输被拒绝：{m}"),
             GlowError::NotFound(m) => write!(f, "未找到设备：{m}"),
             GlowError::Usage(m) => write!(f, "用法错误：{m}"),
+            GlowError::Config(m) => write!(f, "配置错误：{m}"),
         }
     }
 }

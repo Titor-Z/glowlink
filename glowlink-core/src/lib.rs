@@ -13,6 +13,7 @@ pub use controller::discovery::DiscoveryController;
 pub use controller::transfer::{
     TransferController, TransferListener, TransferTransport, TransferView,
 };
+pub use model::config::Config;
 pub use model::device::{Device, DeviceBook, DeviceId};
 pub use model::error::{GlowError, Result};
 pub use model::packet::{Frame, Hello, CHUNK_SIZE, DISCOVERY_PORT};

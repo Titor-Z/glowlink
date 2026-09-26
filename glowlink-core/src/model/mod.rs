@@ -1,3 +1,4 @@
+pub mod config;
 pub mod crc;
 pub mod device;
 pub mod error;
