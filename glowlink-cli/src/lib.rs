@@ -5,6 +5,8 @@
 
 pub mod args;
 pub mod config;
+pub mod daemon;
 pub mod view;
 
+pub use view::daemon::DaemonView;
 pub use view::CliView;
