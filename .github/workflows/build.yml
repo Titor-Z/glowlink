@@ -1,0 +1,119 @@
+name: 构建与发布
+
+# 触发时机：
+# - push 到 main：只跑测试与构建，产物作为 Artifact 供手动下载
+# - push 形如 v0.1.4 的标签：额外创建 GitHub Release 并挂上各平台压缩包
+# - workflow_dispatch：在 Actions 页面手动触发
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # 标签触发时用标签名，其余情况用运行序号，保证同一轮各 job 命名一致
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
+
+jobs:
+  # 每个平台一个独立 job，步骤全用该平台原生 shell（bash / pwsh），不做 runner.os 分支判断。
+  # 不拆成独立 workflow 文件，是为了让 release 能直接 needs 两个 job，
+  # 避免跨 workflow 抢同一个 Release 的竞态。
+  macos:
+    name: macOS（arm64 + x86_64）
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # 两个架构共用一个 job：私有仓库的 macOS 计费是 ×10，少起一个 job 省一半
+      - name: 安装 Intel 目标标准库
+        run: rustup target add x86_64-apple-darwin
+
+      - name: 运行测试
+        run: cargo test --locked --workspace
+
+      # 用 runner 自带的 zip 打包；zip 会带上可执行位，macOS 用户解压即可运行
+      - name: 打包两个架构
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in aarch64 x86_64; do
+            cargo build --locked --release --target "${arch}-apple-darwin" -p glowlink-cli
+            name="glowlink-${VERSION}-macos-${arch}"
+            stage="dist/${name}"
+            mkdir -p "${stage}"
+            cp "target/${arch}-apple-darwin/release/glowlink" "${stage}/"
+            cp glowlink.toml README.md "${stage}/"
+            chmod +x "${stage}/glowlink"
+            (cd dist && rm -f "${name}.zip" && zip -qr -X "${name}.zip" "${name}")
+          done
+          ls -lh dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: glowlink-macos
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    name: Windows（x86_64）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 运行测试
+        run: cargo test --locked --workspace
+
+      # Windows 镜像自带 PowerShell 与 Compress-Archive，直接用即可
+      - name: 构建并打包
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p glowlink-cli
+          $stage = "dist/glowlink-$env:VERSION-windows-x86_64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'target/release/glowlink.exe' $stage
+          Copy-Item 'glowlink.toml', 'README.md' $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
+          Get-ChildItem dist
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: glowlink-windows
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: 发布 Release
+    needs: [macos, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      # 私有仓库还需在 Settings → Actions → General 把 Workflow permissions 设为 Read and write
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 创建 Release 并挂上压缩包
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+              --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
+              --notes "解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。当前为 Phase 1（CLI 概念验证）：尚无端到端加密。"
+          fi
+          ls -lh dist

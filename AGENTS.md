@@ -62,8 +62,34 @@
 - 实测：默认端口 9267 下 `serve` 绑定成功（`UDP *:9267`），`list` + `send` 互通，1 MB 文件 SHA-1 一致。
 - 文档约定：`why.md` 是产品设计书，**冻结不再修改**；所有进展、决策、踩坑一律记在本文件。
 
+### 2026-09-27 【构建与发包决策 - v1.0】GitHub Actions 发布二进制
+
+- 目标：不动另一台机器上的 Rust 环境，直接从 GitHub 下载可执行文件；另一台机器是 Windows 11。
+- 触发：push `main`、push `v*` 标签、PR、`workflow_dispatch`；只有标签触发才产出 Release，其余只上传 Artifact（保留 30 天）。
+- 平台矩阵：`macos-14`（一个 job 交叉编译 aarch64 + x86_64）、`windows-latest`（x86_64-pc-windows-msvc）。Linux 暂不加，将来需要时再增一个 job 即可。
+- **按平台拆 job，而不是“一个矩阵 + `if runner.os`”，也不拆成独立 workflow 文件**：
+  - 拆 job：每个 job 的步骤全用该平台原生 shell（bash / pwsh），无分支判断，日志清晰；
+  - 不拆 workflow 文件：release 需要 `needs: [macos, windows]`，拆开会变成跨 workflow 抢同一个 Release，出现竞态。
+- **不建 `scripts/package.*`，打包逻辑内联在各自 job 的 YAML 里**：runner 镜像已经提供打包工具（Windows 自带 PowerShell + `Compress-Archive`，macOS/Ubuntu 自带 `zip`），额外脚本只会把同一套规则（拷哪些文件、包叫什么）再拄到第三个地方，改一处忘一处。
+  - 去了重：版本号提到 workflow 级 `env.VERSION`（标签用标签名，其余用 `github.run_number`），不再在 bash/pwsh 里各算一遍。
+- 平台特有部分已压到最小：只有 shell 与打包命令各写各的，其他（checkout、Rust 安装、测试、上传）全部共用。
+- 私有仓库的两个坑（必读）：
+  - **计费**：私有仓库 Actions 分钟数受限，macOS 按 **×10**、Windows 按 **×2** 折算，所以 macOS 只起一个 job 编两个架构；
+  - **权限**：release job 需要 `contents: write`，且仓库 Settings → Actions → General → Workflow permissions 必须设为 **Read and write**，否则 `gh release create` 会 403。
+- 发布流程：`git push origin main` → `git tag v0.1.4 && git push origin v0.1.4` → Actions 自动建 Release。
+- 版本号以 workspace `version` 为准（`glowlink help` 会打印），需与标签一致；产物名用标签名，手动触发时用 `dev-<短 sha>`。
+
 ## CHANGELOG
 > 这里存放项目更新历史记录
+
+### 2026-09-27 v0.1.4 — CI 与 GitHub 发包
+
+- 新增 `.github/workflows/build.yml`：macOS（arm64 + x86_64，同一 job）与 Windows（x86_64）两个独立 job，打包内联在各自 job（用镜像自带的 `zip` / `Compress-Archive`），PR/main 上传 Artifact，`v*` 标签创建 GitHub Release。
+- 新增 `README.md`（同时作为压缩包内使用说明）：下载、运行、macOS 去隔离属性、防火墙、配置文件优先级、当前阶段。
+- workspace 版本号 0.1.0 → 0.1.4，与发布标签对齐；同步 `Cargo.lock`。
+- `.gitignore` 增加 `dist/`。
+- 推 CI 前本地先验：`cargo check --locked --target x86_64-pc-windows-msvc --all-targets` 与 `--target aarch64-apple-darwin` 均通过（`cargo check` 不需要链接器）。
+- 本地实跑验证：把 YAML 里的 macOS 打包段原样在本地 bash 跑一遍，两份 zip 生成正常，解压后 `glowlink` 可执行位保留、`help`/`config` 正常运行。
 
 ### 2026-09-27 v0.1.3 — 默认发现端口改为 9267
 
@@ -122,6 +148,12 @@
   - 实例：把 `glowlink.toml` 的端口改成 9267 后，该用例立刻报出 `glowlink.toml 与内置默认不一致 (9267 vs 8888)`。
 - **同一个常量不要在两处定义**：端口默认值曾同时在 `model/packet.rs`（`DISCOVERY_PORT`）与 `model/config.rs`（`DEFAULT_DISCOVERY_PORT`）各写一份，改一处就会出现两套行为。
   - 纠正：以协议常量为唯一来源，配置层引用它；测试也改成对比常量而非硬编码数字（硬编码的数字本身就是第三份拷贝）。
+- **改 workspace 版本号后 `--locked` 构建会失败**：`Cargo.lock` 里记着各 workspace 成员的版本，改了 `Cargo.toml` 必须重生成。
+  - 纠正：先无 `--locked` 构建一次重新生成 lock 并提交，之后 CI 一律用 `--locked` 保证可复现。
+- **zip 的目录结构与可执行位很容易搞错**：
+  - 必须在 `dist` 里用相对路径打包（`cd dist && zip -r x.zip <目录>`），否则 Windows 用户解压出一堆散文件；
+  - 先 `chmod +x` 再打包，`unzip` 会还原可执行位，免得用户拿到不能运行的二进制。
+- **`cargo check --target` 不需要链接器**，是推 CI 前验证跨平台编译的最便宜手段（本地已用它先拦下 Windows/ARM 目标的编译问题）；真正链接与产物验证交给 CI 与 `scripts/package.sh`。
 
 ## 其他
 [why.md](./why.md) 存放的是项目的产品设计书，**冻结不改**；开发进展、决策、踩坑一律写在本文件（TAOLUN / CHANGELOG / 认知纠正）。
