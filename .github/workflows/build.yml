@@ -1,9 +1,9 @@
 name: 构建与发布
 
 # 触发时机：
-# - push 到 main / PR：只跑测试与构建，不产出 Artifact（避免占用账号的 Actions 存储额度）
-# - workflow_dispatch：手动触发，额外上传 Artifact，便于临时取用
-# - push 形如 v0.1.4 的标签：创建 GitHub Release，压缩包作为 Release 资产（不计入存储额度）
+# - push 到 main / PR：只跑测试与构建，不产出任何 Artifact（账号 Actions 存储额度已满，全程不碰）
+# - workflow_dispatch：手动触发，同样只验证构建
+# - push 形如 v0.1.4 的标签：各平台 job 直接创建 Release 并上传压缩包（Release 资产不计入存储额度）
 on:
   push:
     branches: [main]
@@ -11,18 +11,18 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 env:
   CARGO_TERM_COLOR: always
-  # 标签触发时用标签名，其余情况用运行序号，保证同一轮各 job 命名一致
+  # 标签触发时用标签名，手动触发用运行序号，保证同一轮各 job 命名一致
   VERSION: ${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.run_number) }}
 
 jobs:
   build:
     name: 构建 ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # 只有标签触发才需要写权限（建 Release、传资产）；其余场景只读
+    permissions:
+      contents: ${{ startsWith(github.ref, 'refs/tags/v') && 'write' || 'read' }}
     strategy:
       fail-fast: false
       matrix:
@@ -30,10 +30,8 @@ jobs:
           # 两个 macOS 架构合成一个 job：私有仓库的 macOS 计费是 ×10，少起一个 job 省一半
           - name: macOS（arm64 + x86_64）
             os: macos-14
-            shell: bash
           - name: Windows（x86_64）
             os: windows-latest
-            shell: pwsh
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +46,7 @@ jobs:
       # macOS：两个架构都用 runner 自带的 zip 打包（zip 保留可执行位）
       - name: 打包（macOS）
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           set -euo pipefail
           for arch in aarch64 x86_64; do
@@ -65,6 +64,7 @@ jobs:
       # Windows：镜像自带 PowerShell 与 Compress-Archive
       - name: 打包（Windows）
         if: runner.os == 'Windows'
+        shell: pwsh
         run: |
           cargo build --locked --release -p glowlink-cli
           $stage = "dist/glowlink-$env:VERSION-windows-x86_64"
@@ -74,65 +74,23 @@ jobs:
           Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
           Get-ChildItem dist
 
-      # 只在手动触发时上传 Artifact：日常 push / PR 不占用账号的 Actions 存储额度
-      - name: 上传产物（仅手动触发）
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: glowlink-${{ runner.os }}
-          path: dist/*.zip
-          if-no-files-found: error
-          retention-days: 7
-
-      # 标签触发时把压缩包交给 release job；Release 资产不计入存储额度
-      - name: 暂存压缩包
+      # 每个平台各自建 Release（`gh release create` 幂等处理：已存在就只传资产），
+      # 不经过 upload-artifact，因此不受账号 Actions 存储额度限制。
+      - name: 发布到 Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets-${{ runner.os }}
-          path: dist/*.zip
-          if-no-files-found: error
-          retention-days: 1
-
-  release:
-    name: 发布 Release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      # 私有仓库还需在 Settings → Actions → General 把 Workflow permissions 设为 Read and write
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: release-assets-*
-          path: dist
-          merge-multiple: true
-
-      - name: 创建 Release 并挂上压缩包
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          notes="解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。当前为 Phase 1（CLI 概念验证）：尚无端到端加密。"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
           else
+            # 两个平台并行建 Release 会有一个撞 422，此时退回只传资产
             gh release create "${GITHUB_REF_NAME}" dist/*.zip \
               --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
-              --notes "解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。当前为 Phase 1（CLI 概念验证）：尚无端到端加密。"
+              --notes "${notes}" \
+              || gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
           fi
-          ls -lh dist
-
-      # 压缩包已挂到 Release，中转用的 Artifact 立即删除，避免继续占额度
-      - name: 清理中转产物
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -uo pipefail
-          for id in $(
-            gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
-              --jq '.artifacts[] | select(.name | startswith("release-assets-")) | .id'
-          ); do
-            gh api -X DELETE "repos/${GITHUB_REPOSITORY}/actions/artifacts/${id}" || true
-          done
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
