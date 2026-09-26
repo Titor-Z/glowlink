@@ -8,7 +8,8 @@ fn config(text: &str) -> Config {
 #[test]
 fn defaults_match_shipped_config() {
     let default = Config::default();
-    assert_eq!(default.discovery_port, 8888);
+    // 端口以 packet.rs 的协议常量为唯一来源，不在配置里另写一份。
+    assert_eq!(default.discovery_port, glowlink_core::DISCOVERY_PORT);
     assert_eq!(default.transfer_port, 0);
     assert_eq!(default.receive_dir.to_string_lossy(), "./received");
     assert_eq!(default.chunk_size_kib, 64);

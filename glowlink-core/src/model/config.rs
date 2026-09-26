@@ -5,13 +5,14 @@
 //!
 //! 文件格式（扁平 `key = value`，`#` 起注释，字符串可加双引号）：
 //! ```text
-//! discovery_port = 8888
+//! discovery_port = 9267
 //! receive_dir = "./received"
 //! ```
 
 use std::path::PathBuf;
 
 use crate::model::error::{GlowError, Result};
+use crate::model::packet::DISCOVERY_PORT;
 
 /// 全部受支持的配置项，用于拼装「未知配置项」提示。
 pub const KEYS: [&str; 9] = [
@@ -26,7 +27,7 @@ pub const KEYS: [&str; 9] = [
     "ring_capacity_kib",
 ];
 
-const DEFAULT_DISCOVERY_PORT: u16 = 8888;
+const DEFAULT_DISCOVERY_PORT: u16 = DISCOVERY_PORT;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {

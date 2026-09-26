@@ -13,8 +13,8 @@ use crate::model::error::{GlowError, Result};
 pub const MAGIC: [u8; 4] = *b"GLWK";
 pub const VERSION: u8 = 1;
 
-/// 局域网发现使用的 UDP 广播端口。
-pub const DISCOVERY_PORT: u16 = 8888;
+/// 局域网发现使用的 UDP 端口（局域网内所有节点必须一致）。
+pub const DISCOVERY_PORT: u16 = 9267;
 /// 默认分块大小。
 pub const CHUNK_SIZE: usize = 64 * 1024;
 /// 单帧上限，防御恶意超长帧导致的内存爆炸。
