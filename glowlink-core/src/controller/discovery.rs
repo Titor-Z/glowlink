@@ -1,9 +1,13 @@
 //! 设备发现控制器：只依赖 [`DiscoveryTransport`] 接口，具体实现由工厂注入。
 //!
 //! 发现模式为「查询 - 单播应答」，不使用多播、不依赖 `SO_REUSEPORT`：
-//! 1. 每个节点周期性地向广播地址发送 `QUERY`（携带自身身份与传输端口）；
-//! 2. 收到 `QUERY` 的节点向其**来源地址单播**回 `HELLO`，不做二次广播；
+//! 1. 每个节点周期性地向广播地址发送 `QUERY`（携带自身身份、TCP 端口与 UDP 接收端口）；
+//! 2. 收到 `QUERY` 的节点向其**报文里声明的来源 UDP 端口单播**回 `HELLO`，不做二次广播；
 //! 3. 因此查询方与应答方在一次交互中互相认识，无中心节点，也无广播风暴。
+//!
+//! 注意应答目标用的是报文里声明的端口而非报文的源端口：
+//! 节点向外广播时会临时创建一个 socket，若直接回复该 socket 的源端口，
+//! 对方早已关闭它，应答就会丢掉。
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -11,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::model::device::{Device, DeviceBook};
 use crate::model::error::Result;
 use crate::model::packet::Hello;
+use crate::patterns::adapter::reply_target;
 use crate::patterns::singleton::DeviceIdentity;
 
 /// 一次发现交互的结果。
@@ -24,13 +29,13 @@ pub enum DiscoveryEvent {
 
 /// 发现通道（接口）。UDP 广播实现与测试替身都实现它。
 pub trait DiscoveryTransport: Send {
-    /// 本机实际用于收发的端口。
-    fn local_port(&self) -> Result<u16>;
+    /// 本机接收发现报文的端口；没有可用接收端口时为 [`None`]（降级为只发查询）。
+    fn local_port(&self) -> Option<u16>;
 
     /// 广播查询包。
     fn query(&self, hello: &Hello) -> Result<()>;
 
-    /// 向查询来源单播应答。
+    /// 向对方声明的 UDP 接收端口单播应答。
     fn reply(&self, hello: &Hello, target: SocketAddr) -> Result<()>;
 
     /// 收取一段时间内到达的发现报文。
@@ -71,7 +76,7 @@ impl DiscoveryController {
         }
     }
 
-    pub fn local_port(&self) -> Result<u16> {
+    pub fn local_port(&self) -> Option<u16> {
         self.transport.local_port()
     }
 
@@ -96,7 +101,8 @@ impl DiscoveryController {
             let (hello, from) = match event {
                 DiscoveryEvent::Query { hello, from } => {
                     if hello.id != self.identity.id {
-                        self.transport.reply(&self.hello(), from)?;
+                        // 回包目标用报文声明的接收端口，而不是广播时的临时源端口
+                        self.transport.reply(&self.hello(), reply_target(&hello, from))?;
                     }
                     (hello, from)
                 }
@@ -121,10 +127,12 @@ impl DiscoveryController {
     }
 
     fn hello(&self) -> Hello {
+        // 降级模式下没有接收端口，字段置 0；对方会回落到报文源地址。
         Hello {
             id: self.identity.id.clone(),
             name: self.identity.name.clone(),
             port: self.port,
+            reply_port: self.transport.local_port().unwrap_or(0),
         }
     }
 }

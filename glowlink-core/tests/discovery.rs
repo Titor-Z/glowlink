@@ -50,8 +50,8 @@ impl FakePeer {
 struct FakeTransport(Arc<FakePeer>);
 
 impl DiscoveryTransport for FakeTransport {
-    fn local_port(&self) -> Result<u16> {
-        Ok(8888)
+    fn local_port(&self) -> Option<u16> {
+        Some(9267)
     }
 
     fn query(&self, hello: &Hello) -> Result<()> {
@@ -70,7 +70,7 @@ impl DiscoveryTransport for FakeTransport {
 }
 
 fn hello(id: &str, name: &str, port: u16) -> Hello {
-    Hello { id: id.into(), name: name.into(), port }
+    Hello { id: id.into(), name: name.into(), port, reply_port: 9267 }
 }
 
 fn controller(peer: Arc<FakePeer>, id: &str, query_every: Duration) -> DiscoveryController {
@@ -110,7 +110,7 @@ fn queries_on_every_tick_when_period_is_zero() {
 }
 
 #[test]
-fn replies_unicast_to_query_source_and_records_peer() {
+fn replies_unicast_to_declared_reply_port() {
     let peer = Arc::new(FakePeer::default());
     peer.push_inbox(hello("peer-1", "客厅的 Mac", 4000));
 
@@ -121,7 +121,28 @@ fn replies_unicast_to_query_source_and_records_peer() {
     assert_eq!(replies.len(), 1, "收到查询必须单播应答");
     assert_eq!(replies[0].0.id, "self-id");
     assert_eq!(replies[0].0.port, 51234);
-    assert_eq!(replies[0].1, FakePeer::peer_addr(), "应答目标应是查询来源地址");
+    // 关键：目标是报文里声明的接收端口（9267），而不是广播时的临时源端口（4000）
+    assert_eq!(
+        replies[0].1,
+        "192.168.1.9:9267".parse().unwrap(),
+        "应答应发往对方声明的接收端口"
+    );
+    // 本机应答也要带上自己的接收端口，供对方回包
+    assert_eq!(replies[0].0.reply_port, 9267);
+}
+
+#[test]
+fn reply_falls_back_to_source_when_peer_has_no_listen_port() {
+    let peer = Arc::new(FakePeer::default());
+    // reply_port = 0 表示对方也是降级节点，只能回到报文的真实源地址
+    let degraded_peer = Hello { reply_port: 0, ..hello("peer-2", "降级机", 4000) };
+    peer.push_inbox(degraded_peer);
+
+    let mut discovery = controller(Arc::clone(&peer), "self-id", Duration::from_secs(60));
+    discovery.tick().unwrap();
+
+    let replies = peer.replies();
+    assert_eq!(replies[0].1, FakePeer::peer_addr(), "对方未声明端口时回退到源地址");
 }
 
 #[test]

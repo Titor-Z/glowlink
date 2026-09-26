@@ -6,7 +6,7 @@ use glowlink_core::model::device::DeviceBook;
 use glowlink_core::model::packet::Hello;
 
 fn hello(id: &str, name: &str, port: u16) -> Hello {
-    Hello { id: id.into(), name: name.into(), port }
+    Hello { id: id.into(), name: name.into(), port, reply_port: 9267 }
 }
 
 fn ip(last: u8) -> IpAddr {

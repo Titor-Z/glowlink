@@ -3,6 +3,7 @@
 //! 这里是唯一做装配（依赖注入）的地方：配置来自配置文件 + 命令行覆盖，
 //! 控制器由核心库提供，通道实现由工厂提供，视图由本 crate 的库部分提供。
 
+use std::io::{self, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,10 +22,38 @@ use glowlink_core::{
 };
 
 fn main() {
+    reset_sigpipe();
     if let Err(e) = run() {
         eprintln!("错误：{e}");
         std::process::exit(1);
     }
+}
+
+/// 恢复 SIGPIPE 的默认行为，让 `glowlink list | head` 这类下游提前关管道时静默退出。
+///
+/// Rust 启动时会把 SIGPIPE 设为忽略，于是写入已关闭的管道会返回 EPIPE，
+/// 而 `println!` 遇到写入失败会直接 panic（不经过 `Result`），"broken pipe" 就会刷一屏回溯。
+#[cfg(unix)]
+fn reset_sigpipe() {
+    // SAFETY: 在 main 开头、任何线程创建之前调用，只是把信号处理恢复为系统默认。
+    unsafe {
+        libc_signal(13, 0); // SIGPIPE = 13, SIG_DFL = 0
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn signal(signum: i32, handler: usize) -> usize;
+}
+
+/// 绑定到 libc 的 `signal`，避免为一个函数引入 libc 依赖。
+#[cfg(unix)]
+unsafe fn libc_signal(signum: i32, handler: usize) {
+    // 平台间 `signal` 的符号名一致，直接声明确保链接到 libc
+    unsafe { signal(signum, handler) };
 }
 
 fn run() -> Result<()> {
@@ -55,8 +84,8 @@ fn cmd_config(config: &Config) -> Result<()> {
 
 fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
     let timeout = search_timeout(config, args);
+    let watch = has_flag(args, "--watch");
     let discovery_port = discovery_port(config, args)?;
-    let query_every = query_interval(config);
     let factory = NativeTransportFactory;
     let identity = DeviceIdentity::global().clone();
     let transport = factory.create(discovery_port)?;
@@ -65,37 +94,95 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
         identity.clone(),
         0,
         device_timeout(config),
-        query_every,
+        query_interval(config),
     );
 
     println!("本机：{}（{}）", identity.name, truncate(&identity.id, 8));
     if discovery.degraded() {
         println!(
-            "提示：发现端口 {discovery_port} 已被占用，已降级为主动查询模式（本地端口 {}）。",
-            discovery.local_port()?
+            "提示：发现端口 {discovery_port} 已被占用，已降级为仅主动查询模式（收不到他人广播，但仍能被他人发现）。"
         );
     }
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        discovery.tick()?;
+
+    if !watch {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            discovery.tick()?;
+        }
+        print_devices(&discovery, timeout);
+        return Ok(());
     }
 
+    // --watch：持续刷新，直到 Ctrl-C。
+    if !io::stdout().is_terminal() {
+        return Err(GlowError::Usage(
+            "--watch 需要终端环境；重定向输出请改用普通的 list".into(),
+        ));
+    }
+    println!("持续监听中，Ctrl-C 退出。\n");
+    loop {
+        discovery.tick()?;
+        print_devices_live(&discovery);
+    }
+}
+
+fn print_devices(discovery: &DiscoveryController, timeout: Duration) {
     let devices = discovery.devices();
     if devices.is_empty() {
         println!("未发现设备（已等待 {} 秒）", timeout.as_secs());
-        return Ok(());
+        return;
     }
-    println!("{:<20} {:<10} {:<22} {}", "名称", "ID", "地址", "最后出现");
+    println!("{} {}", device_table_header(), self_hint());
     for device in devices {
-        println!(
-            "{:<20} {:<10} {:<22} {}s",
-            truncate(&device.name, 18),
-            device.short_id(),
-            device.addr,
-            device.last_seen.elapsed().as_secs()
-        );
+        println!("{}", device_row(&device, false));
     }
-    Ok(())
+}
+
+/// `--watch` 模式：表格原地重画，行数变化时不留下残留。
+fn print_devices_live(discovery: &DiscoveryController) {
+    let devices = discovery.devices();
+    let mut lines = vec![device_table_header(), self_hint()];
+    if devices.is_empty() {
+        lines.push("  （搜索中…）".to_string());
+    }
+    for device in &devices {
+        lines.push(device_row(device, true));
+    }
+    // \x1b[2K 清整行、\x1b[1A 上移一行，逐行覆盖上一次的内容
+    let mut out = String::from("\x1b[?25l");
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            out.push_str("\x1b[1A");
+        }
+        out.push_str("\x1b[2K\r");
+        out.push_str(line);
+        out.push('\n');
+    }
+    print!("{out}\x1b[?25h");
+    let _ = io::stdout().flush();
+}
+
+fn device_table_header() -> String {
+    format!("{:<20} {:<10} {:<22} {}", "名称", "ID", "地址", "最后出现")
+}
+
+/// 数据窗口固定为 18 列：留 2 列给省略号，避免中文名撞坏表格。
+fn device_row(device: &glowlink_core::Device, fresh: bool) -> String {
+    let name = truncate(&device.name, 18);
+    let age = device.last_seen.elapsed().as_secs();
+    let marker = if fresh && age < 2 { "●" } else { " " };
+    format!(
+        "{marker}{:<19} {:<10} {:<22} {}s",
+        name,
+        device.short_id(),
+        device.addr,
+        age
+    )
+}
+
+/// 自我提醒：设备列表里不会出现自己，避免用户疑惑“怎么少了一台”。
+fn self_hint() -> String {
+    "（本机不在列表中）".to_string()
 }
 
 fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
@@ -133,8 +220,7 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
     );
     if discovery.degraded() {
         println!(
-            "提示：发现端口 {discovery_port} 已被占用，已降级为主动查询模式（本地端口 {}）。",
-            discovery.local_port()?
+            "提示：发现端口 {discovery_port} 已被占用，已降级为仅主动查询模式（收不到他人广播，但仍能被他人发现）。"
         );
     }
     if !auto_accept {
@@ -255,8 +341,8 @@ fn print_help() {
         "萤光 GlowLink {}\n\
          \n\
          用法：\n\
-         \x20 glowlink list  [--discovery-port 端口] [--timeout 秒]\n\
-         \x20                                           扫描局域网内的设备\n\
+         \x20 glowlink list  [--discovery-port 端口] [--timeout 秒] [--watch]\n\
+         \x20                                           扫描局域网内的设备（--watch 持续刷新）\n\
          \x20 glowlink serve [--port 传输端口] [--discovery-port 端口] [--dir 目录] [--yes]\n\
          \x20                                           常驻接收方（端口默认自动分配）\n\
          \x20 glowlink send  <设备名|设备ID> <文件>… [--timeout 秒]\n\

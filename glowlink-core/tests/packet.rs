@@ -4,8 +4,8 @@ use glowlink_core::model::packet::{Frame, Hello, VERSION};
 
 fn all_frames() -> Vec<Frame> {
     vec![
-        Frame::Query(Hello { id: "abc123".into(), name: "客厅的 Mac".into(), port: 45678 }),
-        Frame::Hello(Hello { id: "abc123".into(), name: "客厅的 Mac".into(), port: 45678 }),
+        Frame::Query(Hello { id: "abc123".into(), name: "客厅的 Mac".into(), port: 45678, reply_port: 9267 }),
+        Frame::Hello(Hello { id: "abc123".into(), name: "客厅的 Mac".into(), port: 45678, reply_port: 9267 }),
         Frame::Offer { name: "设计稿.psd".into(), size: 1_048_576 },
         Frame::Accept,
         Frame::Reject { reason: "用户拒绝接收".into() },

@@ -14,7 +14,7 @@ pub const MAGIC: [u8; 4] = *b"GLWK";
 pub const VERSION: u8 = 1;
 
 /// 局域网发现使用的 UDP 端口（局域网内所有节点必须一致）。
-pub const DISCOVERY_PORT: u16 = 9267;
+pub const DISCOVERY_PORT: u16 = 19999;
 /// 默认分块大小。
 pub const CHUNK_SIZE: usize = 64 * 1024;
 /// 单帧上限，防御恶意超长帧导致的内存爆炸。
@@ -30,11 +30,14 @@ const KIND_QUERY: u8 = 7;
 
 /// 设备广播报文。
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::struct_field_names)]
 pub struct Hello {
     pub id: String,
     pub name: String,
     /// 该节点的 TCP 传输端口。
     pub port: u16,
+    /// 该节点接收发现报文的 UDP 端口；为 0 表示它只发查询（降级模式）。
+    pub reply_port: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,12 +67,14 @@ impl Frame {
                 w.str(&h.id)?;
                 w.str(&h.name)?;
                 w.u16(h.port);
+                w.u16(h.reply_port);
             }
             Frame::Hello(h) => {
                 w.u8(KIND_HELLO);
                 w.str(&h.id)?;
                 w.str(&h.name)?;
                 w.u16(h.port);
+                w.u16(h.reply_port);
             }
             Frame::Offer { name, size } => {
                 w.u8(KIND_OFFER);
@@ -109,7 +114,12 @@ impl Frame {
         let kind = r.u8()?;
         let frame = match kind {
             KIND_QUERY | KIND_HELLO => {
-                let hello = Hello { id: r.str()?, name: r.str()?, port: r.u16()? };
+                let hello = Hello {
+                    id: r.str()?,
+                    name: r.str()?,
+                    port: r.u16()?,
+                    reply_port: r.u16()?,
+                };
                 if kind == KIND_QUERY {
                     Frame::Query(hello)
                 } else {
