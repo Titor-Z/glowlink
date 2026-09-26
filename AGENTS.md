@@ -76,11 +76,24 @@
 - 私有仓库的两个坑（必读）：
   - **计费**：私有仓库 Actions 分钟数受限，macOS 按 **×10**、Windows 按 **×2** 折算，所以 macOS 只起一个 job 编两个架构；
   - **权限**：release job 需要 `contents: write`，且仓库 Settings → Actions → General → Workflow permissions 必须设为 **Read and write**，否则 `gh release create` 会 403。
-- 发布流程：`git push origin main` → `git tag v0.1.4 && git push origin v0.1.4` → Actions 自动建 Release。
+- 发布流程：`git push origin main` → `git tag v0.1.4 && git push origin v0.1.4` → 各平台 job 直接建 Release。
+- **全程不碰 Artifact**：账号 Actions 存储配额（私有仓库共 500MB）已满，`upload-artifact` 必然 412/失败。Release 资产不计入该额度，所以各平台 job 并行 `gh release upload --clobber`（先建 Release 的那个可能撞 422，退回只传资产）。
+  - 副作用（正面）：日常 push / PR 不再产出任何 Artifact，不再占用额度；需要临时产物时另行处理。
+- 实测（本地拉回来验）：三个压缩包均可下载，Windows 那份 `file` 识别为 `PE32+ executable x86-64`，macOS x86_64 那份解压后可直接运行 `help` / `config`。
 - 版本号以 workspace `version` 为准（`glowlink help` 会打印），需与标签一致；产物名用标签名，手动触发时用 `dev-<短 sha>`。
 
 ## CHANGELOG
 > 这里存放项目更新历史记录
+
+### 2026-09-27 v0.1.5 — CI 发布链路打通（仓库私有）
+
+- 仓库 `Titor-Z/glowlink` 已建（private），用 `gh` 创建并推送。
+- Workflow 改为**单一 `build` job + 平台矩阵**：macOS 双架构与 Windows 各跑一份，各自直接 `gh release upload`，彻底弃用 `upload-artifact`（账号存储配额已满，且 Release 资产不计额度）。
+- 实测结果：
+  - Windows 与 macOS 各 56 个测试全过（含 UDP 双绑定降级、真实 TCP 传输、临时目录相关用例，无平台差异问题）；
+  - `v0.1.4` Release 产出三个资产：`windows-x86_64` 210KB、`macos-aarch64` 286KB、`macos-x86_64` 293KB；
+  - 本地拉回验证：Windows 包内 `glowlink.exe` 为 `PE32+ executable x86-64`，macOS 包解压后可直接运行。
+- 修了两个 workflow 语法/机制问题（见认知纠正）。
 
 ### 2026-09-27 v0.1.4 — CI 与 GitHub 发包
 
@@ -154,6 +167,12 @@
   - 必须在 `dist` 里用相对路径打包（`cd dist && zip -r x.zip <目录>`），否则 Windows 用户解压出一堆散文件；
   - 先 `chmod +x` 再打包，`unzip` 会还原可执行位，免得用户拿到不能运行的二进制。
 - **`cargo check --target` 不需要链接器**，是推 CI 前验证跨平台编译的最便宜手段（本地已用它先拦下 Windows/ARM 目标的编译问题）；真正链接与产物验证交给 CI 与 `scripts/package.sh`。
+- **`permissions` 字段不接受表达式**：写 `contents: ${{ ... && 'write' || 'read' }}` 会让整个 workflow 直接不启动（run 显示 “likely failed because of a workflow file issue”，日志为空，极难定位）。
+  - 纠正：`permissions` 只能写固定值；需要按条件赋权的，改为在 job 级写固定 `write`（非目标场景不会执行写操作），或用 `if` 拆 job。
+  - 工具：本地装 `actionlint` 先跑一遍，一眼看出这类问题，不要靠盲推 CI 试错。
+- **Artifact 存储配额是账号级共享的硬限**：私有仓库共 500MB，超了就 `Failed to CreateArtifact: Artifact storage quota has been hit`（6-12 小时才重算）。
+  - 影响：`upload-artifact` 全线不可用，连“中转给 release job”都不行（中转也得先上传）。
+  - 规避：让各平台 job **直接**发布 Release 资产（不计入该额度），彻底绕开 Artifact。
 
 ## 其他
 [why.md](./why.md) 存放的是项目的产品设计书，**冻结不改**；开发进展、决策、踩坑一律写在本文件（TAOLUN / CHANGELOG / 认知纠正）。
