@@ -1,0 +1,11 @@
+[package]
+name = "glowlink-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "glowlink"
+path = "src/main.rs"
+
+[dependencies]
+glowlink-core = { path = "../glowlink-core" }
