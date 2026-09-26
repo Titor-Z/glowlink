@@ -16,7 +16,12 @@ pub use controller::transfer::{
 pub use model::config::Config;
 pub use model::device::{Device, DeviceBook, DeviceId};
 pub use model::error::{GlowError, Result};
-pub use model::packet::{Frame, Hello, CHUNK_SIZE, DISCOVERY_PORT};
+pub use model::packet::{Frame, Hello, Probe, CHUNK_SIZE, DISCOVERY_PORT, VERSION_STR};
+pub use model::ports::{bind_udp_with_fallback, resolve_udp_port, BindOutcome};
+pub use model::probe::{
+    bind_or_identify, compare_versions, decide_port, identify, PortDecision, PortOwner,
+    VersionVerdict,
+};
 pub use model::ring::{RingBuffer, SharedRing};
 pub use patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,

@@ -15,6 +15,7 @@ use glowlink_core::patterns::singleton::DeviceIdentity;
 struct FakePeer {
     queries: Mutex<Vec<Hello>>,
     replies: Mutex<Vec<(Hello, SocketAddr)>>,
+    probe_replies: Mutex<Vec<(glowlink_core::Probe, SocketAddr)>>,
     inbox: Mutex<Vec<DiscoveryEvent>>,
 }
 
@@ -44,6 +45,10 @@ impl FakePeer {
     fn replies(&self) -> Vec<(Hello, SocketAddr)> {
         self.replies.lock().unwrap().clone()
     }
+
+    fn probe_replies(&self) -> Vec<(glowlink_core::Probe, SocketAddr)> {
+        self.probe_replies.lock().unwrap().clone()
+    }
 }
 
 /// 适配器：把共享的测试替身接到控制器需要的接口上。
@@ -61,6 +66,11 @@ impl DiscoveryTransport for FakeTransport {
 
     fn reply(&self, hello: &Hello, target: SocketAddr) -> Result<()> {
         self.0.replies.lock().unwrap().push((hello.clone(), target));
+        Ok(())
+    }
+
+    fn reply_probe(&self, probe: &glowlink_core::Probe, target: SocketAddr) -> Result<()> {
+        self.0.probe_replies.lock().unwrap().push((probe.clone(), target));
         Ok(())
     }
 
@@ -194,5 +204,28 @@ fn prunes_devices_that_stop_answering() {
 
     thread::sleep(Duration::from_millis(90));
     assert_eq!(discovery.tick().unwrap(), 0, "超时设备应自动下线");
+    assert!(discovery.devices().is_empty());
+}
+
+#[test]
+fn answers_probe_so_port_selfcheck_can_identify_us() {
+    // 端口自检依赖这一点：已经在监听的节点必须能回应 PROBE，
+    // 否则后来者会把自己人误判成“残留占用”。
+    let peer = Arc::new(FakePeer::default());
+    peer.inbox
+        .lock()
+        .unwrap()
+        .push(DiscoveryEvent::Probe { from: FakePeer::peer_addr() });
+
+    let mut discovery = controller(Arc::clone(&peer), "self-id", Duration::from_secs(60));
+    discovery.tick().unwrap();
+
+    let answers = peer.probe_replies();
+    assert_eq!(answers.len(), 1, "收到 PROBE 必须回 PONG");
+    assert_eq!(answers[0].0.pid, std::process::id());
+    assert_eq!(answers[0].0.version, glowlink_core::model::packet::VERSION_STR);
+    assert_eq!(answers[0].0.reply_port, 9267, "PONG 应带上自己的监听端口");
+    assert_eq!(answers[0].1, FakePeer::peer_addr());
+    // 探测不应被当成设备记录
     assert!(discovery.devices().is_empty());
 }

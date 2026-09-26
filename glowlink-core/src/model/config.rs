@@ -5,7 +5,7 @@
 //!
 //! 文件格式（扁平 `key = value`，`#` 起注释，字符串可加双引号）：
 //! ```text
-//! discovery_port = 19999
+//! discovery_port = 9267
 //! receive_dir = "./received"
 //! ```
 

@@ -11,10 +11,13 @@ use std::io::{Read, Write};
 use crate::model::error::{GlowError, Result};
 
 pub const MAGIC: [u8; 4] = *b"GLWK";
+/// 协议版本号（线上二进制用的单字节）。
 pub const VERSION: u8 = 1;
+/// 软件版本字符串，用于端口自检时判断"运行中的是不是旧版本"。
+pub const VERSION_STR: &str = env!("CARGO_PKG_VERSION");
 
 /// 局域网发现使用的 UDP 端口（局域网内所有节点必须一致）。
-pub const DISCOVERY_PORT: u16 = 19999;
+pub const DISCOVERY_PORT: u16 = 9267;
 /// 默认分块大小。
 pub const CHUNK_SIZE: usize = 64 * 1024;
 /// 单帧上限，防御恶意超长帧导致的内存爆炸。
@@ -27,6 +30,10 @@ const KIND_REJECT: u8 = 4;
 const KIND_CHUNK: u8 = 5;
 const KIND_DONE: u8 = 6;
 const KIND_QUERY: u8 = 7;
+/// 探测本机是否已有节点监听（端口自检用，不属于正常发现流程）。
+const KIND_PROBE: u8 = 8;
+/// 对探测的应答，携带版本与 PID，用于识别“是我们自己的旧进程”。
+const KIND_PONG: u8 = 9;
 
 /// 设备广播报文。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,6 +60,26 @@ pub enum Frame {
     Chunk { offset: u64, data: Vec<u8>, crc: u32 },
     /// 传输结束，携带整文件大小与 CRC32。
     Done { size: u64, crc: u32 },
+    /// 端口自检探测：问“这个端口上的监听者是不是我们自己人”。
+    Probe(Probe),
+    /// 探测应答：告诉对方我们的版本与进程号。
+    Pong(Probe),
+}
+
+/// 端口自检握手载荷。
+///
+/// 复用的是与 `Hello` 同一套“身份 + 端口”字段，外加版本与 PID：
+/// 收到 `Pong` 后能直接判断是“自己的旧进程”还是“别的程序”。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Probe {
+    /// 发送方身份 id，便于日志区分。
+    pub id: String,
+    /// 软件版本字符串（如 `0.1.5`）。
+    pub version: String,
+    /// 进程号；用于判断“已在运行”时是否需要顶替。
+    pub pid: u32,
+    /// 发送方接收发现报文的 UDP 端口；0 表示未监听。
+    pub reply_port: u16,
 }
 
 impl Frame {
@@ -97,6 +124,14 @@ impl Frame {
                 w.u8(KIND_DONE);
                 w.u64(*size);
                 w.u32(*crc);
+            }
+            Frame::Probe(p) => {
+                w.u8(KIND_PROBE);
+                w.probe(p)?;
+            }
+            Frame::Pong(p) => {
+                w.u8(KIND_PONG);
+                w.probe(p)?;
             }
         }
         Ok(w.buf)
@@ -149,6 +184,8 @@ impl Frame {
                 size: r.u64()?,
                 crc: r.u32()?,
             },
+            KIND_PROBE => Frame::Probe(r.probe()?),
+            KIND_PONG => Frame::Pong(r.probe()?),
             other => return Err(GlowError::Protocol(format!("未知帧类型：{other}"))),
         };
         Ok(frame)
@@ -215,6 +252,14 @@ impl Writer {
     fn raw(&mut self, b: &[u8]) {
         self.buf.extend_from_slice(b);
     }
+
+    fn probe(&mut self, p: &Probe) -> Result<()> {
+        self.str(&p.id)?;
+        self.str(&p.version)?;
+        self.u32(p.pid);
+        self.u16(p.reply_port);
+        Ok(())
+    }
 }
 
 struct Reader<'a> {
@@ -261,5 +306,14 @@ impl<'a> Reader<'a> {
         let bytes = self.raw(len)?;
         String::from_utf8(bytes.to_vec())
             .map_err(|_| GlowError::Protocol("字符串字段不是合法 UTF-8".into()))
+    }
+
+    fn probe(&mut self) -> Result<Probe> {
+        Ok(Probe {
+            id: self.str()?,
+            version: self.str()?,
+            pid: self.u32()?,
+            reply_port: self.u16()?,
+        })
     }
 }

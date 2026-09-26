@@ -3,4 +3,6 @@ pub mod crc;
 pub mod device;
 pub mod error;
 pub mod packet;
+pub mod ports;
+pub mod probe;
 pub mod ring;

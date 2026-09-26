@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::model::device::{Device, DeviceBook};
 use crate::model::error::Result;
-use crate::model::packet::Hello;
+use crate::model::packet::{Hello, Probe};
 use crate::patterns::adapter::reply_target;
 use crate::patterns::singleton::DeviceIdentity;
 
@@ -25,6 +25,8 @@ pub enum DiscoveryEvent {
     Query { hello: Hello, from: SocketAddr },
     /// 收到他人对我们查询的应答。
     Reply { hello: Hello, from: SocketAddr },
+    /// 收到端口自检探测：需要回 PONG，声明“这个端口是我们自己人”。
+    Probe { from: SocketAddr },
 }
 
 /// 发现通道（接口）。UDP 广播实现与测试替身都实现它。
@@ -37,6 +39,9 @@ pub trait DiscoveryTransport: Send {
 
     /// 向对方声明的 UDP 接收端口单播应答。
     fn reply(&self, hello: &Hello, target: SocketAddr) -> Result<()>;
+
+    /// 回应端口自检的 `PROBE`。
+    fn reply_probe(&self, probe: &Probe, target: SocketAddr) -> Result<()>;
 
     /// 收取一段时间内到达的发现报文。
     fn poll(&self, wait: Duration) -> Result<Vec<DiscoveryEvent>>;
@@ -107,6 +112,17 @@ impl DiscoveryController {
                     (hello, from)
                 }
                 DiscoveryEvent::Reply { hello, from } => (hello, from),
+                // 端口自检探测：回一个 PONG 告诉对方“这个端口是我们自己人”。
+                DiscoveryEvent::Probe { from } => {
+                    let pong = Probe {
+                        id: self.identity.id.clone(),
+                        version: crate::model::packet::VERSION_STR.to_string(),
+                        pid: std::process::id(),
+                        reply_port: self.transport.local_port().unwrap_or(0),
+                    };
+                    self.transport.reply_probe(&pong, from)?;
+                    continue;
+                }
             };
             if hello.id == self.identity.id {
                 continue;

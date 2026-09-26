@@ -14,6 +14,7 @@ use glowlink_cli::config;
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::CliView;
 use glowlink_core::controller::transfer::TransferListener;
+use glowlink_core::model::probe::{compare_versions, identify, PortOwner, VersionVerdict};
 use glowlink_core::patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };
@@ -99,9 +100,7 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
 
     println!("本机：{}（{}）", identity.name, truncate(&identity.id, 8));
     if discovery.degraded() {
-        println!(
-            "提示：发现端口 {discovery_port} 已被占用，已降级为仅主动查询模式（收不到他人广播，但仍能被他人发现）。"
-        );
+        println!("{}", degraded_notice(discovery_port));
     }
 
     if !watch {
@@ -123,6 +122,40 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
     loop {
         discovery.tick()?;
         print_devices_live(&discovery);
+    }
+}
+
+/// 降级提示：用 PROBE/PONG 握手区分四种情况。
+///
+/// 只靠“端口被占”无法给出有用信息，而这几种情况的处理方式完全不同：
+/// 自家节点属于正常的多实例场景，别人占用需要用户处理，
+/// 残留绑定则是 macOS 内核问题（重启即好）。
+fn degraded_notice(port: u16) -> String {
+    match identify(port) {
+        Ok(PortOwner::Ours(p)) => match compare_versions(env!("CARGO_PKG_VERSION"), &p.version) {
+            VersionVerdict::RunningIsNewer => format!(
+                "[信息] 发现端口 {port} 上已有更新的节点在运行（v{}，PID {}），本进程以仅查询模式工作。",
+                p.version, p.pid
+            ),
+            VersionVerdict::RunningIsOlder => format!(
+                "[信息] 发现端口 {port} 上运行的是旧版本（v{}，PID {}），本进程以仅查询模式工作。",
+                p.version, p.pid
+            ),
+            VersionVerdict::Same => format!(
+                "[信息] 端口 {port} 上已有本机节点在运行（v{}，PID {}），本进程以仅查询模式工作（收不到广播，但仍能被对方发现）。",
+                p.version, p.pid
+            ),
+        },
+        // 真收到了非协议应答：确实是别的程序
+        Ok(PortOwner::Stranger) => format!(
+            "[警告] 端口 {port} 被其他程序占用，建议使用 --discovery-port 切换端口。"
+        ),
+        // 无人应答但绑不上：内核残留绑定或防火墙，不能说成“被其它程序占用”
+        Ok(PortOwner::Stale) => format!(
+            "[警告] 端口 {port} 绑定异常（可能是内核残留或防火墙拦截），建议使用 --discovery-port 切换端口。"
+        ),
+        Ok(PortOwner::Free) => String::new(),
+        Err(e) => format!("[警告] 端口 {port} 占用情况探测失败：{e}"),
     }
 }
 
@@ -201,7 +234,14 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
     let listener = factory.listen(port)?;
     let port = listener.local_port()?;
     let identity = DeviceIdentity::global().clone();
-    let transport = factory.create(discovery_port)?;
+    // serve 必须跑起来：发现端口被占时顺延，只打一句 [信息]。
+    // decide_port 已完成探测与绑定，这里**不能再探测一次**：
+    // 新端口此刻正被自己持有，重探只会把自己误判成“绑定异常”。
+    let decision = glowlink_core::model::probe::decide_port(discovery_port)?;
+    if let Some(notice) = decision.notice() {
+        println!("{notice}");
+    }
+    let transport = factory.from_bound_socket(decision)?;
     let mut discovery = DiscoveryController::new(
         transport,
         identity.clone(),
@@ -218,11 +258,6 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
         identity.name,
         dir.display()
     );
-    if discovery.degraded() {
-        println!(
-            "提示：发现端口 {discovery_port} 已被占用，已降级为仅主动查询模式（收不到他人广播，但仍能被他人发现）。"
-        );
-    }
     if !auto_accept {
         println!("收到文件时会先询问是否接收（--yes 可自动接收）。");
     }

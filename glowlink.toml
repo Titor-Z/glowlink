@@ -7,7 +7,7 @@
 
 # 发现端口：局域网内所有节点必须一致，否则互相看不见。
 # 改这里即同时作为工程默认；内置默认值取自 packet.rs 的 DISCOVERY_PORT。
-discovery_port = 19999
+discovery_port = 9267
 
 # TCP 传输端口：0 表示由系统自动分配（推荐，避免端口冲突）。
 transfer_port = 0

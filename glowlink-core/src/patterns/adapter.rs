@@ -7,7 +7,8 @@ use std::time::Duration;
 use crate::controller::discovery::{DiscoveryEvent, DiscoveryTransport};
 use crate::controller::transfer::{TransferListener, TransferTransport};
 use crate::model::error::{GlowError, Result};
-use crate::model::packet::{Frame, Hello, MAX_FRAME};
+use crate::model::packet::{Frame, Hello, Probe, MAX_FRAME};
+use crate::model::probe::PortDecision;
 
 /// 回环地址：广播包不保证回到本机，额外单发一份让同机多节点也能互相发现。
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -20,23 +21,36 @@ const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 pub struct UdpDiscoveryAdapter {
     /// 用于收发的套接字；降级模式下只用于发送。
     socket: UdpSocket,
-    port: u16,
     degraded: bool,
+    /// 对外宣告使用的端口（用于发送到广播地址）。
+    announced_port: u16,
 }
 
 impl UdpDiscoveryAdapter {
+    /// 从已完成端口决策的结果创建适配器（`serve` / 守护进程使用）。
+    pub fn from_decision(decision: PortDecision) -> Result<Self> {
+        // 顺延只是“没用上约定端口”，并不代表失去监听能力：
+        // 这个套接字确实是绑上的，所以 degraded 必须为 false，
+        // 否则 local_port() 会返回 None，PONG 里的 reply_port 就变成 0。
+        Ok(UdpDiscoveryAdapter {
+            socket: decision.socket,
+            degraded: false,
+            announced_port: decision.preferred,
+        })
+    }
+
     /// 绑定发现端口；端口已被占用时自动降级为仅主动查询。
     pub fn bind(port: u16) -> Result<Self> {
         match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(socket) => {
                 socket.set_broadcast(true)?;
-                Ok(UdpDiscoveryAdapter { socket, port, degraded: false })
+                Ok(UdpDiscoveryAdapter { socket, degraded: false, announced_port: port })
             }
             Err(e) if e.kind() == ErrorKind::AddrInUse => {
                 // 不绑定固定端口，让 UDP 栈在每次发送时分配临时源端口。
                 let socket = UdpSocket::bind(("0.0.0.0", 0))?;
                 socket.set_broadcast(true)?;
-                Ok(UdpDiscoveryAdapter { socket, port, degraded: true })
+                Ok(UdpDiscoveryAdapter { socket, degraded: true, announced_port: port })
             }
             Err(e) => Err(GlowError::Io(e)),
         }
@@ -65,16 +79,21 @@ impl DiscoveryTransport for UdpDiscoveryAdapter {
 
     fn query(&self, hello: &Hello) -> Result<()> {
         let bytes = Frame::Query(hello.clone()).encode()?;
-        self.send_to(&bytes, (Ipv4Addr::BROADCAST, self.port))?;
+        // 广播到“对外宣告的端口”：局域网内其它节点监听的都是那个端口，
+        // 即使我们自己因为冲突换了端口，别人也要能按约定端口收到查询。
+        self.send_to(&bytes, (Ipv4Addr::BROADCAST, self.announced_port))?;
         // 同机多节点：广播不一定回到本机，补发回环
-        self.send_to(&bytes, (LOOPBACK, self.port))?;
-        // 降级节点没有监听端口，但在回环上仍需要能被同机的正常节点发现：
-        // 上面的回环包到达的仍是 self.port，正常节点会收到并据 reply_port 回包。
+        self.send_to(&bytes, (LOOPBACK, self.announced_port))?;
         Ok(())
     }
 
     fn reply(&self, hello: &Hello, target: SocketAddr) -> Result<()> {
         let bytes = Frame::Hello(hello.clone()).encode()?;
+        self.send_to(&bytes, target)
+    }
+
+    fn reply_probe(&self, probe: &Probe, target: SocketAddr) -> Result<()> {
+        let bytes = Frame::Pong(probe.clone()).encode()?;
         self.send_to(&bytes, target)
     }
 
@@ -92,6 +111,10 @@ impl DiscoveryTransport for UdpDiscoveryAdapter {
                     }
                     Ok(Frame::Hello(hello)) => {
                         events.push(DiscoveryEvent::Reply { hello, from: peer })
+                    }
+                    // 端口自检探测：交给控制器回 PONG，证明“这个端口是我们自己人”
+                    Ok(Frame::Probe(_)) => {
+                        events.push(DiscoveryEvent::Probe { from: peer })
                     }
                     // 非本协议报文一律忽略，不因外部噪声中断发现流程。
                     _ => continue,
