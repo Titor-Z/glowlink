@@ -7,8 +7,7 @@
 //! Windows = DWM 组合属性），窗内再叠 `backdrop_filter` 做卡片玻璃。
 
 use gpui::{
-    div, prelude::*, px, AnimationExt, App, Context, DragMoveEvent, ElementId, IntoElement,
-    MouseButton,
+    div, prelude::*, px, App, Context, DragMoveEvent, ElementId, IntoElement, MouseButton,
     ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds,
     WindowOptions,
 };
@@ -18,8 +17,10 @@ use std::time::Duration;
 
 use crate::controller::{DeviceSource, DeviceView, IpcSource, PairingSource};
 use crate::model::connect::{self, Connection};
-use crate::model::drag::DeviceDrag;
-use crate::model::layout::{self, NodeSize};
+use crate::model::drag::{self, DeviceDrag};
+use crate::model::layout;
+use crate::model::motion::{Ghost, Motion};
+use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::DropState;
@@ -28,6 +29,20 @@ use crate::view::{dropzone, node, paircard, titlebar, wire};
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
 const SYNC_INTERVAL: Duration = Duration::from_millis(300);
+
+/// 物理步进的最快快周期（有那么一点点运动时用）。
+const TICK_FAST: Duration = Duration::from_millis(16);
+/// 只剩漂浮时用的慢周期：漂移只有 ±3px / 7s（≈0.85px/s），
+/// 50ms 一帧等于每帧动 0.04px——看不出差别，但重绘量掉到三分之一。
+///
+/// 为什么要分档：实测「永远 16ms」在空闲态就吃掉 60% 的 CPU
+/// （玻璃+阴影整窗重绘每帧都跑）。壁纸级的小动作用不着 60fps。
+const TICK_SLOW: Duration = Duration::from_millis(50);
+
+/// 中心盘染色**亮起**的响应时间（秒）：够快才像「跟手」，判定一变就亮。
+const TINT_RISE: f32 = 0.08;
+/// 熄灭慢一些：边界上抖一下不会变成闪烁。
+const TINT_FALL: f32 = 0.25;
 
 /// 应用根视图。**只读快照**：不持有业务状态，数据由 `controller` 提供。
 pub struct AppRoot {
@@ -41,10 +56,11 @@ pub struct AppRoot {
     service_on: bool,
     /// 当前显示的设备（快照）。
     devices: Vec<DeviceView>,
-    /// 设备在环带上的位置（与 `devices` 同序）。
+    /// 漂浮设备的位置（**按设备 ID 记**，不按下标）。
     ///
+    /// 按下标会在「拖起来的那台被移出集合」时整列错位——别人的坑会挪到隔壁身上。
     /// 只在**设备集合变化**时重算：每帧重算会让所有节点跟着抖，那就不叫漂浮了。
-    placement: layout::Placement,
+    floating: Vec<(String, layout::Point, f32)>,
     /// 上次布局用的设备 ID，用来判断「集合是否真变了」。
     placed_ids: Vec<String>,
     /// 底部拖拽区的状态（拖入/拒收由 `FileDropEvent` 驱动，见下一步）。
@@ -55,29 +71,36 @@ pub struct AppRoot {
     pairing: Option<Arc<dyn PairingSource>>,
     /// 正在被拖动的那台设备 ID（只用于压暗它自己）。
     dragging: Option<String>,
-    /// 拖动中指针的**全窗坐标**（落点是否在中心盘里由它算，不另存布尔值）。
+    /// 拖动中那枚气泡**当前的中心**（图区坐标）。
+    ///
+    /// 存的是气泡而不是指针：落点判定看的是「这枚东西有没有落到盘上」，
+    /// 而且拖动要带**抓取偏移**（按下时手指在盘的哪个位置，之后一直保持）。
     /// 松手落在别处时由根节点的 mouse_up 清掉。
     drag_at: Option<layout::Point>,
+    /// 抓取偏移 = 按下那一刻「气泡中心 − 指针」。拖动时 `气泡 = 指针 + 偏移`。
+    grab_offset: layout::Point,
     /// 本机发起、正在等的配对（编号 + 对端 + 码 + 状态）。
     pair: Option<PairingCard>,
-    /// 位置变化的一次性过渡（回弹、被撞开、连接重排都走它）。
+    /// 全场运动状态：意图 → 弹簧 → 接触约束 → 只读位置（见 `model::motion`）。
     ///
-    /// `seq` 让每一次都换一个动画 id → 每次都重播；播完（或超时）就丢掉，
-    /// 交回给漂浮动画。
-    moves: Vec<MoveAnim>,
-    move_seq: u64,
-    /// 上一次渲染时各设备的目标点（用来判断「位置变了没有」）。
-    shown: Vec<(String, layout::Point)>,
-    /// 上一次为拖动而重排布局时的指针位置（节流用）。
-    last_relayout: Option<layout::Point>,
-    /// 拖动时被**推开**的节点（按设备 ID 记当前落点）。
-    contacts: Vec<(String, layout::Point)>,
-    /// 染色层是否曾经出现过（没出现过就压根不渲染——否则首帧会闪一下）。
-    tint_shown: bool,
-    /// 每次「进入命中」递增：过渡动画的 id 靠它每次都换新，才会重播。
-    tint_seq: u64,
-    /// 上一次命中时的目标色：淡出时用它，免得颜色在淡出途中跳回品牌蓝。
+    /// 位置**只住在这里**。渲染层不再有「该用哪个位置」的 if，
+    /// 也不再有「动画 id 里塞了什么状态」这类只在运行时才暴露的坑。
+    motion: Motion,
+    /// 上一次物理步进的时刻（算 dt；切走再切回来时 dt 会被弹簧内部夹住）。
+    last_tick: std::time::Instant,
+    /// 中心盘染色层的不透明度：0 = 没拖到中心，1 = 拖到中心。
+    /// 也是一个弹簧（同一个原语），不再用「动画 id 带命中序号」那套。
+    tint: Spring,
+    /// 「现在算不算落在中心盘上」。**高亮与吸附共用这一个判断**
+    /// （每帧由 `over_center()` 更新）：亮起是承诺，松手就必须吸上。
+    snapping: bool,
+    /// 正被拖动的那台的辉光色（染色用）。
     tint_tone: gpui::Rgba,
+    /// 呼吸圈的相位（`0..1`）。**由我们的时钟推进**，不用 gpui 的 repeat 动画
+    /// （那会让框架持续请求整窗重绘）。
+    halo: f32,
+    /// 品牌辉光的相位（`0..1`）：和呼吸一样由界面时钟推进。
+    brand_phase: f32,
     /// 已「拖到一起」的设备（连接环上的方位）。
     connections: Vec<Connection>,
     /// 断开之后就地留下的落点（按设备 ID 记）。
@@ -85,16 +108,6 @@ pub struct AppRoot {
     /// 是**种子**而不是钉子：它不回原位，但也不能压在中心盘或别人身上，
     /// 所以交给排斥迭代推到最近的合法位置。
     seeds: Vec<layout::Seed>,
-}
-
-/// 一次位置过渡：从 `from` 滑到 `to`。
-#[derive(Clone, Debug)]
-struct MoveAnim {
-    id: String,
-    from: layout::Point,
-    to: layout::Point,
-    seq: u64,
-    started: std::time::Instant,
 }
 
 /// 界面要显示的配对卡内容。
@@ -130,28 +143,26 @@ impl AppRoot {
             service,
             service_on,
             devices: devices.clone(),
-            placement: layout::Placement::default(),
+            floating: Vec::new(),
             placed_ids: Vec::new(),
             drop: DropState::Idle,
             selected: None,
             pairing,
             dragging: None,
             drag_at: None,
+            grab_offset: layout::Point { x: 0.0, y: 0.0 },
             pair: None,
-            moves: Vec::new(),
-            move_seq: 0,
-            shown: Vec::new(),
-            last_relayout: None,
-            contacts: Vec::new(),
-            tint_shown: false,
-            tint_seq: 0,
+            motion: Motion::default(),
+            last_tick: std::time::Instant::now(),
+            tint: Spring::new(0.0, ZETA_CRITICAL, TINT_RISE),
+            snapping: false,
             tint_tone: theme::NODE_SELF,
+            halo: 0.0,
+            brand_phase: 0.0,
             connections: Vec::new(),
             seeds: Vec::new(),
         };
-        let (placement, placed_ids) = root.layout_for(&devices);
-        root.placement = placement;
-        root.placed_ids = placed_ids;
+        root.refresh_floating();
         root
     }
 
@@ -163,162 +174,173 @@ impl AppRoot {
             .map(|device| theme::device_tone(device.kind))
     }
 
-    /// 松手：没落到中心盘上就让它从落点飞回原位。
+    /// 松手：清掉拖动态，让弹簧把它从**当前位置**送回目标点。
     ///
-    /// 位置**永远回原位**，不留在拖到的地方：位置是由设备 ID 派生的
-    /// （`layout::place_devices`），留在半路会与别人重叠、也让「哪个位置是哪台」
-    /// 的记忆失效。飞回去而不是跳回去，是为了让人看清「它回到哪儿了」。
+    /// 速度不用手动交接：拖起来的那枚是运动学的，它的速度本来就是指针的速度
+    /// （见 `Motion::step` 的 ②），松手后弹簧接着那个速度走——这就是「拖→动画
+    /// 之间没有缝」。只把阻尼比调低一点，让带着动量松手有一点点回弹。
     fn settle_drag(&mut self) {
-        if let (Some(id), Some(from)) = (self.dragging.take(), self.drag_at.take()) {
-            // 目标是它本来的落点（它从没真的移动过，所以这里就是「飞回去」）
-            if let Some(to) = self.target_of(&id) {
-                self.push_move(&id, from, to);
-            }
+        if let Some(id) = self.dragging.take() {
+            self.motion.set_zeta(&id, ZETA_MOMENTUM);
         }
         self.drag_at = None;
+        self.refresh_floating();
     }
 
-    /// 重算漂浮布局（拖动时把拖影当成移动的障碍物），并记下由此产生的位置过渡。
+    /// 重算**意图**（谁想去哪）+ 每枚**当前**的半径，写进运动系统。
     ///
-    /// 拖动时**每一小段路就重算一次**：别的气泡被顶开、让路，松手后再漂回去。
-    /// 这一步必须在拖动回调里做——等 300ms 的轮询去算，手感就是「粘的」。
+    /// 这里只产出意图。几何（接触、碰撞）一律由 [`Motion`] 按**当前位置与当前半径**
+    /// 算——静置点是「想去的地方」，不是「它在的地方」；拿它当几何输入就会出现
+    /// 「还没碰到就弹开」。
+    ///
+    /// 拖动中**不需要**每帧调它：静置布局跟指针位置无关（接触由运动系统负责），
+    /// 所以拖动时它只在「拖起来/放下」这两个瞬间各跑一次——布局不会跟着指针抖。
     fn refresh_floating(&mut self) {
-        let (placement, placed_ids) = self.layout_for(&self.devices);
-        self.placement = placement;
-        self.placed_ids = placed_ids;
-        self.apply_contacts();
-        self.track_moves();
+        self.floating = self.layout_for(&self.devices);
+        // 本机盘也进物理世界（**钉死的不动体**）：它会推别人，别人推不动它。
+        // 它一缩小/长大，周围的气泡就被挤开——不然恢复全尺寸时会盖住它们。
+        let self_scale = if self.connections.is_empty() { 1.0 } else { connect::CONNECTED_SCALE };
+        let mut wanted: Vec<(String, layout::Point, f32)> =
+            vec![(layout::SELF_ID.to_string(), layout::self_center(), 0.0)];
+        wanted.extend(self.devices.iter().map(|device| {
+                // 拖起来的那枚不在漂浮表里（它不占坑）：沿用它**当前**的位置，
+                // 这样 `sync` 不会因为「它不在墙上」而把它从运动系统里删掉
+                let point = self
+                    .target_of(&device.id)
+                    .or_else(|| self.motion.position(&device.id))
+                    .unwrap_or_else(layout::self_center);
+                (device.id.clone(), point, self.phase_of(&device.id))
+            }));
+        self.motion.sync(&wanted);
+        for (id, point, _) in &wanted {
+            self.motion.set_target(id, *point);
+            self.motion.set_drifting(id, false);
+        }
+        for device in &self.devices {
+            let id = device.id.as_str();
+            self.motion.set_radius(id, self.radius_of(id));
+            let drifting = !self.is_connected(id) && self.dragging.as_ref() != Some(&device.id);
+            self.motion.set_drifting(id, drifting);
+        }
+        self.motion.set_radius(layout::SELF_ID, layout::SELF_RADIUS * self_scale);
+        self.motion.set_pinned(layout::SELF_ID, true);
+        self.placed_ids = self.devices.iter().map(|d| d.id.clone()).collect();
     }
 
-    /// 拖动时：把**真正被压到**的节点推开（局部、连续，不重新求解全局布局）。
+    /// 这台设备「想去哪」：已连接 → 连接环上；在漂浮表里 → 散布算法的静置点。
     ///
-    /// 为什么不做全局重排：那是「求平衡点」，会让远处的节点也跟着挪，
-    /// 表现就是「都没遇到就碰、而且碰还都碰」。接触响应只该发生在接触的那几枚上。
-    fn apply_contacts(&mut self) {
-        self.contacts.clear();
-        let Some(ghost) = self.drag_at else {
-            return;
-        };
-        // 拖影比原件大一点（抓起时放大），接触判定要按它的实际尺寸来
-        let ghost_radius = layout::DEVICE_RADIUS * crate::model::drag::GHOST_SCALE;
-        let resting: Vec<layout::Point> = self.placement.centers.clone();
-        let pushed = layout::resolve_contacts(
-            &resting,
-            layout::DEVICE_RADIUS,
-            &[(ghost, ghost_radius)],
-        );
-        for (index, device) in self.devices.iter().enumerate() {
-            let (Some(rest), Some(now)) = (resting.get(index), pushed.get(index)) else {
-                continue;
-            };
-            if layout::distance(*rest, *now) > 0.5 {
-                self.contacts.push((device.id.clone(), *now));
-            }
-        }
-    }
-
-    /// 这台设备此刻被推开到了哪儿（`None` = 它没被碰到）。
-    fn contact_point(&self, id: &str) -> Option<layout::Point> {
-        self.contacts.iter().find(|(cid, _)| cid == id).map(|(_, p)| *p)
-    }
-
-    /// 拖动时这次重算要不要做（指针走了够远才算，免得每个像素都重排）。
-    fn should_relayout(&self, point: layout::Point) -> bool {
-        match self.last_relayout {
-            Some(last) => layout::distance(last, point) >= 3.0,
-            None => true,
-        }
-    }
-
-    /// 比对「上一次渲染的目标点」，变了就记一笔过渡。
-    ///
-    /// 这是所有「自动位移」的统一入口：碰撞把它挤开、断开后归位、连接重排……
-    /// 全都走同一条过渡动画，所以手感一致（不会一处弹开一处瞬移）。
-    fn track_moves(&mut self) {
-        // 先把目标点全算出来（`self` 只读），再统一记过渡（要改 `self`）
-        let targets: Vec<(String, layout::Point)> = self
-            .devices
-            .iter()
-            .filter_map(|device| Some((device.id.clone(), self.target_of(&device.id)?)))
-            .collect();
-        for (id, point) in &targets {
-            if let Some((_, old)) = self.shown.iter().find(|(shown_id, _)| shown_id == id) {
-                self.push_move(id, *old, *point);
-            }
-        }
-        self.shown = targets;
-    }
-
-    /// 这台设备此刻该待的点（已连接 → 环上；否则散布算法的结果）。
+    /// 注意：它只是**意图**，不是几何。拖动中的那枚不在漂浮表里（它不占坑），
+    /// 所以这里返回 `None`，由调用方沿用它当前的位置。
     fn target_of(&self, id: &str) -> Option<layout::Point> {
         if let Some(point) = self.ring_point(id) {
             return Some(point);
         }
-        let index = self.devices.iter().position(|d| d.id == id)?;
-        Some(
-            self.placement
-                .centers
-                .get(index)
-                .copied()
-                .unwrap_or_else(layout::self_center),
-        )
+        self.floating
+            .iter()
+            .find(|(fid, _, _)| fid == id)
+            .map(|(_, point, _)| *point)
     }
 
-    /// 记一笔位置过渡（同一台设备的旧记录作废，免得抢坐标）。
-    fn push_move(&mut self, id: &str, from: layout::Point, to: layout::Point) {
-        if layout::distance(from, to) < 0.5 {
+    /// 漂浮相位（不在漂浮表里时退回 0：相位差只是让漂浮错开，不影响正确性）。
+    fn phase_of(&self, id: &str) -> f32 {
+        self.floating
+            .iter()
+            .find(|(fid, _, _)| fid == id)
+            .map(|(_, _, phase)| *phase)
+            .unwrap_or(0.0)
+    }
+
+    /// 一台设备**当前**的盘半径：拖着的是拖影那个大小，已连接的是缩小后的。
+    ///
+    /// 半径也属于「几何」，必须跟着当前状态走：连接后盘小了一圈，
+    /// 还用名义半径去判定，就会「明明没挨着却弹开」。
+    fn radius_of(&self, id: &str) -> f32 {
+        let scale = if self.dragging.as_deref() == Some(id) {
+            crate::model::drag::GHOST_SCALE
+        } else if self.is_connected(id) {
+            connect::CONNECTED_SCALE
+        } else {
+            1.0
+        };
+        layout::DEVICE_RADIUS * scale
+    }
+
+    /// 一帧物理（**唯一的时钟**）。`dt` 用真实间隔，弹簧内部会夹住异常大的值。
+    ///
+    /// 返回下一帧该隔多久：正在拖/弹簧在跑 → 快；只剩漂浮 → 慢（省 CPU）。
+    pub fn tick(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        let dt = (now - self.last_tick).as_secs_f32();
+        self.last_tick = now;
+        let ghost = self.dragging.as_ref().map(|id| Ghost {
+            id: id.clone(),
+            point: self.drag_at.unwrap_or_else(layout::self_center),
+            radius: layout::DEVICE_RADIUS * crate::model::drag::GHOST_SCALE,
+        });
+        self.motion.step(dt, ghost.as_ref());
+        self.snapping = self.over_center();
+        // 亮起要**跟手**（0.08s：判定一变灯就亮，不留延时），
+        // 熄灭慢慢褪（0.25s，免得边界上抖成闪烁）
+        self.tint.set_response(if self.snapping { TINT_RISE } else { TINT_FALL });
+        self.tint.retarget(if self.snapping { 1.0 } else { 0.0 });
+        self.tint.step(dt);
+        self.halo = (self.halo + dt / node::HALO_PERIOD_SECS).fract();
+        self.brand_phase =
+            (self.brand_phase + dt / titlebar::BRAND_PERIOD_SECS).fract();
+        let busy = self.dragging.is_some() || !self.tint.is_settled() || !self.motion.is_settled();
+        if busy {
+            TICK_FAST
+        } else {
+            TICK_SLOW
+        }
+    }
+
+    /// 这次拖动「算不算落到中心盘上」——**高亮与吸附共用它**。
+    ///
+    /// 只看被拖起来的那枚气泡（圆心 + 当前半径），不看指针：
+    /// 抓在盘边上时指针与气泡能差 20~30px，按指针算会出现「一边要多走、
+    /// 另一边没到就吸上」。高亮是承诺，承诺与兑现必须是同一个判断。
+    fn over_center(&self) -> bool {
+        self.drag_at
+            .map(|center| {
+                drag::snap_hit(
+                    center,
+                    layout::self_center(),
+                    layout::SELF_RADIUS,
+                    layout::DEVICE_RADIUS * drag::GHOST_SCALE,
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// 拖到一起：登记一条连接，槽位**由中心点分配**（不看松手方向）。
+    ///
+    /// 已经连上的再拖一次 = 不重复登记（位置照旧由槽位说了算）。
+    fn connect(&mut self, drag: &DeviceDrag) {
+        if self.is_connected(&drag.id) {
+            log::info!("已连接：{}（{}）", drag.name, drag.id);
             return;
         }
-        self.move_seq += 1;
-        self.moves.retain(|m| m.id != id);
-        self.moves.push(MoveAnim {
-            id: id.to_string(),
-            from,
-            to,
-            seq: self.move_seq,
-            started: std::time::Instant::now(),
-        });
-    }
-
-    /// 拖动的落点是否在本机盘上（**全窗坐标**）。
-    ///
-    /// 派生值：由 `drag_at` 现算，不另存一个会跟它不一致的布尔量。
-    fn over_center(&self) -> bool {
-        self.drag_at.map(layout::snaps_to_center).unwrap_or(false)
-    }
-
-    /// 拖到一起：登记一条连接（按松手方向摆到连接环上）。
-    ///
-    /// 已经连上的再拖一次 = 换方向（把用户记住的方位更新掉），不重复登记。
-    fn connect(&mut self, drag: &DeviceDrag, at: layout::Point) {
-        let angle = connect::angle_of(layout::self_center(), at);
-        let mut angles: Vec<f32> = self
-            .connections
-            .iter()
-            .filter(|c| c.id != drag.id)
-            .map(|c| c.angle)
-            .collect();
-        angles.push(angle);
-        // 分开到最小夹角：全都拖到同一侧时不能叠成一坨，但也不做「均匀重排」
-        //（那会把用户记住的方向抹掉）
-        let spread = connect::separate(&angles);
-        let mut next: Vec<Connection> = Vec::new();
-        for (index, existing) in self.connections.iter().enumerate() {
-            if existing.id == drag.id {
-                continue;
-            }
-            let slot = spread
-                .iter()
-                .position(|a| (*a - existing.angle).abs() < 0.001)
-                .unwrap_or(index);
-            next.push(Connection { id: existing.id.clone(), angle: spread[slot] });
-        }
-        let own = spread[spread.len().saturating_sub(1)];
-        next.push(Connection { id: drag.id.clone(), angle: own });
-        self.connections = next;
+        self.connections.push(Connection { id: drag.id.clone(), angle: 0.0 });
+        self.reassign_slots();
         // 它不再漂浮，钉在环上；之前「就地留下」的种子作废
         self.seeds.retain(|seed| seed.id != drag.id);
-        log::info!("已连接：{}（{}）", drag.name, drag.id);
+        log::info!(
+            "已连接：{}（{}）→ {} 号位",
+            drag.name,
+            drag.id,
+            self.connections.len()
+        );
+    }
+
+    /// 按顺序重新分配环上的槽位：第 1 台在正上方，其余**顺时针**依次均匀分布。
+    ///
+    /// 断开一台后剩下的会压实重排（都走弹簧滑过去，看得见它去哪儿了）。
+    fn reassign_slots(&mut self) {
+        let angles = connect::slot_angles(self.connections.len());
+        for (connection, angle) in self.connections.iter_mut().zip(angles) {
+            connection.angle = angle;
+        }
     }
 
     /// 断开连接：**位置留在原地**（不回到最初拖来的地方）。
@@ -327,6 +349,7 @@ impl AppRoot {
             return;
         };
         let connection = self.connections.remove(index);
+        self.reassign_slots();
         let point = connect::point_at(layout::self_center(), connection.angle);
         // 位置就地留下（当种子，不再回原位），但它恢复全尺寸并重新参与碰撞——
         // 「留在原地」与「不合法就得让开」是两件事，后者交给排斥迭代
@@ -362,17 +385,23 @@ impl AppRoot {
     ///
     /// 已连接的设备**不参与漂浮**（它钉在连接环上）；断开后保留在原地的那些也钉住。
     /// 两者都作为「钉子」交给放置算法，别人绕着它们排。
-    fn layout_for(&self, devices: &[DeviceView]) -> (layout::Placement, Vec<String>) {
+    fn layout_for(&self, devices: &[DeviceView]) -> Vec<(String, layout::Point, f32)> {
+        let dragging = self.dragging.as_deref();
         let floating: Vec<&str> = devices
             .iter()
-            .filter(|d| !self.is_connected(&d.id))
+            // 拖起来的那台**不占坑**：它已经被拿在手里了，老位置必须空出来
+            //（否则别人既要躲拖影又要躲老位置——用户真机看到的正是这个）
+            .filter(|d| !self.is_connected(&d.id) && dragging != Some(d.id.as_str()))
             .map(|d| d.id.as_str())
             .collect();
         let pinned = connect::pinned_points(&self.connections);
-        (
-            layout::place_devices(&floating, &pinned, &self.seeds),
-            devices.iter().map(|d| d.id.clone()).collect(),
-        )
+        let placement = layout::place_devices(&floating, &pinned, &self.seeds);
+        floating
+            .iter()
+            .zip(placement.centers.iter())
+            .zip(placement.phases.iter())
+            .map(|((id, point), phase)| (id.to_string(), *point, *phase))
+            .collect()
     }
 
     /// 已连接的设备不参与漂浮：它钉在连接环上。
@@ -391,18 +420,12 @@ impl AppRoot {
     /// 设备表很小，比一次比每次都 `notify()` 好：后者会让窗口每秒白重绘 3 次，
     /// 而重绘会打断正在跑的动画（呼吸圈的相位会被拖回去）。
     pub fn sync(&mut self) -> bool {
-        // 过渡播完就丢掉，交回给漂浮动画（不丢的话节点会一直僵在那儿不漂）
-        let before = self.moves.len();
-        self.moves
-            .retain(|m| m.started.elapsed() < Duration::from_millis(crate::model::drag::MOVE_MS + 80));
-        let released = self.moves.len() != before;
-
         let fresh = self.source.devices();
         let service_on = self.service.as_ref().map(|s| s.running()).unwrap_or(false);
         if fresh == self.devices && service_on == self.service_on && self.pair.is_none() {
-            return released;
+            return false;
         }
-        let mut changed = released;
+        let mut changed = false;
         if fresh != self.devices {
             // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
             log::info!("设备表更新：{} 台", fresh.len());
@@ -415,8 +438,8 @@ impl AppRoot {
                 self.refresh_floating();
             }
         }
-        // 位置过渡：目标点变了就记一笔（被撞开、重排、断开归位都靠它——「轻轻弹开」的手感）
-        self.track_moves();
+        // 目标点可能变了（设备上下线、连接、断开）：重算意图，运动系统自己会走过去
+        self.refresh_floating();
 
         // 配对卡跟着 `PAIRINGS` 走：码与状态都在那些行里，界面不自己猜
         if let (Some(card), Some(pairing)) = (self.pair.clone(), self.pairing.clone()) {
@@ -525,28 +548,21 @@ impl Render for AppRoot {
         let devices: Vec<_> = self
             .devices
             .iter()
-            .enumerate()
-            .map(|(index, device)| {
+            .map(|device| {
                 let connected = self.is_connected(&device.id);
-                // 已连接的：位置钉在连接环上；其余（含断开后就地留下的）：散布算法给
-                let contact = self.contact_point(&device.id);
-                let center = self.ring_point(&device.id).unwrap_or_else(|| {
-                    contact.unwrap_or_else(|| {
-                        self.placement
-                            .centers
-                            .get(index)
-                            .copied()
-                            .unwrap_or_else(layout::self_center)
-                    })
-                });
-                let size = if connected {
-                    theme::NODE_DEVICE_SIZE * connect::CONNECTED_SCALE
-                } else {
-                    theme::NODE_DEVICE_SIZE
-                };
-                let rect = layout::Rect::from_center(center, NodeSize::Device);
-                let phase = self.placement.phases.get(index).copied().unwrap_or(0.0);
                 let being_dragged = self.dragging.as_deref() == Some(device.id.as_str());
+                // 位置只有一个来源：运动系统的**当前**位置（渲染层不做任何判断）
+                let center =
+                    self.motion.position(&device.id).unwrap_or_else(layout::self_center);
+                // 尺寸同理：拖着的是拖影那个大小，已连接的是缩小后的
+                let scale = if being_dragged {
+                    crate::model::drag::GHOST_SCALE
+                } else if connected {
+                    connect::CONNECTED_SCALE
+                } else {
+                    1.0
+                };
+                let size = layout::DEVICE_RADIUS * 2.0 * scale;
                 let payload = DeviceDrag {
                     id: device.id.clone(),
                     name: device.name.clone(),
@@ -565,131 +581,91 @@ impl Render for AppRoot {
                         } else {
                             node::NodeLook::device_default()
                         },
-                        scale: if connected { connect::CONNECTED_SCALE } else { 1.0 },
+                        scale,
+                        halo: self.halo,
                     },
                 )
-                // 拖动：起手就记住是谁，并按设备 ID 建拖影（拖影自己跟着指针走）
-                .on_drag(payload, |drag: &DeviceDrag, _pos, _window, cx| {
-                    cx.new(|_| node::DragGhost { name: drag.name.clone(), kind: drag.kind })
+                // 拖动：被拖起来的**就是这枚节点自己**（不是另做一个拖影）。
+                // 它在运动系统里是「运动学物体」：位置 1:1 跟指针，并作为不可推动的
+                // 障碍物去推别人（拖动的东西必须和指针粘在一起）。
+                .on_drag(payload, |_drag: &DeviceDrag, _pos, _window, cx| {
+                    cx.new(|_| node::DragHandle)
                 })
                 // **这个回调在元素内外都会触发**（gpui 按拖动起点投递），
                 // 所以指针位置能一直跟着更新——落点判定就靠它
+                // **这个回调在元素内外都会触发**（gpui 按拖动起点投递），
+                // 所以指针位置能一直跟着更新——落点判定与「跟手」都靠它
                 .on_drag_move(cx.listener(
                     |this, event: &DragMoveEvent<DeviceDrag>, window, cx| {
                         // **位置一律问窗口**（窗口坐标），不去拼「元素原点 + 相对位置」：
                         // 那个相对量到底相对谁，只有框架知道；拼错了就是「怎么拖都不亮」。
-                        let point = window_point(window.mouse_position());
-                        // 先看**上一帧的落点**在不在命中区：只有「刚进来」才换动画 id
-                        let was_over = this.over_center();
-                        let dragging = Some(event.drag(cx).id.clone());
-                        let now_over = layout::snaps_to_center(point);
-                        if now_over && !was_over {
-                            this.tint_shown = true;
-                            this.tint_seq += 1;
-                            if let Some(tone) = this.dragged_tone_of(&event.drag(cx).id) {
-                                this.tint_tone = tone;
-                            }
-                            // 进/出吸附区各记一行：出问题时这两行能直接说明「判定到底发生没有」
+                        let pointer = graph_point(window.mouse_position());
+                        let id = event.drag(cx).id.clone();
+                        // 起手：记住「气泡中心 − 指针」，之后一直保持这个抓法
+                        if this.dragging.as_deref() != Some(id.as_str()) {
+                            let here = this.motion.position(&id).unwrap_or(pointer);
+                            this.grab_offset = layout::Point {
+                                x: here.x - pointer.x,
+                                y: here.y - pointer.y,
+                            };
+                        }
+                        let point = layout::Point {
+                            x: pointer.x + this.grab_offset.x,
+                            y: pointer.y + this.grab_offset.y,
+                        };
+                        let was_over = this.snapping;
+                        let now_over = drag::snap_hit(
+                            point,
+                            layout::self_center(),
+                            layout::SELF_RADIUS,
+                            layout::DEVICE_RADIUS * drag::GHOST_SCALE,
+                        );
+                        if now_over != was_over {
+                            // 进/出吸附区各记一行：出问题时这两行能直接说明判定发生没有
                             log::info!(
-                                "进入吸附区（距中心 {:.0}px）",
+                                "{}吸附区（距中心 {:.0}px）",
+                                if now_over { "进入" } else { "离开" },
                                 layout::distance_to_center(point)
                             );
-                        } else if !now_over && was_over {
-                            log::info!("离开吸附区");
                         }
-                        // 再次按住 = 打断过渡：否则那份「滑过去」的一次性动画
-                        // 还在每帧摆位置，跟拖动抢同一个坐标
-                        this.moves.retain(|m| m.id != event.drag(cx).id);
-                        let changed = this.dragging != dragging || this.drag_at != Some(point);
-                        if changed {
-                            this.dragging = dragging;
-                            this.drag_at = Some(point);
-                            // 走够一小段就重排一次：被拖到的那枚把旁边的顶开
-                            if this.should_relayout(point) {
-                                this.last_relayout = Some(point);
-                                this.refresh_floating();
+                        // 拖起来的这一瞬间，它原来的坑要空出来（别人可以挪过去）
+                        if this.dragging.as_deref() != Some(id.as_str()) {
+                            this.dragging = Some(id.clone());
+                            this.refresh_floating();
+                            if let Some(tone) = this.dragged_tone_of(&id) {
+                                this.tint_tone = tone;
                             }
-                            cx.notify();
                         }
+                        // 指针位置只记在这里，物理每 16ms 自己跑（不在事件回调里算物理）
+                        this.drag_at = Some(point);
+                        cx.notify();
                     },
                 ));
-                // 拖动中原件**淡出**（不是压暗留着——留着看着就像「没拖动」）
-                let faded = visual.with_animation(
-                    ElementId::Name(format!("fade-{}-{}", device.id, being_dragged).into()),
-                    gpui::Animation::new(Duration::from_millis(crate::model::drag::FADE_MS)),
-                    move |el, delta| el.opacity(if being_dragged { 1.0 - delta } else { delta }),
-                );
-                // 已连接：缩小的盘 + 断开按钮，位置钉在环上
-                if connected {
+                // 已连接：缩小的盘 + 一条「断开」按钮，位置钉在连接环上
+                let visual = if connected {
                     let disconnect_id = device.id.clone();
-                    let stack = div().relative().w(px(size)).h(px(size)).child(faded).child(
-                        node::disconnect_button(
-                            &t,
-                            ElementId::Name(format!("unlink-{}", device.id).into()),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.disconnect(&disconnect_id);
-                            cx.notify();
-                        })),
-                    );
-                    // 连上的那一刻也走「滑过去」：啪地跳进去会显得很硬
-                    return match self.moves.iter().find(|m| m.id == device.id) {
-                        Some(anim) => {
-                            let (from, seq) = (anim.from, anim.seq);
-                            node::positioned(
-                                stack,
-                                ElementId::Name(format!("move-{}-{}", device.id, seq).into()),
-                                gpui::Animation::new(Duration::from_millis(
-                                    crate::model::drag::MOVE_MS,
-                                ))
-                                .with_easing(gpui::ease_out_quint()),
-                                move |delta| {
-                                    (
-                                        from.x + (center.x - from.x) * delta,
-                                        from.y + (center.y - from.y) * delta,
-                                    )
-                                },
+                    div()
+                        .relative()
+                        .w(px(size))
+                        .h(px(size))
+                        .child(visual)
+                        .child(
+                            node::disconnect_button(
+                                &t,
+                                ElementId::Name(format!("unlink-{}", device.id).into()),
                             )
-                            .into_any_element()
-                        }
-                        None => node::positioned(
-                            stack,
-                            ElementId::Name(format!("pinned-{}", device.id).into()),
-                            gpui::Animation::new(Duration::from_millis(1)),
-                            move |_| (center.x, center.y),
-                        )
-                        .into_any_element(),
-                    };
-                }
-                // 位置：平常漂浮；松手没命中时从**落点**飞回原位（不是啪地跳回去）。
-                // 一次性动画，id 里带序号——序号不变的话第二次回弹不会重播。
-                match self.moves.iter().find(|m| m.id == device.id) {
-                    Some(anim) => {
-                        let (from, to, seq) = (anim.from, anim.to, anim.seq);
-                        node::positioned(
-                            faded,
-                            ElementId::Name(format!("move-{}-{}", device.id, seq).into()),
-                            gpui::Animation::new(Duration::from_millis(
-                                crate::model::drag::MOVE_MS,
-                            ))
-                            .with_easing(gpui::ease_out_quint()),
-                            move |delta| {
-                                (
-                                    from.x + (to.x - from.x) * delta,
-                                    from.y + (to.y - from.y) * delta,
-                                )
-                            },
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.disconnect(&disconnect_id);
+                                this.refresh_floating();
+                                cx.notify();
+                            })),
                         )
                         .into_any_element()
-                    }
-                    None => node::positioned(
-                        faded,
-                        node::drift_id(rect),
-                        node::drift_animation(),
-                        move |delta| node::drift_offset(rect, phase, delta),
-                    )
-                    .into_any_element(),
-                }
+                } else {
+                    visual.into_any_element()
+                };
+                // 摆到运动系统给的当前位置上：**不套任何动画**（位置每帧都在动）
+                node::placed(visual, center, size).into_any_element()
             })
             .collect();
 
@@ -697,7 +673,6 @@ impl Render for AppRoot {
         // 连上之后：本机盘也跟着缩小（「把设备拉过来一起变小」）并保持高亮
         let connected_any = !self.connections.is_empty();
         let self_scale = if connected_any { connect::CONNECTED_SCALE } else { 1.0 };
-        let self_rect = layout::Rect::from_center(layout::self_center(), NodeSize::SelfNode);
 
         // 连线（画在节点之下）：每台已连接设备一条，颜色跟着那台设备
         let segments: Vec<wire::Segment> = self
@@ -714,15 +689,53 @@ impl Render for AppRoot {
 
         div()
             .id("root")
-            // 松手落在中心盘的**外面**时，drop 目标不会触发（它 `stop_propagation`），
-            // 于是事件冒泡到这里——正好用来把拖动态清掉，否则高亮会一直挂着
+            // 松手落在中心盘上就吸附、落在别处就回弹。
+            //
+            // 这层挂在**整窗根节点**上：不再自己划一块「落点区」的方框——
+            // 那块方框按**指针**算、判定却按**气泡**算，两者不一致时就会出现
+            // 「灯亮了、一松手却没吸上」（用户真机看到过）。现在判定只看距离。
+            .on_drop(cx.listener(
+                |this, drag: &DeviceDrag, window, cx| {
+                    // 判定用**松手那一刻**的气泡中心（看的是「东西落到盘上」，
+                    // 不是「手指在盘上」）
+                    let pointer = graph_point(window.mouse_position());
+                    let point = layout::Point {
+                        x: pointer.x + this.grab_offset.x,
+                        y: pointer.y + this.grab_offset.y,
+                    };
+                    // 判定与高亮**同一个函数**（亮的那个就是会吸上的那个）
+                    let inside = drag::snap_hit(
+                        point,
+                        layout::self_center(),
+                        layout::SELF_RADIUS,
+                        layout::DEVICE_RADIUS * drag::GHOST_SCALE,
+                    );
+                    log::info!(
+                        "松手判定：({:.0}, {:.0}) 距中心 {:.0}px → {}",
+                        point.x,
+                        point.y,
+                        layout::distance_to_center(point),
+                        if inside { "吸附" } else { "回弹" }
+                    );
+                    if inside {
+                        // 命中：登记连接（摆到连接环上），弹簧会滑过去
+                        this.dragging = None;
+                        this.drag_at = None;
+                        this.connect(drag);
+                        this.refresh_floating();
+                        this.start_pairing(drag);
+                    } else {
+                        // 没命中：不碰速度，让它带着指针的速度弹回原位
+                        this.settle_drag();
+                    }
+                    cx.notify();
+                    },
+                ))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.drag_at.is_some() || this.dragging.is_some() {
+                    if this.dragging.is_some() {
                         this.settle_drag();
-                        this.last_relayout = None;
-                        this.refresh_floating();
                         cx.notify();
                     }
                 }),
@@ -742,7 +755,7 @@ impl Render for AppRoot {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .child(titlebar::titlebar(&t))
+                    .child(titlebar::titlebar(&t, self.brand_phase))
                     .child(
                         div()
                             .flex_none()
@@ -756,7 +769,7 @@ impl Render for AppRoot {
                             .child(close),
                     ),
             )
-            // 节点图：绝对定位区，子元素按**全窗坐标**摆放后再减去标题栏偏移
+            // 节点图：绝对定位区，子元素按**图区坐标**摆放（与 layout / motion 同一套）
             .child(
                 div()
                     .relative()
@@ -765,34 +778,32 @@ impl Render for AppRoot {
                     .w_full()
                     // 连线在最底层（设计稿层级：连线 < 节点）
                     .when(!segments.is_empty(), |el| el.child(wire::wires(segments)))
-                    .when(show_devices, |el| el.children(devices))
-                    // 中心盘：**本机盘 + 一层「染色版」叠加**，染色层的不透明度做过渡。
-                    //
-                    // 为什么是叠两层而不是逐帧改色：`with_animation` 的回调只能改
-                    // 它自己那个元素的样式，改不了子元素的颜色——而 `Fn` 回调又没法
-                    // 把新的子元素塞进去。叠一层、调它的 opacity，就是 gpui 里的 crossfade。
+                    // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
+                    // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
-                        let highlighted = self.over_center();
                         let name = self.device_name.clone();
-                        let rect = graph_space(self_rect);
-                        let container = div()
-                            .absolute()
-                            .left(px(rect.x))
-                            .top(px(rect.y))
-                            .child(node::node(
-                                &t_theme,
-                                node::NodeSpec {
-                                    id: ElementId::Name("node-self".into()),
-                                    who: node::NodeWho::SelfNode,
-                                    label: &name.to_string(),
-                                    look: if connected_any {
-                                        node::NodeLook::self_node_blended(1.0, theme::NODE_SELF)
-                                    } else {
-                                        node::NodeLook::self_node()
-                                    },
-                                    scale: self_scale,
-                                },
-                            ));
+                        let center = self
+                            .motion
+                            .position(layout::SELF_ID)
+                            .unwrap_or_else(layout::self_center);
+                        let look = if connected_any {
+                            node::NodeLook::self_node_blended(1.0, theme::NODE_SELF)
+                        } else {
+                            node::NodeLook::self_node()
+                        };
+                        let visual = node::node(
+                            &t_theme,
+                            node::NodeSpec {
+                                id: ElementId::Name("node-self".into()),
+                                who: node::NodeWho::SelfNode,
+                                label: &name.to_string(),
+                                look,
+                                scale: self_scale,
+                                halo: self.halo,
+                            },
+                        );
+                        // 染色层：叠一层同款、只改它的不透明度（gpui 里唯一能做到
+                        // 「逐帧改色」且不动子树的做法）。不透明度来自弹簧。
                         let tinted = node::node(
                             &t_theme,
                             node::NodeSpec {
@@ -801,96 +812,40 @@ impl Render for AppRoot {
                                 label: &name.to_string(),
                                 look: node::NodeLook::self_node_blended(1.0, self.tint_tone),
                                 scale: self_scale,
+                                halo: self.halo,
                             },
                         );
-                        // 动画 id **只用「命中与否 + 每次命中的序号」**：
-                        // 掺进别的会变的东西（比如色是否为 None）就会在无关时刻重播一次——
-                        // 而重播的起点是 `1.0 - 0 = 1.0`，于是「一拖动中心就亮」。
-                        // 没出现过就**不渲染这一层**：否则首帧会按「关」的起点（满亮）
-                        // 闪一下，等于什么都没拖就先亮一次
-                        if !self.tint_shown {
-                            container
-                        } else {
-                            container.child(tinted.with_animation(
-                                ElementId::Name(
-                                    format!("center-tint-{}-{}", highlighted, self.tint_seq)
-                                        .into(),
-                                ),
-                                gpui::Animation::new(Duration::from_millis(
-                                    crate::model::drag::CENTER_TINT_MS,
-                                ))
-                                .with_easing(gpui::ease_out_quint()),
-                                // 命中：染色层淡入；离开：淡出回本机蓝
-                                move |el, delta| {
-                                    el.opacity(if highlighted { delta } else { 1.0 - delta })
-                                },
-                            ))
-                        }
+                        let tint = self.tint.x();
+                        node::placed(
+                            div()
+                                .relative()
+                                .child(visual)
+                                .child(div().absolute().inset_0().child(tinted.opacity(tint))),
+                            center,
+                            theme::NODE_SELF_SIZE * self_scale,
+                        )
                     })
-                    // 落点区：**得装下 r=50 的吸附圆**（84px 的方框装不下它的四角），
-                    // 否则边缘上「明明该吸附」的位置会因为落点区没盖住而收不到松手事件。
-                    // 真正的判定在下面用圆算一次（方框只负责「别漏事件」）。
-                    .child(
-                        div()
-                            .id("center-hit")
-                            .absolute()
-                            .left(px(self_rect.x - crate::model::drag::SNAP_RADIUS))
-                            .top(px(self_rect.y - crate::model::drag::SNAP_RADIUS))
-                            .w(px(crate::model::drag::SNAP_RADIUS * 2.0))
-                            .h(px(crate::model::drag::SNAP_RADIUS * 2.0))
-                            .rounded(px(crate::model::drag::SNAP_RADIUS))
-                            .on_drop(cx.listener(
-                                |this, drag: &DeviceDrag, window, cx| {
-                                    // 判定用**松手那一刻**的指针位置（任务书要求），
-                                    // 落点区是方、判定是圆，所以这里必须再算一次
-                                    let point = window_point(window.mouse_position());
-                                    let inside = layout::snaps_to_center(point);
-                                    log::info!(
-                                        "松手判定：({:.0}, {:.0}) 距中心 {:.0}px → {}",
-                                        point.x,
-                                        point.y,
-                                        layout::distance_to_center(point),
-                                        if inside { "吸附" } else { "回弹" }
-                                    );
-                                    this.last_relayout = None;
-                                    if inside {
-                                        // 命中：登记连接（摆到连接环上）
-                                        this.dragging = None;
-                                        this.drag_at = None;
-                                        this.connect(drag, point);
-                                        this.refresh_floating();
-                                        this.start_pairing(drag);
-                                    } else {
-                                        this.settle_drag();
-                                        this.refresh_floating();
-                                    }
-                                    cx.notify();
-                                },
-                            )),
+                    // 设备气泡（画在中心盘之后 = 之上；重叠由物理保证不会发生）
+                    .when(show_devices, |el| el.children(devices)),
             )
             .when_some(self.pair.clone(), |el, card| {
                 el.child(paircard::card(&t, &card.peer, &card.code, card.state))
             })
-            )
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
             .child(titlebar::window_border(&t))
     }
 }
 
-/// 指针位置（`Pixels`）→ 模型用的 `f32` 点。
+/// 指针位置（`Pixels`，**窗口坐标**）→ 图区坐标。
 ///
-/// 位置来源只有一个：`Window::mouse_position()`（**窗口坐标**）。
-fn window_point(position: gpui::Point<gpui::Pixels>) -> layout::Point {
-    layout::Point { x: position.x.as_f32(), y: position.y.as_f32() }
-}
-
-/// 全窗坐标 → 节点图内坐标（减掉标题栏高度）。
-///
-/// **只在这里做一次换算**：设计稿的圆席坐标是全窗的，而节点区是标题栏之下的
-/// 一个盒子，两者的差就是 44px 标题栏。把换算收在一处，别处不再出现「+44」。
-fn graph_space(rect: layout::Rect) -> layout::Rect {
-    layout::Rect { y: rect.y - theme::TITLEBAR_H, ..rect }
+/// **全项目唯一的窗口→图区换算**。曾经布局产出全窗坐标、渲染容器用图区坐标，
+/// 两套混着用：设备整体低了 44px（靠收边界糊过去），拖动时气泡又会跳 44px。
+fn graph_point(position: gpui::Point<gpui::Pixels>) -> layout::Point {
+    layout::Point {
+        x: position.x.as_f32(),
+        y: position.y.as_f32() - theme::TITLEBAR_H,
+    }
 }
 
 /// 打开主窗口。
@@ -935,6 +890,26 @@ pub fn open(
                 });
                 if alive.is_err() {
                     break;
+                }
+            }
+        })
+        .detach();
+        // 物理时钟：**独立于快照**。运动是唯一需要每帧更新的东西，
+        // 用 300ms 的快照去驱动它，「弹开」「归位」都会是一顿一顿的。
+        let motion_view = view.clone();
+        cx.spawn(async move |cx| {
+            let weak = motion_view.downgrade();
+            let mut interval = TICK_FAST;
+            loop {
+                cx.background_executor().timer(interval).await;
+                let alive = weak.update(cx, |root, cx| {
+                    let next = root.tick();
+                    cx.notify();
+                    next
+                });
+                match alive {
+                    Ok(next) => interval = next,
+                    Err(_) => break,
                 }
             }
         })

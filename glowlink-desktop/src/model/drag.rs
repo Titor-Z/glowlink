@@ -3,24 +3,12 @@
 //! 拖放本身由 gpui 的 `on_drag` / `on_drop` 承担（见 `view/app.rs`），
 //! 这里只放**能单测**的那部分：拖的是什么、拖影多大、配对卡上写什么。
 
+use crate::model::layout;
 use glowlink_core::DeviceKind;
 use glowlink_ipc::row::PairingState;
 
 /// 拖动时被拖节点的放大比例（设计稿「轻微放大」，不夸张）。
 pub const GHOST_SCALE: f32 = 1.08;
-/// 抓起的瞬间从这里长到 [`GHOST_SCALE`]：一步到位会显得很硬。
-pub const GHOST_SCALE_MIN: f32 = 1.0;
-/// 吸附判定半径（圆心距）。任务书 v1.0：**小于 50px 才算吸附成功**。
-///
-/// 比设计稿那句「中心 84px 的盘本身」（盘半径 42）略宽松 8px：
-/// 盘缘再往外一点也算，手上不抖就好。
-pub const SNAP_RADIUS: f32 = 50.0;
-/// 位置发生变化的过渡时长（回弹、被撞开、连接重排都走它）。
-pub const MOVE_MS: u64 = 280;
-/// 节点淡出/淡入的时长（拖动开始时原件淡出、松手后淡入）。
-pub const FADE_MS: u64 = 140;
-/// 中心盘「被拖过来」的过渡时长（色与强度一起插值）。
-pub const CENTER_TINT_MS: u64 = 220;
 
 /// 拖影的三要素。`id` 是设备 ID（身份指纹），落点判定后靠它发起配对。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,3 +34,19 @@ pub fn pair_state_note(state: PairingState) -> &'static str {
 
 /// 发起侧出示码时的那句话（设计稿原文）。
 pub const PAIR_CODE_HINT: &str = "请在此设备上输入此码";
+
+/// 吸附余量：气泡盘与中心盘相切之外再给这么多（手抖余量）。
+///
+/// 口径：**气泡自己**贴到中心盘上就算吸附——不看指针。以前按指针算，
+/// 抓在盘边上时指针要多走 20~30px 才吸得上（用户真机感觉「必须走到正中心」），
+/// 而反方向又会「还没到就吸上」：同一个偏移在两侧表现相反。
+pub const SNAP_MARGIN: f32 = 6.0;
+
+/// 吸附判定：气泡圆心到中心盘圆心的距离 ≤ 双方半径 + 余量。
+///
+/// **界面高亮与最终吸附必须共用这一个函数**：高亮是承诺，亮了就得吸上
+/// （apple-design skill §8「动作要预告结果」、§10「命中口径要一致」）。
+/// 半径取**当前**值（气泡拖动中会放大到 1.08、连接后会缩小）。
+pub fn snap_hit(node_center: layout::Point, self_center: layout::Point, self_radius: f32, node_radius: f32) -> bool {
+    layout::distance(node_center, self_center) <= self_radius + node_radius + SNAP_MARGIN
+}

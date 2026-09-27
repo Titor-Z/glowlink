@@ -34,47 +34,34 @@ pub fn min_angle_gap() -> f32 {
     (need / ring_radius()) * 1.15
 }
 
-/// 松手时的方向：指针相对中心的角度（弧度，屏幕坐标系，y 向下）。
+/// 第一个槽位的方向：**正上方**（12 点，屏幕坐标系 y 向下）。
+pub const FIRST_SLOT: f32 = -std::f32::consts::FRAC_PI_2;
+
+/// `count` 台设备在环上的槽位角度：从正上方开始**顺时针**均匀分布。
 ///
-/// 指针正好落在中心上时给**正上方**（−90°）：方向无从可选，但总得给一个，
-/// 而正上方是「最近的空位」最自然的一端。
-pub fn angle_of(center: Point, at: Point) -> f32 {
-    let (dx, dy) = (at.x - center.x, at.y - center.y);
-    if dx.abs() < 0.001 && dy.abs() < 0.001 {
-        return -std::f32::consts::FRAC_PI_2;
-    }
-    dy.atan2(dx)
+/// 为什么不用「松手方向」：那是动作记忆，位置随每次拖动的方向变，用户
+/// 记不住「我的 iPad 到底在哪边」；而且两台从同一侧拖进来时还会打架。
+/// 现在**由中心点接管排布**：太阳在中间，卫星按顺序占位——位置完全确定，
+/// 断开后压实重排（都走弹簧滑过去，看得见它去哪儿了）。
+pub fn slot_angles(count: usize) -> Vec<f32> {
+    let total = count.max(1) as f32;
+    (0..count)
+        .map(|index| FIRST_SLOT + std::f32::consts::TAU * index as f32 / total)
+        .collect()
+}
+
+/// 环上最多能放几台（按几何算出的最小间隔）。
+///
+/// 超过这个数就只能硬塞，相邻两枚会轻微重叠——由物理约束推开（会略微离开环），
+/// 不会叠成一坨。
+pub fn max_slots() -> usize {
+    (std::f32::consts::TAU / min_angle_gap()).floor() as usize
 }
 
 /// 角度 → 连接环上的落点。
 pub fn point_at(center: Point, angle: f32) -> Point {
     let r = ring_radius();
     Point { x: center.x + r * angle.cos(), y: center.y + r * angle.sin() }
-}
-
-/// 把一批角度分开到至少 `MIN_ANGLE_GAP`，保持相对顺序。
-///
-/// 全都拖到同一侧时不能让它们叠成一坨；也不能「均匀重排」——
-/// 那会把用户记住的方位（「我把 iPad 拖到了右上」）抹掉。
-/// 做法：从小到大扫一遍，每一台至少比前一台多一个间隔。
-pub fn separate(angles: &[f32]) -> Vec<f32> {
-    let mut sorted: Vec<f32> = angles.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let gap = min_angle_gap();
-    for index in 1..sorted.len() {
-        let floor = sorted[index - 1] + gap;
-        if sorted[index] < floor {
-            sorted[index] = floor;
-        }
-    }
-    // 推开后可能整体转出了可视范围：整体平移回「以原均值为中心」
-    if sorted.is_empty() {
-        return sorted;
-    }
-    let before: f32 = angles.iter().sum::<f32>() / angles.len() as f32;
-    let after: f32 = sorted.iter().sum::<f32>() / sorted.len() as f32;
-    let shift = before - after;
-    sorted.iter().map(|a| a + shift).collect()
 }
 
 /// 一次连接：哪台设备、在环上的哪个角度。

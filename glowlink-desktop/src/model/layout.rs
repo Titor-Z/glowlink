@@ -33,6 +33,9 @@ impl NodeSize {
 }
 
 /// 本机中心节点。
+/// 本机盘在运动系统里的身份（`Motion` 里那个钉死的不动体）。
+pub const SELF_ID: &str = "self";
+
 pub fn self_center() -> Point {
     Point { x: theme::SELF_CENTER.0, y: theme::SELF_CENTER.1 }
 }
@@ -85,24 +88,22 @@ const LABEL_BELOW: f32 = 18.0;
 /// 漂浮的纵向幅度（与 `view::node` 的 `FLOAT_AMP_Y` 同源思路，取整一点）。
 const DRIFT_MARGIN: f32 = 4.0;
 
-/// 设备盘圆心允许的范围（**全窗坐标**）。
+/// 设备盘圆心允许的范围（**图区坐标**，与 [`self_center`] 同一套）。
 ///
 /// 上下左右都得留够，否则节点会「胖」到隔壁去：
-/// - 上：标题栏底边（44）之下，盘不能顶进标题栏
-/// - 下：节点图底边（44 + 396 = 440）之上，**盘与名字都不能伸进拖拽区**
-///   （曾经的 bug：中心 y 可以到 396，盘底 + 名字 + 漂浮直接压到拖拽框上）
+/// - 上：盘顶不能顶出图区上边
+/// - 下：**盘与名字都不能伸进拖拽区**（图区高 396，盘 + 名字 + 漂浮都要让开）
 /// - 左右：留出名字的半宽，长名字不会横穿出窗口
-fn bound_x() -> (f32, f32) {
+pub fn bound_x() -> (f32, f32) {
     let half = theme::NODE_DEVICE_SIZE / 2.0;
     let margin = LABEL_HALF.max(half) + DRIFT_MARGIN;
     (margin, theme::WINDOW_W - margin)
 }
 
-fn bound_y() -> (f32, f32) {
+pub fn bound_y() -> (f32, f32) {
     let half = theme::NODE_DEVICE_SIZE / 2.0;
-    let top = theme::TITLEBAR_H + half + DRIFT_MARGIN;
-    let graph_bottom = theme::TITLEBAR_H + theme::GRAPH_H;
-    let bottom = graph_bottom - half - LABEL_BELOW - DRIFT_MARGIN;
+    let top = half + DRIFT_MARGIN;
+    let bottom = theme::GRAPH_H - half - LABEL_BELOW - DRIFT_MARGIN;
     (top, bottom)
 }
 /// 排斥迭代次数：几百次对十几枚节点仍是瞬时（只在设备集合变化时算一次），
@@ -214,7 +215,7 @@ fn relax(points: &mut [Point], pinned: &[Pinned]) {
 }
 
 /// 两点若比 `need` 更近，返回「推开方向 + 还差多少」。
-fn separation(a: Point, b: Point, need: f32) -> Option<(f32, f32, f32)> {
+pub fn separation(a: Point, b: Point, need: f32) -> Option<(f32, f32, f32)> {
     let (dx, dy) = (b.x - a.x, b.y - a.y);
     let d = (dx * dx + dy * dy).sqrt();
     if d >= need {
@@ -253,17 +254,6 @@ fn dist2(a: Point, b: Point) -> f32 {
     dx * dx + dy * dy
 }
 
-/// 某个点是否落在吸附判定区里（把设备拖到本机上就算）。
-///
-/// 半径取 `SNAP_RADIUS`（50px，任务书 v1.0），比中心盘半径 42 略宽松：
-/// 盘缘再往外一点也算吸附，手不必抖到极致。
-///
-/// **判定只在松手那一刻做**：拖动过程中只做视觉高亮。
-/// 拖动中实时判定会出现「吸附近似触发」的抖动——坐标与动画帧不同步，看着像卡了一下。
-pub fn snaps_to_center(point: Point) -> bool {
-    let radius = crate::model::drag::SNAP_RADIUS;
-    dist2(point, self_center()) <= radius * radius
-}
 
 /// 只把**真正重叠**的节点推开（局部、不重新求解全局布局）。
 ///

@@ -7,14 +7,12 @@
 //! 不要拿投影冒充（投影有偏移，看起来像"浮起"而不是"发光"）。
 
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, BoxShadow, Context, Div, ElementId, FontWeight,
+    div, prelude::*, px, BoxShadow, Context, Div, ElementId, FontWeight,
     IntoElement, Render, Rgba, SharedString, Stateful, Styled, Window,
 };
 
-use std::time::Duration;
 
-use crate::model::drag::{GHOST_SCALE, GHOST_SCALE_MIN};
-use crate::model::layout::{NodeSize, Rect};
+use crate::model::layout::NodeSize;
 use crate::theme::{self, Theme};
 
 /// 呼吸：**大小与不透明度一起推进**。
@@ -22,79 +20,42 @@ use crate::theme::{self, Theme};
 /// 只做明暗变化是不行的：光圈是 1px 的环、色本身就只有 20% alpha（`colors.halo`），
 /// 明暗一变化在玻璃上几乎看不出来，看起来就是个静态圆环。
 /// 所以让它**扩张 + 淡出**（像一次呼吸），这才是设计稿说的「光会动，但不闪」。
-const HALO_PERIOD_MS: u64 = 3000;
 /// 呼吸过程里外圈再向外扩多少像素（起始外径 = 直径 + 16，即 `haloInset: -8px`）。
 const HALO_MAX_GROW: f32 = 12.0;
 
-/// 漂浮：外围设备在慢速椭圆轨道上来回漂（设计稿 `drift 7s`）。
+/// 呼吸的相位 → 扩张量与不透明度（纯函数，好测）。
 ///
-/// 幅度取自设计稿关键帧：横向 +3.5 / −2.5、纵向 −4.5 / +3。
-/// 我们只用一个正弦对（sin/cos 就是一圈椭圆），所以取对称的极值包住原区间：
-/// 横向 ±3.0、纵向 ±3.75。（设计稿还带 -1.2° 旋转，gpui-ce 没有 rotate，这一项舍去。）
-const FLOAT_PERIOD_MS: u64 = 7000;
-const FLOAT_AMP_X: f32 = 3.0;
-const FLOAT_AMP_Y: f32 = 3.75;
-
-fn breath() -> Animation {
-    // 设计稿：呼吸 3s（传输中加快到 1.5s，等有传输态再按状态给不同周期）。
-    // `with_animation` 会自动尊重系统的「减少动态效果」（`App::reduce_motion` 时停在起始态）。
-    Animation::new(Duration::from_millis(HALO_PERIOD_MS))
-        .repeat()
-        .with_easing(|delta| (1.0 - (delta * std::f32::consts::PI * 2.0).cos()) * 0.5)
+/// 相位 `0..1` 走一圈：0 时最小最亮，1 时最大最淡。
+pub fn halo_span(phase: f32) -> (f32, f32) {
+    let ease = (1.0 - (phase * std::f32::consts::TAU).cos()) * 0.5;
+    (HALO_MAX_GROW * ease, 1.0 - ease)
 }
 
-/// 漂浮用**线性**推进：自己取正弦，缓动在这里没意义（要的就是匀速转圈）。
-fn drift() -> Animation {
-    Animation::new(Duration::from_millis(FLOAT_PERIOD_MS)).repeat()
-}
+/// 呼吸一圈要多久（秒）。
+pub const HALO_PERIOD_SECS: f32 = 3.0;
 
-/// 把子元素放进一个绝对定位的容器里，每帧按 `pos(delta)` 摆位置。
+/// 把子元素摆到**当前**位置上（绝对定位，不套任何动画）。
 ///
-/// 这是本文件唯一允许「动画改位置」的地方：`with_animation` 只能改它**自己**的样式，
-/// 而它的回调是 `Fn`（不能把子元素移进去），所以必须是
-/// 「先 `.child(...)` 建容器，再 `.with_animation(...)` 动容器」这个顺序。
-pub fn positioned<E: IntoElement + 'static>(
+/// 位置由 `model::motion` 每帧算好，渲染层只负责画。这里不再有「一次性过渡动画」，
+/// 也就没有「动画 id 该带哪些状态」这类只在运行时才暴露的坑（我们为此栽过两次）。
+///
+/// 收的是**圆心**、自己减半个尺寸：GPUI 用左上角定位，而全项目的几何都是圆心
+/// （命中判定、碰撞、槽位）。换算只留在这一处——曾经有人在调用点先减一次、
+/// 也有人直接当左上角用，于是「中心盘一上来就跑偏」。
+pub fn placed<E: IntoElement + 'static>(
     child: E,
-    id: ElementId,
-    animation: Animation,
-    pos: impl Fn(f32) -> (f32, f32) + 'static,
+    center: crate::model::layout::Point,
+    size: f32,
 ) -> impl IntoElement {
-    div().absolute().child(child).with_animation(id, animation, move |el, delta| {
-        let (x, y) = pos(delta);
-        el.left(px(x)).top(px(y))
-    })
-}
-
-/// 漂浮动画（本机不套：它是图面的锚点）。
-pub fn drift_animation() -> Animation {
-    drift()
-}
-
-/// 漂浮动画的 id（与呼吸圈、各节点都不能撞）。
-pub fn drift_id(rect: Rect) -> ElementId {
-    ElementId::NamedInteger(
-        SharedString::new_static("drift"),
-        ((rect.x as u64) << 32) | rect.y as u64,
-    )
-}
-
-/// 第 `delta` 帧的漂浮位置：以原位为中心的慢椭圆（错相由 `layout::place_devices` 给）。
-pub fn drift_offset(rect: Rect, phase: f32, delta: f32) -> (f32, f32) {
-    let theta = (delta + phase) * std::f32::consts::PI * 2.0;
-    (rect.x + FLOAT_AMP_X * theta.sin(), rect.y + FLOAT_AMP_Y * theta.cos())
+    div()
+        .absolute()
+        .left(px(center.x - size / 2.0))
+        .top(px(center.y - size / 2.0))
+        .child(child)
 }
 
 /// 呼吸圈的动画 id：从节点自己的 id 派生。
 ///
-/// 同一帧里可能有多个圈（本机盘 + 它的染色层 + 拖拽目标），必须各不相同；
-/// 而同一个节点跨帧又必须**相同**，否则动画每帧从头开始（看着像卡住）。
-/// 用节点 id 当前缀正好两头都满足。
-fn halo_id(node_id: &ElementId) -> ElementId {
-    // 穷举 `ElementId` 的变体会随框架升级而失效（它还有 View / Uuid / FocusHandle……），
-    // 这里只要一个「对同一节点稳定、对不同节点不同」的前缀，Debug 串正好够用。
-    ElementId::Name(format!("halo-{node_id:?}").into())
-}
-
 /// 辉光：零模糊偏移，只有扩散。
 fn glow(color: Rgba, radius: f32) -> BoxShadow {
     BoxShadow {
@@ -333,15 +294,17 @@ pub struct NodeSpec<'a> {
     pub look: NodeLook,
     /// 缩放（拖影 1.08；正常 1.0）。
     pub scale: f32,
+    /// 呼吸相位 `0..1`（由界面时钟推进，见 [`halo_span`]）。
+    pub halo: f32,
 }
 /// 节点元素：盘 + 环 + 图标 + 名字。
 ///
-/// **它自己不摆位置**：位置一律由调用方的容器决定（[`positioned`] 或一个静态容器）。
+/// **它自己不摆位置**：位置一律由调用方决定（见 [`placed`]）。
 /// 曾经的坑：节点内部按 `rect` 定位、外面又套了一层同样按 `rect` 定位的容器，
 /// 于是设备被画到两倍坐标上——320px 宽的窗口装不下，看着就是「设备全没了」。
 ///
 /// 返回 `Stateful<Div>`（**带 id 才算「可交互元素」**）：拖动、点击、hover
-/// 都要求它；而漂浮动画改由调用方用 [`positioned`] 套上——两者顺序不能反。
+/// 都要求它；位置与运动都归调用方和 `model::motion` 管。
 pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     let node_size = spec.who.node_size();
     let tone = spec.look.tone_override.unwrap_or_else(|| spec.who.tone());
@@ -365,23 +328,26 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     };
     let label_top = if spec.who.is_self() { 6.0 } else { 6.0 };
     let halo = spec.look.halo.then(|| {
-        // 起始外径 = 直径 + 16（两边各 −8px），呼吸时以中心为轴向外长
+        // 起始外径 = 直径 + 16（两边各 −8px），呼吸时以中心为轴向外长。
+        //
+        // 呼吸的相位来自 `spec.halo`（由界面时钟每帧推进）：**不用 gpui 的
+        // `Animation::repeat()`** —— 那会让框架持续请求整窗重绘（实测空闲态
+        // 60fps 重绘吃掉一半 CPU），而这点慢动作 20fps 就够顺了。
         let span = diameter + 16.0;
-        // 色先取出来：动画回调要求 `'static`，闭包里不能持有 `&Theme`
         let halo_color = t.halo;
-        div().absolute().with_animation(halo_id(&spec.id), breath(), move |el, delta| {
-            let grow = HALO_MAX_GROW * delta;
-            let size = span + grow;
-            el.left(px(-8.0 - grow / 2.0))
-                .top(px(-8.0 - grow / 2.0))
-                .w(px(size))
-                .h(px(size))
-                .rounded(px(size / 2.0))
-                .border_1()
-                .border_color(halo_color)
-                // 越扩越淡：扩张到最大时正好淡到 0，下一轮从 1 重新开始
-                .opacity(1.0 - delta)
-        })
+        let (grow, opacity) = halo_span(spec.halo);
+        let size = span + grow;
+        div()
+            .absolute()
+            .left(px(-8.0 - grow / 2.0))
+            .top(px(-8.0 - grow / 2.0))
+            .w(px(size))
+            .h(px(size))
+            .rounded(px(size / 2.0))
+            .border_1()
+            .border_color(halo_color)
+            // 越扩越淡：扩张到最大时正好淡到 0，下一轮从 1 重新开始
+            .opacity(opacity)
     });
 
     let base = div()
@@ -479,42 +445,13 @@ pub fn disconnect_button(t: &Theme, id: ElementId) -> Stateful<Div> {
         .id(id)
 }
 
-/// 拖动时的「拖影」：跟着指针走的那一枚。
-///
-/// gpui 把拖影当成**独立的一层**画在最上面，并由它自己摆位置（拖动源的原点 +
-/// 指针位移），所以这里从 (0,0) 开始画即可。
-pub struct DragGhost {
-    pub name: String,
-    pub kind: glowlink_core::DeviceKind,
-}
+/// 拖动时 gpui 要求挂一个「被拖起来的东西」，但**我们不画它**：
+/// 被拖起来的正是那枚节点自己（它在运动系统里 1:1 跟指针），再画一个拖影
+/// 等于同一枚盘画两遍。所以这里只回一个零尺寸的占位。
+pub struct DragHandle;
 
-impl Render for DragGhost {
+impl Render for DragHandle {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        let t = Theme::DARK;
-        let (name, kind) = (self.name.clone(), self.kind);
-        div()
-            .absolute()
-            .left(px(0.0))
-            .top(px(0.0))
-            .with_animation(
-                ElementId::Name("ghost-appear".into()),
-                // 一次性 140ms：抓起时轻轻放大一下。id 固定，所以只播一次——
-                // 每次 Render 都重播的话，就是每帧重启动画（看着像卡住）
-                Animation::new(Duration::from_millis(140))
-                    .with_easing(gpui::ease_out_quint()),
-                move |el, delta| {
-                    let scale = GHOST_SCALE_MIN + (GHOST_SCALE - GHOST_SCALE_MIN) * delta;
-                    el.opacity(0.65 + 0.35 * delta).child(node(
-                        &t,
-                        NodeSpec {
-                            id: ElementId::Name("ghost-node".into()),
-                            who: NodeWho::Device(kind),
-                            label: &name,
-                            look: NodeLook::device_default(),
-                            scale,
-                        },
-                    ))
-                },
-            )
+        div().w(px(0.0)).h(px(0.0))
     }
 }

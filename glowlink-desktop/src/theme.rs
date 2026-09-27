@@ -343,9 +343,13 @@ pub const CENTER_HIT: f32 = 84.0;
 ///
 /// 设备节点**没有**固定坐标：它们在以本机为心的环带里按设备 ID 散布
 /// （见 `model/layout::place_devices`）——设计稿那三个槽位已废弃。
-pub const SELF_CENTER: (f32, f32) = (160.0, 240.0);
-/// 空态提示的纵坐标。
-pub const EMPTY_NOTE_Y: f32 = 312.0;
+/// 本机盘圆心。**图区坐标**（= 设计稿 `.node--self` 的 `top:196`，直接用，不再加标题栏）。
+///
+/// 全项目只有这一套坐标系：节点图内。指针事件是唯一的例外，
+/// 在 `view::app::graph_point` 那一处从窗口坐标换算进来。
+pub const SELF_CENTER: (f32, f32) = (160.0, 196.0);
+/// 空态提示的纵坐标（图区坐标）。
+pub const EMPTY_NOTE_Y: f32 = 268.0;
 
 /// 拖拽区与卡片。
 pub const DROPZONE_H: f32 = 44.0;

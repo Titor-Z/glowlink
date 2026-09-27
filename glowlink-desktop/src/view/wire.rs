@@ -30,6 +30,9 @@ pub struct Segment {
 /// 所有连接线（画在节点**之下**：设计稿的层级就是「连线 < 节点」）。
 ///
 /// 放在节点之下还有一个好处：路径两端多画一点也看不见，裁切的误差不用抠。
+///
+/// 坐标就是**图区坐标**（画布铺满节点图、原点在图区左上角），
+/// 与 `layout::self_center()` / `Motion` 同一套，不再做任何换算。
 pub fn wires(segments: Vec<Segment>) -> impl IntoElement {
     canvas(
         |_bounds, _window, _cx| {},

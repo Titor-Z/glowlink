@@ -3,7 +3,8 @@
 //! 拖放本身由 gpui 承担（要真实窗口 + 真实指针），能测的就是这两样：
 //! 拖的是什么、以及配对卡上写什么。
 
-use glowlink_desktop::model::drag::{pair_state_note, DeviceDrag, GHOST_SCALE};
+use glowlink_desktop::model::drag::{pair_state_note, snap_hit, DeviceDrag, GHOST_SCALE};
+use glowlink_desktop::model::layout::{self, Point};
 use glowlink_core::DeviceKind;
 use glowlink_ipc::row::PairingState;
 
@@ -42,4 +43,30 @@ fn drag_payload_carries_the_identity_not_just_the_name() {
     let b = DeviceDrag { id: "bbb".into(), name: "同名机".into(), kind: DeviceKind::Desktop };
     assert_ne!(a, b);
     assert_eq!(a.id, "aaa");
+}
+
+#[test]
+fn the_snap_zone_is_symmetric_in_every_direction() {
+    // 用户真机抱怨过「有的方向要多走、有的方向没到就吸上」——那是拿**指针**算的。
+    // 现在只看气泡自己，所以四个方向必须一模一样。
+    let center = layout::self_center();
+    let self_radius = layout::SELF_RADIUS;
+    let node_radius = layout::DEVICE_RADIUS * GHOST_SCALE;
+    let inside = self_radius + node_radius + 6.0 - 1.0;
+    let outside = self_radius + node_radius + 6.0 + 1.0;
+    for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+        let hit = Point { x: center.x + dx * inside, y: center.y + dy * inside };
+        let miss = Point { x: center.x + dx * outside, y: center.y + dy * outside };
+        assert!(snap_hit(hit, center, self_radius, node_radius), "该吸附：{hit:?}");
+        assert!(!snap_hit(miss, center, self_radius, node_radius), "该落空：{miss:?}");
+    }
+}
+
+#[test]
+fn the_snap_zone_is_size_aware() {
+    // 半径取**当前**值：缩小后的已连接盘、放大中的拖影，判定半径都跟着变
+    let center = layout::self_center();
+    let far = Point { x: center.x + 74.0, y: center.y };
+    assert!(snap_hit(far, center, layout::SELF_RADIUS, 28.0), "拖影大一圈，够得着");
+    assert!(!snap_hit(far, center, layout::SELF_RADIUS, 17.0), "缩小的盘够不着就是够不着");
 }

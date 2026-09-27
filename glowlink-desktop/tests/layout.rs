@@ -4,9 +4,8 @@
 //! 只能靠肉眼发现。所以几何全部抽成纯函数，在这里钉死。
 
 use glowlink_desktop::model::layout::{
-    self, place_devices, place_devices_free, resolve_contacts, self_center, snap_to_device,
-    snaps_to_center,
-    NodeSize, Pinned, Point, Rect, Seed, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
+    self, place_devices, place_devices_free, self_center, snap_to_device, NodeSize, Pinned, Point,
+    Rect, Seed, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
 };
 use glowlink_desktop::theme;
 
@@ -20,10 +19,11 @@ fn device_ids(count: usize) -> Vec<String> {
 }
 
 #[test]
-fn self_center_is_a_full_window_coordinate() {
-    // 设计稿 CSS 里 `.node--self` 写的是 top:196px，那是「节点图内」；加上 44px 标题栏
-    // 才是全窗坐标。这里只认全窗一套，杜绝二次换算。
-    assert_eq!(self_center(), Point { x: 160.0, y: 240.0 });
+fn self_center_is_in_graph_coordinates() {
+    // 设计稿 CSS 里 `.node--self` 写的就是 top:196px（节点图内坐标），这里**直接用**。
+    // 曾经布局用全窗坐标（+44）、渲染容器用图区坐标，两套混着：设备整体低了 44px，
+    // 拖动时气泡还会跳 44px。现在全项目只有图区一套，窗口坐标只在指针那一处换算。
+    assert_eq!(self_center(), Point { x: 160.0, y: 196.0 });
 }
 
 #[test]
@@ -83,15 +83,13 @@ fn devices_never_overlap_the_center_or_each_other() {
             );
             // 盘 + 设备名 + 漂浮余量都要留在**节点图**里（不是「留在窗口里」就够）：
             // 伸进拖拽区会被那一层盖住（用户真机看到过）
+            // 坐标全套都是**图区**（节点图内 320×396），所以边界也按图区算
             let half = theme::NODE_DEVICE_SIZE / 2.0;
-            assert!(center.x - 44.0 > 0.0, "名字左边出窗：{center:?}");
-            assert!(center.x + 44.0 < theme::WINDOW_W, "名字右边出窗：{center:?}");
+            assert!(center.x - 44.0 > 0.0, "名字左边出图区：{center:?}");
+            assert!(center.x + 44.0 < theme::WINDOW_W, "名字右边出图区：{center:?}");
+            assert!(center.y - half - 4.0 > 0.0, "盘顶出图区上边：{center:?}");
             assert!(
-                center.y - half - 4.0 > theme::TITLEBAR_H,
-                "盘顶进标题栏：{center:?}"
-            );
-            assert!(
-                center.y + half + 18.0 + 4.0 < theme::TITLEBAR_H + theme::GRAPH_H,
+                center.y + half + 18.0 + 4.0 < theme::GRAPH_H,
                 "盘或名字伸进拖拽区：{center:?}"
             );
 
@@ -131,7 +129,8 @@ fn rect_is_derived_from_the_center() {
     // GPUI 用左上角定位，而布局给的是圆心——换算只能有一处
     let rect = Rect::from_center(self_center(), NodeSize::SelfNode);
     assert_eq!(rect.size, 84.0);
-    assert_eq!((rect.x, rect.y), (160.0 - 42.0, 240.0 - 42.0));
+    let center = self_center();
+    assert_eq!((rect.x, rect.y), (center.x - 42.0, center.y - 42.0));
 
     let device = Rect::from_center(Point { x: 66.0, y: 86.0 }, NodeSize::Device);
     assert_eq!(device.size, 52.0);
@@ -145,16 +144,6 @@ fn device_label_sits_below_the_disc() {
     assert_eq!(rect.label_y(), rect.y + 52.0 + 6.0);
 }
 
-#[test]
-fn snapping_zone_is_fifty_pixels_from_the_center() {
-    // 任务书 v1.0：圆心距 < 50px 才算吸附成功（设计稿的「84px 盘」是直径，
-    // 换算成半径 42——多给的这 8px 是给手抖留的）
-    assert!(snaps_to_center(Point { x: 160.0, y: 240.0 }), "正中心当然算");
-    assert!(snaps_to_center(Point { x: 160.0 + 49.0, y: 240.0 }), "49px 内算吸附");
-    assert!(snaps_to_center(Point { x: 160.0 + 42.0, y: 240.0 }), "盘缘仍算吸附");
-    assert!(!snaps_to_center(Point { x: 160.0 + 51.0, y: 240.0 }), "51px 就落空");
-    assert!(!snaps_to_center(Point { x: 160.0 + 46.0, y: 240.0 + 46.0 }), "斜向 65px 更落空");
-}
 
 #[test]
 fn snapping_picks_the_nearest_device_within_radius() {
@@ -252,54 +241,3 @@ fn a_seeded_node_keeps_its_spot_when_that_spot_is_legal() {
     assert_eq!(placement.centers[0], home);
 }
 
-#[test]
-fn contact_only_pushes_what_is_actually_touching() {
-    // 用户真机的抱怨：「都没遇到就碰」。所以推开量必须**恰好是重叠量**——
-    // 相切（圆心距 = 半径和）时一点都不许动，再近 1px 才开始推。
-    // 一次只放一枚节点：多枚一起放时几何互相牵扯，测出来的东西说不清。
-    let radius = DEVICE_RADIUS;
-    let obstacle = (Point { x: 100.0, y: 100.0 }, radius);
-    let along = |distance: f32| Point { x: 100.0 + distance, y: 100.0 };
-
-    // 1) 没碰到：一点都不许动
-    let far = vec![along(2.0 * radius + 40.0)];
-    assert_eq!(resolve_contacts(&far, radius, &[obstacle]), far, "没碰到的绝不许动");
-
-    // 2) 正好相切：也不算碰
-    let tangent = vec![along(2.0 * radius)];
-    assert_eq!(resolve_contacts(&tangent, radius, &[obstacle]), tangent, "相切不算碰");
-
-    // 3) 重叠 10px：推到恰好相切（不多推）
-    let overlapping = vec![along(2.0 * radius - 10.0)];
-    let after = resolve_contacts(&overlapping, radius, &[obstacle]);
-    let gap = distance(after[0], obstacle.0);
-    assert!((gap - 2.0 * radius).abs() < 0.01, "推开后应恰好相切：{gap:.2}px");
-    assert!(after[0].x > overlapping[0].x, "往远离障碍物的方向推");
-}
-
-#[test]
-fn a_pushed_node_passes_it_on_to_its_neighbour() {
-    // 被推的又挤到别人：链条要传下去（但只传接触链，不是全场重排）
-    let radius = DEVICE_RADIUS;
-    let obstacle = (Point { x: 100.0, y: 100.0 }, radius);
-    let rest = vec![
-        Point { x: 100.0 + radius + 4.0, y: 100.0 },  // 被障碍物压到
-        Point { x: 100.0 + 3.0 * radius + 4.0, y: 100.0 }, // 被它挤到
-        Point { x: 260.0, y: 380.0 },                  // 远处的旁观者
-    ];
-    let after = resolve_contacts(&rest, radius, &[obstacle]);
-    assert_eq!(after[2], rest[2], "远处的旁观者不该动");
-    assert!(distance(after[0], after[1]) >= 2.0 * radius - 0.5, "被推的两枚不该叠在一起");
-}
-
-#[test]
-fn contact_resolution_is_deterministic() {
-    // 同一输入必须同一输出：否则每帧重算会自己抖起来
-    let radius = DEVICE_RADIUS;
-    let obstacle = (Point { x: 120.0, y: 90.0 }, radius);
-    let rest = vec![Point { x: 130.0, y: 100.0 }, Point { x: 160.0, y: 96.0 }];
-    assert_eq!(
-        resolve_contacts(&rest, radius, &[obstacle]),
-        resolve_contacts(&rest, radius, &[obstacle])
-    );
-}
