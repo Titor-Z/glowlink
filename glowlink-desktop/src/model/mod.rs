@@ -5,7 +5,9 @@
 //! - `state`：界面状态机（四个状态互斥）
 //! - `format`：字节/时间/百分比 → 界面字符
 //! - `drop`：底部拖拽区的状态、文案与投放判定
+//! - `drag`：拖动设备节点去配对的载荷、拖影比例与状态文案
 
+pub mod drag;
 pub mod drop;
 pub mod format;
 pub mod layout;

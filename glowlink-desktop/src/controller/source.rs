@@ -3,6 +3,7 @@
 //! 全部返回 `Result` 或「快照」而不是活对象：界面只读快照，
 //! 阻塞 IO 一律在实现内部的后台线程里（GPUI 的渲染路径绝不能阻塞）。
 
+use glowlink_ipc::row::PairingState;
 use glowlink_core::DeviceKind;
 use glowlink_core::model::error::Result;
 
@@ -36,6 +37,8 @@ pub struct PairingView {
     pub code: String,
     /// 还剩几次输入机会。
     pub remaining: u8,
+    /// 槽位状态（等对方 / 等本机用户 / 已配对 / 被拒 / 失败）。
+    pub state: PairingState,
 }
 
 /// 传输进度快照。

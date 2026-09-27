@@ -7,8 +7,9 @@
 //! 不要拿投影冒充（投影有偏移，看起来像"浮起"而不是"发光"）。
 
 use gpui::{
-    div, prelude::*, px, Animation, AnimationExt, BoxShadow, ElementId, FontWeight, IntoElement,
-    Rgba, SharedString, Styled,
+    div, prelude::*, px, Animation, AnimationElement, AnimationExt, BoxShadow, Context, Div, ElementId,
+    FontWeight,
+    IntoElement, Render, Rgba, SharedString, Stateful, Styled, Window,
 };
 
 use std::time::Duration;
@@ -45,6 +46,23 @@ fn breath() -> Animation {
 /// 漂浮用**线性**推进：自己取正弦，缓动在这里没意义（要的就是匀速转圈）。
 fn drift() -> Animation {
     Animation::new(Duration::from_millis(FLOAT_PERIOD_MS)).repeat()
+}
+
+/// 给设备节点加上漂浮（本机不加：它是图面的锚点）。
+///
+/// 放在 `node()` **之外**：这样调用方可以先接上拖动/点击（那些要 `cx`），
+/// 再套动画——`with_animation` 返回的是另一个类型，接不上就成了死角。
+pub fn drifting<E: IntoElement + Styled + 'static>(
+    el: E,
+    rect: Rect,
+    phase: f32,
+) -> AnimationElement<E> {
+    let (x, y) = (rect.x, rect.y);
+    el.with_animation(drift_id(rect), drift(), move |el, delta| {
+        let theta = (delta + phase) * std::f32::consts::PI * 2.0;
+        el.left(px(x + FLOAT_AMP_X * theta.sin()))
+            .top(px(y + FLOAT_AMP_Y * theta.cos()))
+    })
 }
 
 /// 漂浮圈的动画 id（与呼吸圈、各节点都不能撞）。
@@ -153,6 +171,21 @@ impl NodeLook {
         }
     }
 
+    /// 有设备正被拖到本机头上：环拉满、辉光加强（设计稿「中心盘高亮（环满 tone）」）。
+    pub fn self_target() -> Self {
+        NodeLook {
+            ring_alpha: 1.0,
+            glow_radius: 30.0,
+            glow_alpha: 0.5,
+            ..Self::self_node()
+        }
+    }
+
+    /// 正被拖动的那个节点：压暗待在原地，视觉焦点交给拖影。
+    pub fn device_dragging() -> Self {
+        NodeLook { ring_alpha: 0.3, glow_alpha: 0.1, ..Self::device_default() }
+    }
+
     /// 本机中心盘：环 2px、内缩 6px、常驻呼吸。
     pub fn self_node() -> Self {
         NodeLook {
@@ -247,19 +280,17 @@ pub struct NodeSpec<'a> {
     pub who: NodeWho,
     pub label: &'a str,
     pub look: NodeLook,
-    /// 设备才可点；本机中心盘不可点。
-    pub interactive: bool,
-    /// 漂浮相位（0..1，来自 `layout::float_phase`）。本机不使用。
-    pub float_phase: f32,
+    /// 缩放（拖影 1.08；正常 1.0）。
+    pub scale: f32,
 }
-/// 节点元素。
+/// 节点元素：盘 + 环 + 图标 + 名字。
 ///
-/// 返回 `AnyElement` 而不是具体的 `Div`：因为「本机不漂、设备才漂」这一支分叉会让
-/// 两条分支的元素类型不同（一个裸 `Div`，一个 `AnimationElement<Div>`）。
-pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
+/// 返回 `Stateful<Div>`（**带 id 才算「可交互元素」**）：拖动、点击、hover
+/// 都要求它；而漂浮动画改由调用方用 [`drifting`] 套上——两者顺序不能反。
+pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     let node_size = spec.who.node_size();
     let tone = spec.who.tone();
-    let diameter = node_size.diameter();
+    let diameter = node_size.diameter() * spec.scale;
     let radius = diameter / 2.0;
     let disc_size = diameter - spec.look.disc_inset * 2.0;
     let ring_width = if spec.who.is_self() { 2.0 } else { 1.5 };
@@ -271,7 +302,7 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
     let glow_color = with_alpha(tone, spec.look.glow_alpha);
     let ring_color = with_alpha(tone, spec.look.ring_alpha);
     let icon_ink = t.icon_ink(tone);
-    let icon_box = spec.who.icon_size();
+    let icon_box = spec.who.icon_size() * spec.scale;
     let label_color = if spec.who.is_self() {
         t.text_muted
     } else {
@@ -363,22 +394,36 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
                 .child(SharedString::from(spec.label.to_string())),
         );
 
-    if spec.who.is_self() {
-        // 本机是图面的锚点，**不漂**——漂浮只属于「周围的设备」。
-        // 注意坐标必须在这里显式给：下面那支是靠动画回调每帧设 left/top 的，
-        // 本机不走动画，漏了就落在绝对的 (0,0)，也就是左上角。
-        return base
-            .left(px(spec.rect.x))
-            .top(px(spec.rect.y))
-            .into_any_element();
-    }
+    // id 由**初始位置**派生：跨帧必须稳定，否则动画每帧从头开始、拖动也会断。
+    // 坐标本身由调用方的漂浮动画每帧覆盖；这里给静态值兜底（没有它，
+    // 在「动画未参与 / 被 reduce_motion 冻结」的那一帧会落到 (0,0)，也就是左上角）。
+    base.id(ElementId::NamedInteger(
+        SharedString::new_static("node"),
+        ((spec.rect.x as u64) << 32) | spec.rect.y as u64,
+    ))
+}
 
-    // 漂浮：以槽位为中心的慢椭圆（错相由 `layout::float_phase` 给）
-    let (x, y, phase) = (spec.rect.x, spec.rect.y, spec.float_phase);
-    base.with_animation(drift_id(spec.rect), drift(), move |el, delta| {
-        let theta = (delta + phase) * std::f32::consts::PI * 2.0;
-        el.left(px(x + FLOAT_AMP_X * theta.sin()))
-            .top(px(y + FLOAT_AMP_Y * theta.cos()))
-    })
-    .into_any_element()
+/// 拖动时的「拖影」：跟着指针走的那一枚。
+///
+/// gpui 把拖影当成**独立的一层**画在最上面，并由它自己摆位置（拖动源的原点 +
+/// 指针位移），所以这里从 (0,0) 开始画即可。
+pub struct DragGhost {
+    pub name: String,
+    pub kind: glowlink_core::DeviceKind,
+}
+
+impl Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let t = Theme::DARK;
+        div().absolute().left(px(0.0)).top(px(0.0)).child(node(
+            &t,
+            NodeSpec {
+                rect: Rect { x: 0.0, y: 0.0, size: 0.0 },
+                who: NodeWho::Device(self.kind),
+                label: &self.name,
+                look: NodeLook::device_default(),
+                scale: crate::model::drag::GHOST_SCALE,
+            },
+        ))
+    }
 }

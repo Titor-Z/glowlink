@@ -7,19 +7,20 @@
 //! Windows = DWM 组合属性），窗内再叠 `backdrop_filter` 做卡片玻璃。
 
 use gpui::{
-    div, prelude::*, px, App, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    div, prelude::*, px, App, Context, DragMoveEvent, IntoElement, MouseButton, ParentElement,
+    Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::controller::{DeviceSource, DeviceView, IpcSource};
+use crate::controller::{DeviceSource, DeviceView, IpcSource, PairingSource};
+use crate::model::drag::DeviceDrag;
 use crate::model::layout::{self, NodeSize};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::DropState;
-use crate::view::{dropzone, node, titlebar};
+use crate::view::{dropzone, node, paircard, titlebar};
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -47,6 +48,24 @@ pub struct AppRoot {
     drop: DropState,
     /// 已选中的目标设备名（点设备节点选中；一台设备时不必选）。
     selected: Option<String>,
+    /// 配对能力（预览模式下没有）。
+    pairing: Option<Arc<dyn PairingSource>>,
+    /// 正在被拖动的那台设备 ID（只用于压暗它自己）。
+    dragging: Option<String>,
+    /// 拖动中指针的**全窗坐标**（落点是否在中心盘里由它算，不另存布尔值）。
+    /// 松手落在别处时由根节点的 mouse_up 清掉。
+    drag_at: Option<layout::Point>,
+    /// 本机发起、正在等的配对（编号 + 对端 + 码 + 状态）。
+    pair: Option<PairingCard>,
+}
+
+/// 界面要显示的配对卡内容。
+#[derive(Clone, Debug, PartialEq)]
+struct PairingCard {
+    token: String,
+    peer: String,
+    code: String,
+    state: glowlink_ipc::row::PairingState,
 }
 
 impl AppRoot {
@@ -54,6 +73,7 @@ impl AppRoot {
         device_name: impl Into<SharedString>,
         source: Arc<dyn DeviceSource>,
         service: Option<Arc<IpcSource>>,
+        pairing: Option<Arc<dyn PairingSource>>,
     ) -> Self {
         let devices = source.devices();
         let service_on = service.as_ref().map(|s| s.running()).unwrap_or(false);
@@ -77,6 +97,40 @@ impl AppRoot {
             placed_ids,
             drop: DropState::Idle,
             selected: None,
+            pairing,
+            dragging: None,
+            drag_at: None,
+            pair: None,
+        }
+    }
+
+    /// 拖动的落点是否在本机盘上（**全窗坐标**）。
+    ///
+    /// 派生值：由 `drag_at` 现算，不另存一个会跟它不一致的布尔量。
+    fn over_center(&self) -> bool {
+        self.drag_at.map(layout::hits_center).unwrap_or(false)
+    }
+
+    /// 把一台设备拖到了本机盘上：发起配对。
+    ///
+    /// 码要等守护进程握手完才有（下一轮快照），所以先亮一张只有名字的卡，
+    /// 码到了再补上——这样用户立刻看到「有反应了」。
+    fn start_pairing(&mut self, drag: &DeviceDrag) {
+        let Some(pairing) = self.pairing.clone() else {
+            log::info!("预览模式：不做配对");
+            return;
+        };
+        match pairing.start(&drag.id) {
+            Ok(()) => {
+                log::info!("发起配对：{}（{}）", drag.name, drag.id);
+                self.pair = Some(PairingCard {
+                    token: String::new(),
+                    peer: drag.name.clone(),
+                    code: String::new(),
+                    state: glowlink_ipc::row::PairingState::WaitingPeer,
+                });
+            }
+            Err(e) => log::info!("配对发起失败：{e}"),
         }
     }
 
@@ -93,13 +147,15 @@ impl AppRoot {
     pub fn sync(&mut self) -> bool {
         let fresh = self.source.devices();
         let service_on = self.service.as_ref().map(|s| s.running()).unwrap_or(false);
-        if fresh == self.devices && service_on == self.service_on {
+        if fresh == self.devices && service_on == self.service_on && self.pair.is_none() {
             return false;
         }
+        let mut changed = false;
         if fresh != self.devices {
             // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
             log::info!("设备表更新：{} 台", fresh.len());
             self.devices = fresh;
+            changed = true;
             self.state.observe_devices(self.devices.len());
             // 位置只在集合变了才算：同一批设备换序（谁先应答不一定）不该挪位置
             let ids: Vec<String> = self.devices.iter().map(|d| d.id.clone()).collect();
@@ -107,11 +163,42 @@ impl AppRoot {
                 (self.placement, self.placed_ids) = Self::layout_for(&self.devices);
             }
         }
+        // 配对卡跟着 `PAIRINGS` 走：码与状态都在那些行里，界面不自己猜
+        if let (Some(card), Some(pairing)) = (self.pair.clone(), self.pairing.clone()) {
+            let rows = pairing.outgoing();
+            let latest = rows
+                .iter()
+                .filter(|row| row.peer == card.peer)
+                .next_back()
+                .cloned();
+            match latest {
+                Some(row) => {
+                    let fresh = PairingCard {
+                        token: row.token,
+                        peer: row.peer,
+                        code: row.code,
+                        state: row.state,
+                    };
+                    if fresh != card {
+                        log::info!("配对状态：{}", crate::model::drag::pair_state_note(fresh.state));
+                        self.pair = Some(fresh);
+                        changed = true;
+                    }
+                }
+                // 槽位已经从守护进程的表里消失：收起卡片，不留一张看不出死活的浮层
+                None if !card.token.is_empty() => {
+                    self.pair = None;
+                    changed = true;
+                }
+                None => {}
+            }
+        }
         if service_on != self.service_on {
             log::info!("服务开关：{}", if service_on { "开" } else { "关" });
             self.service_on = service_on;
+            changed = true;
         }
-        true
+        changed
     }
 }
 
@@ -190,17 +277,48 @@ impl Render for AppRoot {
                     .copied()
                     .unwrap_or_else(layout::self_center);
                 let rect = layout::Rect::from_center(center, NodeSize::Device);
-                node::node(
+                let phase = self.placement.phases.get(index).copied().unwrap_or(0.0);
+                let being_dragged = self.dragging.as_deref() == Some(device.id.as_str());
+                let payload = DeviceDrag {
+                    id: device.id.clone(),
+                    name: device.name.clone(),
+                    kind: device.kind,
+                };
+                let visual = node::node(
                     &t,
                     node::NodeSpec {
                         rect,
                         who: node::NodeWho::Device(device.kind),
                         label: &device.name,
-                        look: node::NodeLook::device_default(),
-                        interactive: true,
-                        float_phase: self.placement.phases.get(index).copied().unwrap_or(0.0),
+                        look: if being_dragged {
+                            // 被拖走的那枚压暗待在原地：焦点交给拖影，但位置不丢
+                            node::NodeLook::device_dragging()
+                        } else {
+                            node::NodeLook::device_default()
+                        },
+                        scale: 1.0,
                     },
                 )
+                // 拖动：起手就记住是谁，并按设备 ID 建拖影（拖影自己跟着指针走）
+                .on_drag(payload, |drag: &DeviceDrag, _pos, _window, cx| {
+                    cx.new(|_| node::DragGhost { name: drag.name.clone(), kind: drag.kind })
+                })
+                // **这个回调在元素内外都会触发**（gpui 按拖动起点投递），
+                // 所以指针位置能一直跟着更新——落点判定就靠它
+                .on_drag_move(cx.listener(
+                    |this, event: &DragMoveEvent<DeviceDrag>, _window, cx| {
+                        let point = window_point(event.bounds.origin, event.event.position);
+                        let dragging = Some(event.drag(cx).id.clone());
+                        let changed = this.dragging != dragging || this.drag_at != Some(point);
+                        if changed {
+                            this.dragging = dragging;
+                            this.drag_at = Some(point);
+                            cx.notify();
+                        }
+                    },
+                ));
+                // 漂浮放在最后：`with_animation` 会换掉元素类型，接不上拖动/点击
+                node::drifting(visual, rect, phase).into_any_element()
             })
             .collect();
 
@@ -208,6 +326,19 @@ impl Render for AppRoot {
         let self_rect = layout::Rect::from_center(layout::self_center(), NodeSize::SelfNode);
 
         div()
+            .id("root")
+            // 松手落在中心盘的**外面**时，drop 目标不会触发（它 `stop_propagation`），
+            // 于是事件冒泡到这里——正好用来把拖动态清掉，否则高亮会一直挂着
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.drag_at.is_some() || this.dragging.is_some() {
+                        this.drag_at = None;
+                        this.dragging = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .flex()
             .flex_col()
             .w(px(theme::WINDOW_W))
@@ -251,16 +382,55 @@ impl Render for AppRoot {
                             rect: graph_space(self_rect),
                             who: node::NodeWho::SelfNode,
                             label: &self.device_name.to_string(),
-                            look: node::NodeLook::self_node(),
-                            interactive: false,
-                            float_phase: 0.0,
+                            // 有设备正拖到头上就高亮：这是「松手会不会生效」的唯一提示
+                            look: if self.over_center() {
+                                node::NodeLook::self_target()
+                            } else {
+                                node::NodeLook::self_node()
+                            },
+                            scale: 1.0,
                         },
-                    )),
+                    ))
+                    // 中心盘的落点区：84px 的盘本身（不含呼吸光圈）。
+                    // 设计稿那句「落在中心 84px 内才生效」就是它。
+                    .child(
+                        div()
+                            .id("center-hit")
+                            .absolute()
+                            .left(px(self_rect.x - theme::CENTER_HIT / 2.0))
+                            .top(px(self_rect.y - theme::CENTER_HIT / 2.0))
+                            .w(px(theme::CENTER_HIT))
+                            .h(px(theme::CENTER_HIT))
+                            .rounded(px(theme::CENTER_HIT / 2.0))
+                            .on_drop(cx.listener(
+                                |this, drag: &DeviceDrag, _window, cx| {
+                                    // 命中区是圆，而落点区是方：这里再用圆判定一次
+                                    let inside =
+                                        this.drag_at.map(layout::hits_center).unwrap_or(false);
+                                    this.drag_at = None;
+                                    this.dragging = None;
+                                    if inside {
+                                        this.start_pairing(drag);
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+            )
+            .when_some(self.pair.clone(), |el, card| {
+                el.child(paircard::card(&t, &card.peer, &card.code, card.state))
+            })
             )
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
             .child(titlebar::window_border(&t))
     }
+}
+
+/// 拖动事件里的指针位置 → **全窗坐标**。
+///
+/// `DragMoveEvent` 给的是「相对被拖元素」的位置，所以要加上那个元素的窗口坐标。
+fn window_point(origin: gpui::Point<gpui::Pixels>, position: gpui::Point<gpui::Pixels>) -> layout::Point {
+    layout::Point { x: origin.x.as_f32() + position.x.as_f32(), y: origin.y.as_f32() + position.y.as_f32() }
 }
 
 /// 全窗坐标 → 节点图内坐标（减掉标题栏高度）。
@@ -276,6 +446,7 @@ pub fn open(
     device_name: String,
     source: Arc<dyn DeviceSource>,
     service: Option<Arc<IpcSource>>,
+    pairing: Option<Arc<dyn PairingSource>>,
     cx: &mut App,
 ) {
     let bounds = corner_bounds(cx);
@@ -296,7 +467,7 @@ pub fn open(
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let view = cx.new(|_| AppRoot::new(device_name, source, service));
+        let view = cx.new(|_| AppRoot::new(device_name, source, service, pairing));
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
         // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
         let weak = view.downgrade();

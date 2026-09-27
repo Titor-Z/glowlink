@@ -6,4 +6,5 @@
 pub mod app;
 pub mod dropzone;
 pub mod node;
+pub mod paircard;
 pub mod titlebar;

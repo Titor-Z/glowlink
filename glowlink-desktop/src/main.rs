@@ -7,7 +7,7 @@ use gpui::App;
 
 use std::sync::Arc;
 
-use glowlink_desktop::controller::{DeviceSource, IpcSource, PreviewSource};
+use glowlink_desktop::controller::{DeviceSource, IpcSource, PairingSource, PreviewSource};
 
 fn main() {
     // 与 CLI 同一套日志口径：先看 stderr。gpui 的字体/渲染问题会把原因直接打日志，
@@ -24,22 +24,30 @@ fn main() {
 
     // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
     // 不自动拉起的话，每次测试都得先手敲一遍 `glowlink on` —— 那是把服务当命令行工具的用法。
-    let (source, service): (Arc<dyn DeviceSource>, Option<Arc<IpcSource>>) = if preview {
+    let (source, service, pairing): (
+        Arc<dyn DeviceSource>,
+        Option<Arc<IpcSource>>,
+        Option<Arc<dyn PairingSource>>,
+    ) = if preview {
         log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
-        (Arc::new(PreviewSource::discovered()), None)
+        (Arc::new(PreviewSource::discovered()), None, None)
     } else {
         if !ipc.running() {
             log::info!("服务没在跑，正在拉起守护进程…");
             ipc.start_service();
         }
-        (Arc::clone(&ipc) as Arc<dyn DeviceSource>, Some(Arc::clone(&ipc)))
+        (
+            Arc::clone(&ipc) as Arc<dyn DeviceSource>,
+            Some(Arc::clone(&ipc)),
+            Some(Arc::clone(&ipc) as Arc<dyn PairingSource>),
+        )
     };
 
     gpui_ce_platform::application()
         // 图标必须注册资源源，否则 `svg()` 静默不画（不报错、不警告）
         .with_assets(glowlink_desktop::assets::Assets)
         .run(move |cx: &mut App| {
-            glowlink_desktop::view::app::open(name.clone(), source, service, cx);
+            glowlink_desktop::view::app::open(name.clone(), source, service, pairing, cx);
             cx.activate(true);
         });
 }

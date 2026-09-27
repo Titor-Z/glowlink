@@ -5,6 +5,7 @@
 //! 有了它，界面可以在**离线**状态下进入任意状态并被截图，
 //! 而不必为了看一眼传输卡去真的传一个文件。
 
+use glowlink_ipc::row::PairingState;
 use glowlink_core::DeviceKind;
 use glowlink_core::model::error::{GlowError, Result};
 
@@ -85,6 +86,7 @@ impl PreviewPairing {
                 peer: "iPad mini".into(),
                 code: "518892".into(),
                 remaining: 3,
+                state: PairingState::WaitingUser,
             }],
         }
     }
@@ -102,6 +104,7 @@ impl PairingSource for PreviewPairing {
             peer: "Pixel 9".into(),
             code: "518892".into(),
             remaining: 3,
+                state: PairingState::WaitingUser,
         }]
     }
 

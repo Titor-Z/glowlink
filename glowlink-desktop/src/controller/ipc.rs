@@ -279,7 +279,13 @@ fn pending_view(row: PendingRow) -> PendingView {
 }
 
 fn pairing_view(row: PairingRow) -> PairingView {
-    PairingView { token: row.token, peer: row.peer, code: row.code, remaining: row.remaining }
+    PairingView {
+        token: row.token,
+        peer: row.peer,
+        code: row.code,
+        remaining: row.remaining,
+        state: row.state,
+    }
 }
 
 impl DeviceSource for IpcSource {
