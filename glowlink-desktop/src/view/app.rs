@@ -40,7 +40,7 @@ impl AppRoot {
         // 初值也记一笔：排查「界面是空的」时，先分清楚是「真没设备」还是「压根没连上」
         log::info!("设备表初值：{} 台", devices.len());
         let mut state = UiState::new();
-        state.set_devices(devices.len());
+        state.observe_devices(devices.len());
         AppRoot { device_name: device_name.into(), state, source, devices }
     }
 
@@ -56,14 +56,8 @@ impl AppRoot {
         // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
         log::info!("设备表更新：{} 台", fresh.len());
         self.devices = fresh;
-        self.state.set_devices(self.devices.len());
+        self.state.observe_devices(self.devices.len());
         true
-    }
-
-    /// 搜索结束（进发现态）。
-    pub fn finish_search(&mut self, cx: &mut Context<Self>) {
-        self.state.finish_search();
-        cx.notify();
     }
 }
 

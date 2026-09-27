@@ -76,21 +76,34 @@ impl UiState {
     }
 
     /// 搜索结束（无论有没有找到设备都进入发现态：空图也是结果）。
+    /// 由 [`Self::observe_devices`] 在设备表变化时调用。
     pub fn finish_search(&mut self) {
         if self.phase == Phase::Searching {
             self.phase = Phase::Discover;
         }
     }
 
-    /// 更新设备台数。**不自动切换状态**：状态由用户动作驱动，
-    /// 否则设备一多一少界面就会自己跳来跳去。
-    pub fn set_devices(&mut self, count: usize) {
+    /// 更新设备台数，并据此决定「搜索中 / 发现态」。
+    ///
+    /// 为什么状态要跟着设备数走：启动后永远是 `Searching`，而 `Searching` 下
+    /// **设备节点不画**（设计稿：搜索中只有自机 + spinner）。
+    /// 实测就是这里漏了——真设备早就拿到了，屏幕上却只有中心那枚盘。
+    /// 相反，设备全部掉线时不回到搜索态的话，空图会挂着上一次的残留。
+    ///
+    /// 只动 `Searching` / `Discover` 两态：传输、配对态由用户动作驱动，
+    /// 不能被一次刷新掳走。
+    pub fn observe_devices(&mut self, count: usize) {
         self.device_count = count;
         // 选中的设备下线了，选中必须跟着失效，否则界面指着空气
         if let Some(index) = self.selected {
             if index >= count {
                 self.selected = None;
             }
+        }
+        match self.phase {
+            Phase::Searching if count > 0 => self.finish_search(),
+            Phase::Discover if count == 0 => self.phase = Phase::Searching,
+            _ => {}
         }
     }
 
