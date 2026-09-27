@@ -5,7 +5,7 @@
 
 use glowlink_desktop::model::layout::{
     self, place_devices, place_devices_free, self_center, snap_to_device, snaps_to_center,
-    NodeSize, Pinned, Point, Rect, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
+    NodeSize, Pinned, Point, Rect, Seed, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
 };
 use glowlink_desktop::theme;
 
@@ -198,7 +198,7 @@ fn a_pinned_node_keeps_its_exact_spot_and_others_move_out_of_its_way() {
     let pinned = Pinned { point: Point { x: 220.0, y: 300.0 }, radius: 17.0 };
     let names = device_ids(6);
     let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let placement = place_devices(&ids, &[pinned]);
+    let placement = place_devices(&ids, &[pinned], &[]);
 
     for center in &placement.centers {
         let gap = distance(*center, pinned.point);
@@ -219,8 +219,34 @@ fn pinned_nodes_do_not_drag_the_floating_ones_across_the_window() {
     let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     let free = place_devices_free(&ids);
     let pinned = Pinned { point: Point { x: 60.0, y: 100.0 }, radius: 17.0 };
-    let with_pin = place_devices(&ids, &[pinned]);
+    let with_pin = place_devices(&ids, &[pinned], &[]);
     for (a, b) in free.centers.iter().zip(with_pin.centers.iter()) {
         assert!(distance(*a, *b) < MIN_DIST, "位置被钉子拽动了：{a:?} → {b:?}");
     }
+}
+
+#[test]
+fn a_seeded_node_starts_where_it_is_but_is_still_pushed_out_of_illegal_spots() {
+    // 断开连接后就地留下的那台：从当前点出发，但**不能**停在压住中心盘的位置上。
+    // 真机上的表现就是「恢复大小后图标跑到中心盘下面去了」——盘变回 26px 半径，
+    // 而环上的点离中心只有 57px，比 42+26 小。
+    let ids = ["alpha"];
+    let too_close = Point { x: 160.0 + 57.0, y: 240.0 };
+    let seeds = [Seed { id: "alpha".into(), point: too_close }];
+    let placement = place_devices(&ids, &[], &seeds);
+    let center = self_center();
+    let gap = distance(placement.centers[0], center);
+    assert!(gap >= CENTER_CLEAR - 0.5, "被排斥推到合法距离：{gap:.1}px");
+    // 方向应当保留（沿原方向推出去，而不是换个方向）
+    assert!(placement.centers[0].x > center.x, "仍在右侧：{:?}", placement.centers[0]);
+}
+
+#[test]
+fn a_seeded_node_keeps_its_spot_when_that_spot_is_legal() {
+    // 「位置就在那儿了」：合法就一点都别动
+    let ids = ["alpha"];
+    let home = Point { x: 60.0, y: 120.0 };
+    let seeds = [Seed { id: "alpha".into(), point: home }];
+    let placement = place_devices(&ids, &[], &seeds);
+    assert_eq!(placement.centers[0], home);
 }

@@ -8,3 +8,4 @@ pub mod dropzone;
 pub mod node;
 pub mod paircard;
 pub mod titlebar;
+pub mod wire;

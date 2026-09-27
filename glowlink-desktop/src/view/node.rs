@@ -180,6 +180,20 @@ impl NodeLook {
         }
     }
 
+    /// 已连接：**保留高亮**（环拉满 + 辉光加强 + 常驻呼吸）。
+    ///
+    /// 不做「变色」：已连接不是第五种状态色，它是「这台我认识」——
+    /// 颜色继续归设备类型（四色语义不被动摇）。
+    pub fn device_connected() -> Self {
+        NodeLook {
+            ring_alpha: 1.0,
+            glow_radius: 22.0,
+            glow_alpha: 0.46,
+            halo: true,
+            ..Self::device_default()
+        }
+    }
+
     pub fn device_target() -> Self {
         NodeLook {
             ring_alpha: 1.0,
@@ -435,6 +449,34 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     // 坐标本身由调用方的漂浮动画每帧覆盖；这里给静态值兜底（没有它，
     // 在「动画未参与 / 被 reduce_motion 冻结」的那一帧会落到 (0,0)，也就是左上角）。
     base.id(spec.id)
+}
+
+/// 断开连接的小按钮：贴在节点右上角（只在已连接时出现）。
+///
+/// 墨色走中性、hover 提亮——按「辉光即语义」，接口类图标不借四色里的任何一个。
+/// 返回 `Stateful<Div>` 是为了让调用方接 `on_click`（它才有 `cx`）。
+pub fn disconnect_button(t: &Theme, id: ElementId) -> Stateful<Div> {
+    div()
+        .absolute()
+        // 略微探出盘外：贴在盘角上会压住图标
+        .right(px(-6.0))
+        .top(px(-6.0))
+        .w(px(16.0))
+        .h(px(16.0))
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_pointer()
+        .hover(|style| style.bg(t.hover_bg))
+        .child(
+            gpui::svg()
+                .path("icons/unlink.svg")
+                .w(px(12.0))
+                .h(px(12.0))
+                .text_color(t.text_secondary),
+        )
+        .id(id)
 }
 
 /// 拖动时的「拖影」：跟着指针走的那一枚。

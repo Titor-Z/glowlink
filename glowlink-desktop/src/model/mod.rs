@@ -6,7 +6,9 @@
 //! - `format`：字节/时间/百分比 → 界面字符
 //! - `drop`：底部拖拽区的状态、文案与投放判定
 //! - `drag`：拖动设备节点去配对的载荷、拖影比例与状态文案
+//! - `connect`：拖到一起之后的连接态（缩小比例、连接环半径、方位分角）
 
+pub mod connect;
 pub mod drag;
 pub mod drop;
 pub mod format;

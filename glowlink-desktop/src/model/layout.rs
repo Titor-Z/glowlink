@@ -56,6 +56,16 @@ pub const CENTER_CLEAR: f32 = SELF_RADIUS + DEVICE_RADIUS + 24.0;
 /// 两枚**常规**设备的圆心最小距离（= 52 + 8 = 60）。
 pub const MIN_DIST: f32 = 2.0 * DEVICE_RADIUS + GAP;
 
+/// 一个「心里想待的位置」：从这儿开始找位置（但仍会被排斥推开）。
+///
+/// 用途：断开连接后就地留下的那台——它不回原位，可是也不能压在中心盘或别人身上，
+/// 所以给它一个起点，让排斥迭代把它推到最近的合法位置。
+#[derive(Clone, Debug, PartialEq)]
+pub struct Seed {
+    pub id: String,
+    pub point: Point,
+}
+
 /// 已被「钉住」的节点：位置固定，别人绕着它排。
 ///
 /// 用途：拖到中心连上的那台，位置由吸附规则决定并保留下来（断开也不回原位）。
@@ -111,11 +121,20 @@ pub struct Placement {
 ///
 /// **与输入顺序无关**（内部先按 ID 排序再算，最后映回原顺序）：
 /// 发现层返回设备表的顺序可能变（谁先应答），顺序一变位置就整体挪一下，看起来像全体抽搐。
-pub fn place_devices(ids: &[&str], pinned: &[Pinned]) -> Placement {
+pub fn place_devices(ids: &[&str], pinned: &[Pinned], seeds: &[Seed]) -> Placement {
     let mut sorted: Vec<&str> = ids.to_vec();
     sorted.sort_unstable();
 
-    let mut points: Vec<Point> = sorted.iter().map(|id| seeded_point(id)).collect();
+    let mut points: Vec<Point> = sorted
+        .iter()
+        .map(|id| {
+            seeds
+                .iter()
+                .find(|seed| seed.id == *id)
+                .map(|seed| seed.point)
+                .unwrap_or_else(|| seeded_point(id))
+        })
+        .collect();
     relax(&mut points, pinned);
 
     // 映回调用者的顺序
@@ -129,9 +148,9 @@ pub fn place_devices(ids: &[&str], pinned: &[Pinned]) -> Placement {
     Placement { centers, phases }
 }
 
-/// 只要「不重叠」的位置（没有钉子时用）。
+/// 只要「不重叠」的位置（没有钉子与种子时用）。
 pub fn place_devices_free(ids: &[&str]) -> Placement {
-    place_devices(ids, &[])
+    place_devices(ids, &[], &[])
 }
 
 /// ID → 一个看起来随机的落点（在中心盘净空之外、窗口之内）。
@@ -244,6 +263,11 @@ fn dist2(a: Point, b: Point) -> f32 {
 pub fn snaps_to_center(point: Point) -> bool {
     let radius = crate::model::drag::SNAP_RADIUS;
     dist2(point, self_center()) <= radius * radius
+}
+
+/// 两点距离（px）。
+pub fn distance(a: Point, b: Point) -> f32 {
+    dist2(a, b).sqrt()
 }
 
 /// 到中心盘圆心的距离（px）。日志与调试用——数字比「吸/不吸」更能说明问题。
