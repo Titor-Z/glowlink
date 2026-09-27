@@ -26,6 +26,9 @@ pub use model::probe::{
     VersionVerdict,
 };
 pub use model::ring::{RingBuffer, SharedRing};
+pub use patterns::secure::{
+    session_slot, NoTrust, SecureTransport, SessionInfo, SessionSlot, TrustList,
+};
 pub use patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };

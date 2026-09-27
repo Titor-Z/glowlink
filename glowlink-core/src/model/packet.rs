@@ -35,6 +35,13 @@ const KIND_PROBE: u8 = 8;
 /// 对探测的应答，携带版本与 PID，用于识别“是我们自己的旧进程”。
 const KIND_PONG: u8 = 9;
 
+/// 加密握手：携带 [`SecureHello`] 的定长载荷（临时公钥 + 身份公钥 + 随机数）。
+const KIND_SECURE_HELLO: u8 = 10;
+/// 加密握手：身份证明（能算出它 == 对方持有长期私钥）。
+const KIND_SECURE_PROOF: u8 = 11;
+/// 加密数据：载荷是内层帧的 AEAD 密文，接收方解密后再解析内层帧。
+const KIND_SECURE_DATA: u8 = 12;
+
 /// 设备广播报文。
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]
@@ -64,6 +71,12 @@ pub enum Frame {
     Probe(Probe),
     /// 探测应答：告诉对方我们的版本与进程号。
     Pong(Probe),
+    /// 加密握手消息（对 `packet` 层是**不透明字节**，语义由 `crypto::handshake` 解释）。
+    SecureHello(Vec<u8>),
+    /// 加密握手的身份证明。
+    SecureProof([u8; 32]),
+    /// 加密数据帧：内层帧的密文。
+    SecureData(Vec<u8>),
 }
 
 /// 端口自检握手载荷。
@@ -133,6 +146,20 @@ impl Frame {
                 w.u8(KIND_PONG);
                 w.probe(p)?;
             }
+            Frame::SecureHello(payload) => {
+                w.u8(KIND_SECURE_HELLO);
+                w.u32(payload.len() as u32);
+                w.raw(payload);
+            }
+            Frame::SecureProof(proof) => {
+                w.u8(KIND_SECURE_PROOF);
+                w.raw(proof);
+            }
+            Frame::SecureData(payload) => {
+                w.u8(KIND_SECURE_DATA);
+                w.u32(payload.len() as u32);
+                w.raw(payload);
+            }
         }
         Ok(w.buf)
     }
@@ -186,6 +213,25 @@ impl Frame {
             },
             KIND_PROBE => Frame::Probe(r.probe()?),
             KIND_PONG => Frame::Pong(r.probe()?),
+            KIND_SECURE_HELLO => {
+                let len = r.u32()? as usize;
+                if len > MAX_FRAME {
+                    return Err(GlowError::Protocol(format!("加密握手载荷过大：{len}")));
+                }
+                Frame::SecureHello(r.raw(len)?.to_vec())
+            }
+            KIND_SECURE_PROOF => {
+                let mut proof = [0u8; 32];
+                proof.copy_from_slice(r.raw(32)?);
+                Frame::SecureProof(proof)
+            }
+            KIND_SECURE_DATA => {
+                let len = r.u32()? as usize;
+                if len > MAX_FRAME {
+                    return Err(GlowError::Protocol(format!("加密帧过大：{len}")));
+                }
+                Frame::SecureData(r.raw(len)?.to_vec())
+            }
             other => return Err(GlowError::Protocol(format!("未知帧类型：{other}"))),
         };
         Ok(frame)

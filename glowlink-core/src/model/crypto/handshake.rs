@@ -125,15 +125,11 @@ impl Session {
     }
 }
 
-/// 发起方：生成临时密钥并产出自己的 `SecureHello`。
-pub fn start(identity: &Identity) -> (EphemeralSecret, SecureHello) {
-    let secret = EphemeralSecret::random_from_rng(OsRng);
-    let hello = SecureHello::build(identity, &PublicKey::from(&secret));
-    (secret, hello)
-}
-
-/// 响应方：收到对方 `SecureHello` 后生成自己的 `SecureHello`。
-pub fn respond(identity: &Identity, _peer: &SecureHello) -> (EphemeralSecret, SecureHello) {
+/// 生成临时密钥与自己的 `SecureHello`。
+///
+/// 两端都**先发自己的 hello、再读对方的**（对称流程），所以不需要知道谁是发起方，
+/// 也不必等对方先开口——这样两端谁先触发都不会卡住。
+pub fn begin(identity: &Identity) -> (EphemeralSecret, SecureHello) {
     let secret = EphemeralSecret::random_from_rng(OsRng);
     let hello = SecureHello::build(identity, &PublicKey::from(&secret));
     (secret, hello)

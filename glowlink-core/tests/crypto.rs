@@ -6,7 +6,7 @@
 
 use glowlink_core::model::crypto::cipher::{FrameCipher, TAG_LEN};
 use glowlink_core::model::crypto::handshake::{
-    finish, keys_equal, respond, start, Role, SecureHello, HANDSHAKE_VERSION,
+    begin, finish, keys_equal, Role, SecureHello, HANDSHAKE_VERSION,
 };
 use glowlink_core::model::crypto::identity::{fingerprint_eq, fingerprint_of, Identity};
 use glowlink_core::model::crypto::kdf::{hkdf_expand, hkdf_extract, hmac_sha256, sha256};
@@ -154,8 +154,8 @@ fn handshake(
     SecureHello,
     SecureHello,
 ) {
-    let (init_secret, init_hello) = start(initiator_id);
-    let (resp_secret, resp_hello) = respond(responder_id, &init_hello);
+    let (init_secret, init_hello) = begin(initiator_id);
+    let (resp_secret, resp_hello) = begin(responder_id);
     let init_session = finish(Role::Initiator, init_secret, &init_hello, &resp_hello, initiator_id)
         .expect("发起方握手应成功");
     let resp_session =
@@ -222,7 +222,7 @@ fn mitm_produces_mismatched_codes() {
 #[test]
 fn hello_roundtrips_and_rejects_damage() {
     let identity = Identity::generate();
-    let (_, hello) = start(&identity);
+    let (_, hello) = begin(&identity);
     let bytes = hello.encode();
     assert_eq!(bytes.len(), 81, "定长线格式");
     assert_eq!(SecureHello::decode(&bytes).unwrap(), hello);
@@ -237,7 +237,7 @@ fn hello_roundtrips_and_rejects_damage() {
 fn small_order_public_key_is_refused() {
     // 全零公钥是小阶点 ⇒ 共享密钥可预测，必须拒绝而不是照常协商
     let identity = Identity::generate();
-    let (secret, own) = start(&identity);
+    let (secret, own) = begin(&identity);
     let mut peer = own.clone();
     peer.ephemeral = [0u8; 32];
     assert!(finish(Role::Initiator, secret, &own, &peer, &identity).is_err());
