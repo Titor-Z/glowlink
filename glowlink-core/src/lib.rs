@@ -14,6 +14,9 @@ pub use controller::transfer::{
     TransferController, TransferListener, TransferTransport, TransferView,
 };
 pub use model::config::Config;
+pub use model::crypto::{
+    fingerprint_of, hkdf_expand, hmac_sha256, sha256, FrameCipher, Identity, Role, SecureHello, Session,
+};
 pub use model::device::{Device, DeviceBook, DeviceId};
 pub use model::error::{GlowError, Result};
 pub use model::packet::{Frame, Hello, Probe, CHUNK_SIZE, DISCOVERY_PORT, VERSION_STR};

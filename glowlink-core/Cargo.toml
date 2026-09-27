@@ -3,4 +3,20 @@ name = "glowlink-core"
 version.workspace = true
 edition.workspace = true
 
+# 依赖政策：默认零第三方依赖，**密码学例外**（见 AGENTS.md「编码规范」）。
+# 这些依赖必须登记在案，且 Cargo.lock 必须提交（CI 用 --locked）。
 [dependencies]
+# 摘要与密钥派生
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+# 传输加密（AEAD）
+chacha20poly1305 = "0.10"
+# 密钥协商（X25519）
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+# 系统熵源（跨平台：Unix /dev/urandom、Windows BCryptGenRandom 由 getrandom 内部处理）
+rand_core = { version = "0.6", features = ["getrandom"] }
+# 密钥材料用完清零
+zeroize = "1"
+# 常量时间比较（MAC / 指纹比对，避免时序泄露）
+subtle = "2"

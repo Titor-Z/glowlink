@@ -38,13 +38,19 @@ else
   exit 1
 fi
 
-# 只编译这一个测试目标，并从 cargo 输出里取回二进制路径（比猜 hash 稳）
-bin=$(cargo test -p "$package" --test "$target" --no-run -j 2 2>&1 \
-  | sed -n 's/.*Executable [^(]*(\(.*\))/\1/p' | tail -1)
-
+# 只编译这一个测试目标，并从 cargo 输出里取回二进制路径（比猜 hash 稳）。
+# 输出先落文件：编译报错时必须原样打出来，不能被管道吞掉（否则表现为「脚本什么都不干」）。
+log=$(mktemp)
+trap 'rm -f "${log}"' EXIT
+if ! cargo test -p "$package" --test "$target" --no-run -j 2 >"${log}" 2>&1; then
+  echo "编译失败（${package} / tests/${target}.rs）：" >&2
+  cat "${log}" >&2
+  exit 1
+fi
+bin=$(sed -n 's/.*Executable [^(]*(\(.*\))/\1/p' "${log}" | tail -1)
 if [ -z "${bin}" ] || [ ! -x "${bin}" ]; then
-  echo "没能拿到测试二进制，请单独跑一次看错误：" >&2
-  echo "  cargo test -p ${package} --test ${target} --no-run" >&2
+  echo "没能从 cargo 输出里找到测试二进制，完整输出：" >&2
+  cat "${log}" >&2
   exit 1
 fi
 

@@ -12,6 +12,8 @@ pub enum GlowError {
     Config(String),
     /// 对端（守护进程）返回的错误：直接展示原文，不再叠加本机前缀。
     Remote(String),
+    /// 加密/认证失败。
+    Crypto(String),
 }
 
 impl fmt::Display for GlowError {
@@ -24,6 +26,7 @@ impl fmt::Display for GlowError {
             GlowError::Usage(m) => write!(f, "用法错误：{m}"),
             GlowError::Config(m) => write!(f, "配置错误：{m}"),
             GlowError::Remote(m) => write!(f, "{m}"),
+            GlowError::Crypto(m) => write!(f, "加密错误：{m}"),
         }
     }
 }

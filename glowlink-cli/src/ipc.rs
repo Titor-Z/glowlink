@@ -159,7 +159,8 @@ fn plain_message(error: &GlowError) -> String {
         | GlowError::NotFound(m)
         | GlowError::Usage(m)
         | GlowError::Config(m)
-        | GlowError::Remote(m) => m.clone(),
+        | GlowError::Remote(m)
+        | GlowError::Crypto(m) => m.clone(),
     }
 }
 
