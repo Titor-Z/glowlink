@@ -7,5 +7,6 @@ pub mod app;
 pub mod dropzone;
 pub mod node;
 pub mod paircard;
+pub mod progress;
 pub mod titlebar;
 pub mod wire;

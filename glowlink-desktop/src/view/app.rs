@@ -15,16 +15,19 @@ use gpui::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::controller::{DeviceSource, DeviceView, IpcSource, PairingSource};
+use crate::controller::{
+    DeviceSource, DeviceView, IpcSource, PairingSource, TransferRow, TransferSource, TransferState,
+};
 use crate::model::connect::{self, Connection};
 use crate::model::drag::{self, DeviceDrag};
 use crate::model::layout;
 use crate::model::motion::{Ghost, Motion};
 use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
+use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::DropState;
-use crate::view::{dropzone, node, paircard, titlebar, wire};
+use crate::view::{dropzone, node, paircard, progress, titlebar, wire};
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -38,6 +41,16 @@ const TICK_FAST: Duration = Duration::from_millis(16);
 /// 为什么要分档：实测「永远 16ms」在空闲态就吃掉 60% 的 CPU
 /// （玻璃+阴影整窗重绘每帧都跑）。壁纸级的小动作用不着 60fps。
 const TICK_SLOW: Duration = Duration::from_millis(50);
+
+/// 流动亮线走完一个周期要多久（秒）。慢一点更像「数据在流」，快了像闪烁。
+const FLOW_PERIOD_SECS: f32 = 1.2;
+
+/// 传输中呼吸光圈一圈多久（设计稿：加快到 1.5s）。
+const HALO_FAST_SECS: f32 = 1.5;
+
+/// 进度条填充的响应时间（秒）。设计稿给的是 0.12s 过渡：
+/// 守护进程的进度是 300ms 一跳的，不平滑就会一抽一抽。
+const PROGRESS_RESPONSE: f32 = 0.12;
 
 /// 中心盘染色**亮起**的响应时间（秒）：够快才像「跟手」，判定一变就亮。
 const TINT_RISE: f32 = 0.08;
@@ -69,6 +82,21 @@ pub struct AppRoot {
     selected: Option<String>,
     /// 配对能力（预览模式下没有）。
     pairing: Option<Arc<dyn PairingSource>>,
+    /// 传输能力（预览模式下是假数据）。
+    transfers: Option<Arc<dyn TransferSource>>,
+    /// 当前要显示的那条传输（`None` = 卡片不出现）。
+    transfer: Option<TransferRow>,
+    /// 速度计：**界面自己算**（协议里不带速度，见 `model::transfer`）。
+    meter: SpeedMeter,
+    /// 被用户关掉的传输卡（按编号记：守护进程还会保留那条记录一小段时间）。
+    dismissed: Vec<String>,
+    /// 进度条填充的**平滑值**（设计稿要求 0.12s 过渡：IPC 的进度是跳着来的，
+    /// 直接画会像抽动）。这里用同一个弹簧原语做，不用另一套机制。
+    progress: Spring,
+    /// 流动亮线的相位（0..1），与呼吸、品牌光一样由界面时钟推进。
+    flow: f32,
+    /// 最近一次算出的速度（字节/秒）：卡片与元信息行都用它。
+    transfer_speed: f64,
     /// 正在被拖动的那台设备 ID（只用于压暗它自己）。
     dragging: Option<String>,
     /// 拖动中那枚气泡**当前的中心**（图区坐标）。
@@ -101,6 +129,10 @@ pub struct AppRoot {
     halo: f32,
     /// 品牌辉光的相位（`0..1`）：和呼吸一样由界面时钟推进。
     brand_phase: f32,
+    /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
+    halo_fast: f32,
+    /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
+    flowing_peer: Option<String>,
     /// 已「拖到一起」的设备（连接环上的方位）。
     connections: Vec<Connection>,
     /// 断开之后就地留下的落点（按设备 ID 记）。
@@ -125,6 +157,7 @@ impl AppRoot {
         source: Arc<dyn DeviceSource>,
         service: Option<Arc<IpcSource>>,
         pairing: Option<Arc<dyn PairingSource>>,
+        transfers: Option<Arc<dyn TransferSource>>,
     ) -> Self {
         let devices = source.devices();
         let service_on = service.as_ref().map(|s| s.running()).unwrap_or(false);
@@ -148,6 +181,13 @@ impl AppRoot {
             drop: DropState::Idle,
             selected: None,
             pairing,
+            transfers,
+            transfer: None,
+            meter: SpeedMeter::default(),
+            dismissed: Vec::new(),
+            progress: Spring::new(0.0, ZETA_CRITICAL, PROGRESS_RESPONSE),
+            flow: 0.0,
+            transfer_speed: 0.0,
             dragging: None,
             drag_at: None,
             grab_offset: layout::Point { x: 0.0, y: 0.0 },
@@ -159,6 +199,8 @@ impl AppRoot {
             tint_tone: theme::NODE_SELF,
             halo: 0.0,
             brand_phase: 0.0,
+            halo_fast: 0.0,
+            flowing_peer: None,
             connections: Vec::new(),
             seeds: Vec::new(),
         };
@@ -265,6 +307,35 @@ impl AppRoot {
         layout::DEVICE_RADIUS * scale
     }
 
+    /// 打开接收目录（只有收下来的文件才给这个动作）。
+    ///
+    /// 用系统自带的打开方式，不引 `rfd` 之类的依赖：这是内部工具，
+    /// 「在访达 / 资源管理器里看到文件」够用了。
+    pub fn open_received_folder(&mut self) {
+        let dir = glowlink_ipc::state::state_dir().join("received");
+        log::info!("打开接收目录：{}", dir.display());
+        let dir = dir.display().to_string();
+        #[cfg(target_os = "macos")]
+        let command = "open";
+        #[cfg(target_os = "windows")]
+        let command = "explorer";
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let command = "xdg-open";
+        if let Err(e) = std::process::Command::new(command).arg(&dir).spawn() {
+            log::info!("打不开目录（{command}）：{e}");
+        }
+    }
+
+    /// 用户主动关掉传输卡（设计稿：完成后不自动消失，由用户自己关）。
+    pub fn dismiss_transfer(&mut self, token: &str) {
+        if !self.dismissed.iter().any(|t| t == token) {
+            self.dismissed.push(token.to_string());
+        }
+        if self.transfer.as_ref().map(|row| row.token.as_str()) == Some(token) {
+            self.transfer = None;
+        }
+    }
+
     /// 正在拖（拖动期间才需要每帧问窗口「指针还在不在里面」）。
     pub fn is_dragging(&self) -> bool {
         self.dragging.is_some()
@@ -292,6 +363,23 @@ impl AppRoot {
             radius: layout::DEVICE_RADIUS * crate::model::drag::GHOST_SCALE,
         });
         self.motion.step(dt, ghost.as_ref());
+        // 传输：速度用**滑动窗口**算（相邻字节差 / 真实间隔），进度条再平滑一次。
+        // 采样与平滑都放在时钟里，事件回调不做任何计算。
+        match self.transfer.as_ref() {
+            Some(row) if row.state == TransferState::Running => {
+                let speed = self.meter.sample(row.done, now);
+                self.transfer_speed = speed;
+            }
+            Some(_) => self.transfer_speed = 0.0,
+            None => {}
+        }
+        let target = match (self.transfer.as_ref(), self.transfer_speed) {
+            (Some(row), speed) => transfer::numbers(row, speed).fraction,
+            (None, _) => 0.0,
+        };
+        self.progress.retarget(target as f32);
+        self.progress.step(dt);
+
         self.snapping = self.over_center();
         // 亮起要**跟手**（0.08s：判定一变灯就亮，不留延时），
         // 熄灭慢慢褪（0.25s，免得边界上抖成闪烁）
@@ -301,6 +389,13 @@ impl AppRoot {
         self.halo = (self.halo + dt / node::HALO_PERIOD_SECS).fract();
         self.brand_phase =
             (self.brand_phase + dt / titlebar::BRAND_PERIOD_SECS).fract();
+        // 流动亮线：只有真在传的那条线动。1.2s 走完一个「短段 + 空隙」周期
+        self.flow = (self.flow + dt / FLOW_PERIOD_SECS).fract();
+        self.halo_fast = (self.halo_fast + dt / HALO_FAST_SECS).fract();
+        self.flowing_peer = match self.transfer.as_ref() {
+            Some(row) if row.state == TransferState::Running => Some(row.peer.clone()),
+            _ => None,
+        };
         let busy = self.dragging.is_some() || !self.tint.is_settled() || !self.motion.is_settled();
         if busy {
             TICK_FAST
@@ -436,10 +531,43 @@ impl AppRoot {
     pub fn sync(&mut self) -> bool {
         let fresh = self.source.devices();
         let service_on = self.service.as_ref().map(|s| s.running()).unwrap_or(false);
-        if fresh == self.devices && service_on == self.service_on && self.pair.is_none() {
+        // 传输表：挑一条要显示的（正在跑的优先）。换了一条就把速度计清零——
+        // 两条传输的字节数不能相减。
+        let mut transfer_changed = false;
+        if let Some(source) = self.transfers.clone() {
+            let rows = source.transfers();
+            let next = transfer::pick(&rows).map(|index| rows[index].clone());
+            if next.as_ref().map(|row| row.token.clone())
+                != self.transfer.as_ref().map(|row| row.token.clone())
+            {
+                self.meter.reset();
+            }
+            if next != self.transfer {
+                // 用户关掉的那张卡不再弹回来（守护进程还会保留这条记录一小会儿）
+                let visible = match next.as_ref() {
+                    Some(row) => !self.dismissed.contains(&row.token),
+                    None => true,
+                };
+                if visible {
+                    transfer_changed = true;
+                    if next.is_some() {
+                        log::info!(
+                            "传输卡：{}",
+                            next.as_ref().map(|r| format!("{} {:?}", r.name, r.state)).unwrap_or_default()
+                        );
+                    }
+                    self.transfer = next;
+                }
+            }
+        }
+        if fresh == self.devices
+            && service_on == self.service_on
+            && self.pair.is_none()
+            && !transfer_changed
+        {
             return false;
         }
-        let mut changed = false;
+        let mut changed = transfer_changed;
         if fresh != self.devices {
             // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
             log::info!("设备表更新：{} 台", fresh.len());
@@ -565,6 +693,8 @@ impl Render for AppRoot {
             .map(|device| {
                 let connected = self.is_connected(&device.id);
                 let being_dragged = self.dragging.as_deref() == Some(device.id.as_str());
+                // 「在传」是比「已连接」更强的状态：两端都拉满高亮、呼吸加快
+                let transferring = self.flowing_peer.as_deref() == Some(device.name.as_str());
                 // 位置只有一个来源：运动系统的**当前**位置（渲染层不做任何判断）
                 let center =
                     self.motion.position(&device.id).unwrap_or_else(layout::self_center);
@@ -590,13 +720,15 @@ impl Render for AppRoot {
                         who: node::NodeWho::Device(device.kind),
                         label: &device.name,
                         // 已连接：保留高亮（环拉满 + 辉光加强 + 常驻呼吸）
-                        look: if connected {
+                        look: if transferring {
+                            node::NodeLook::device_transfer()
+                        } else if connected {
                             node::NodeLook::device_connected()
                         } else {
                             node::NodeLook::device_default()
                         },
                         scale,
-                        halo: self.halo,
+                        halo: if transferring { self.halo_fast } else { self.halo },
                     },
                 )
                 // 拖动：被拖起来的**就是这枚节点自己**（不是另做一个拖影）。
@@ -697,6 +829,14 @@ impl Render for AppRoot {
                 Some(wire::Segment {
                     end: connect::point_at(layout::self_center(), connection.angle),
                     tone: theme::device_tone(device.kind),
+                    // 线上正在传数据吗（按对端显示名匹配：协议行里就是显示名）
+                    flowing: self.flowing_peer.as_deref() == Some(device.name.as_str()),
+                    // 方向：发送朝外、接收朝内
+                    inbound: self
+                        .transfer
+                        .as_ref()
+                        .map(|row| row.direction == crate::controller::TransferDirection::Receive)
+                        .unwrap_or(false),
                 })
             })
             .collect();
@@ -791,7 +931,7 @@ impl Render for AppRoot {
                     .h(px(theme::GRAPH_H))
                     .w_full()
                     // 连线在最底层（设计稿层级：连线 < 节点）
-                    .when(!segments.is_empty(), |el| el.child(wire::wires(segments)))
+                    .when(!segments.is_empty(), |el| el.child(wire::wires(segments, self.flow)))
                     // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
                     // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
@@ -800,11 +940,15 @@ impl Render for AppRoot {
                             .motion
                             .position(layout::SELF_ID)
                             .unwrap_or_else(layout::self_center);
-                        let look = if connected_any {
+                        let self_transferring = self.flowing_peer.is_some();
+                        let look = if self_transferring {
+                            node::NodeLook::self_transfer()
+                        } else if connected_any {
                             node::NodeLook::self_node_blended(1.0, theme::NODE_SELF)
                         } else {
                             node::NodeLook::self_node()
                         };
+                        let self_halo = if self_transferring { self.halo_fast } else { self.halo };
                         let visual = node::node(
                             &t_theme,
                             node::NodeSpec {
@@ -813,7 +957,7 @@ impl Render for AppRoot {
                                 label: &name.to_string(),
                                 look,
                                 scale: self_scale,
-                                halo: self.halo,
+                                halo: self_halo,
                             },
                         );
                         // 染色层：叠一层同款、只改它的不透明度（gpui 里唯一能做到
@@ -826,7 +970,7 @@ impl Render for AppRoot {
                                 label: &name.to_string(),
                                 look: node::NodeLook::self_node_blended(1.0, self.tint_tone),
                                 scale: self_scale,
-                                halo: self.halo,
+                                halo: self_halo,
                             },
                         );
                         let tint = self.tint.x();
@@ -847,6 +991,12 @@ impl Render for AppRoot {
             })
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
+            // 传输卡：画在拖拽区**之上**（设计稿层级：拖拽区 < 传输卡 / 配对卡）
+            .when_some(self.transfer.clone(), |el, row| {
+                let numbers = transfer::numbers(&row, self.transfer_speed);
+                let fraction = self.progress.x() as f64;
+                el.child(progress::card(&t, &row, &numbers, fraction, cx))
+            })
             .child(titlebar::window_border(&t))
     }
 }
@@ -868,6 +1018,7 @@ pub fn open(
     source: Arc<dyn DeviceSource>,
     service: Option<Arc<IpcSource>>,
     pairing: Option<Arc<dyn PairingSource>>,
+    transfers: Option<Arc<dyn TransferSource>>,
     cx: &mut App,
 ) {
     let bounds = corner_bounds(cx);
@@ -888,7 +1039,7 @@ pub fn open(
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let view = cx.new(|_| AppRoot::new(device_name, source, service, pairing));
+        let view = cx.new(|_| AppRoot::new(device_name, source, service, pairing, transfers));
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
         // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
         let weak = view.downgrade();

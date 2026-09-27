@@ -9,6 +9,7 @@
 //! - `connect`：拖到一起之后的连接态（缩小比例、连接环半径、方位分角）
 //! - `spring`：唯一的运动原语（阻尼比 + 响应时间的弹簧，x/v 两个数）
 //! - `motion`：全场运动状态（意图 → 弹簧 → 接触约束 → 只读位置）
+//! - `transfer`：传输卡的逻辑（速度滑动窗口、该显示哪一条、卡上写什么）
 
 pub mod connect;
 pub mod drag;
@@ -18,3 +19,4 @@ pub mod layout;
 pub mod motion;
 pub mod spring;
 pub mod state;
+pub mod transfer;

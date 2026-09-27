@@ -14,5 +14,5 @@ pub mod source;
 pub use ipc::IpcSource;
 pub use preview::{PreviewPairing, PreviewSource, PreviewTransfer};
 pub use source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, ProgressView, TransferSource,
+    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, TransferDirection, TransferRow, TransferSource, TransferState,
 };

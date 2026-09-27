@@ -141,6 +141,24 @@ impl NodeLook {
         }
     }
 
+    /// 传输中（设计稿：环拉满、辉光 24px / 52%、光圈呼吸加快到 1.5s）。
+    ///
+    /// 颜色仍归设备类型——「在传」不是第五种颜色，它靠**亮度与节奏**说。
+    pub fn device_transfer() -> Self {
+        NodeLook {
+            ring_alpha: 1.0,
+            glow_radius: 24.0,
+            glow_alpha: 0.52,
+            halo: true,
+            ..Self::device_default()
+        }
+    }
+
+    /// 传输时本机盘的样子（与设备同款高亮：两端一起亮，才读得出「这一对在传」）。
+    pub fn self_transfer() -> Self {
+        NodeLook { halo: true, ..Self::self_node() }
+    }
+
     /// 已连接：**保留高亮**（环拉满 + 辉光加强 + 常驻呼吸）。
     ///
     /// 不做「变色」：已连接不是第五种状态色，它是「这台我认识」——

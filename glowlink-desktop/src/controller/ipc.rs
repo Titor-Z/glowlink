@@ -25,11 +25,11 @@ use glowlink_core::model::error::{GlowError, Result};
 
 use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::daemon;
-use glowlink_ipc::row::{DeviceRow, PairingRow, PendingRow};
+use glowlink_ipc::row::{parse_transfers, DeviceRow, PairingRow, PendingRow, TransferRow};
 use glowlink_ipc::state::{read_state, state_dir};
 
 use crate::controller::source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, ProgressView, TransferSource,
+    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, TransferSource,
 };
 
 /// 轮询周期：界面 3 次/秒够用，再密只是让守护进程空转。
@@ -58,6 +58,8 @@ struct Snapshot {
     pairing_outgoing: Vec<PairingView>,
     /// 对端发起、等本机用户输码的配对请求。
     pairing_pending: Vec<PairingView>,
+    /// 传输登记表（含刚结束的：完成态卡片要留着给人看）。
+    transfers: Vec<TransferRow>,
     /// 最近一次失败的原因；成功时 `None`。
     error: Option<String>,
 }
@@ -239,6 +241,7 @@ fn fetch() -> Result<Snapshot> {
     let pending = client.call("PENDING")?;
     let pairing_outgoing = client.call("PAIRINGS")?;
     let pairing_pending = client.call("PAIRPENDING")?;
+    let transfers = client.call("TRANSFERS")?;
     Ok(Snapshot {
         running: true,
         devices: devices.iter().skip(1).filter_map(|l| DeviceRow::from_line(l)).map(device_view).collect(),
@@ -255,6 +258,7 @@ fn fetch() -> Result<Snapshot> {
             .filter_map(|l| PairingRow::from_line(l))
             .map(pairing_view)
             .collect(),
+        transfers: parse_transfers(&transfers),
         error: None,
     })
 }
@@ -342,10 +346,14 @@ impl PairingSource for IpcSource {
 }
 
 impl TransferSource for IpcSource {
-    fn progress(&self) -> Option<ProgressView> {
-        // 传输进度还没有 IPC 指令（守护进程侧也还没有把进度暴露出来），
-        // 先如实返回「没有进度」，不编造一张静默停在中途的卡。
-        None
+    fn transfers(&self) -> Vec<TransferRow> {
+        // 传输表来自守护进程的 `TRANSFERS`（已在 [`fetch`] 里抓进快照）。
+        // 速度不在这里：界面用相邻快照的字节差自己算（见 `model::transfer`）。
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .transfers
+            .clone()
     }
 
     fn decide(&self, token: &str, accept: bool) -> Result<()> {

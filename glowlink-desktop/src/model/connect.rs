@@ -79,3 +79,62 @@ pub fn pinned_points(connections: &[Connection]) -> Vec<layout::Pinned> {
         .map(|c| layout::Pinned { point: point_at(center, c.angle), radius: connected_radius() })
         .collect()
 }
+
+/// 一条连线的两个端点：两端各裁掉「盘的当前半径 + 一点余量」。
+///
+/// 收进 model 是为了**可测**（以前在 view 里，没人测过）。两个半径都取**当前值**
+/// （本机盘与设备盘连接后都会缩小到 2/3）。
+pub fn wire_ends(center: Point, end: Point, self_radius: f32, node_radius: f32) -> Option<(Point, Point)> {
+    let (dx, dy) = (end.x - center.x, end.y - center.y);
+    let length = (dx * dx + dy * dy).sqrt();
+    let (start, stop) = (self_radius + 4.0, length - node_radius - 5.0);
+    if stop <= start {
+        return None;
+    }
+    let (nx, ny) = (dx / length, dy / length);
+    Some((
+        Point { x: center.x + nx * start, y: center.y + ny * start },
+        Point { x: center.x + nx * stop, y: center.y + ny * stop },
+    ))
+}
+
+/// 连线上「流动的亮线」的虚线段：`phase` 是 0..1 的相位（由界面时钟推进）。
+///
+/// **相位递增 = 朝 `to` 方向流**。收发方向因此可以用「换两端」表达：
+/// 发送时 `from` 取本机（朝设备流出去），接收时把两端调过来（朝本机流进来）。
+///
+/// 为什么不直接用 `stroke-dasharray` + dashoffset：gpui 的 `PathBuilder` **没有 dashoffset**，
+/// 虚线只能从路径起点开始排。所以这里自己算每段短线的位置——顺带也能单测。
+///
+/// 返回 `(起点, 终点)` 对，沿 from → to 方向排布。
+pub fn flow_dashes(
+    from: Point,
+    to: Point,
+    phase: f32,
+    on: f32,
+    off: f32,
+) -> Vec<(Point, Point)> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let length = (dx * dx + dy * dy).sqrt();
+    let period = on + off;
+    if length < 1.0 || period <= 0.0 {
+        return Vec::new();
+    }
+    let (nx, ny) = (dx / length, dy / length);
+    let point_at = |distance: f32| Point {
+        x: from.x + nx * distance,
+        y: from.y + ny * distance,
+    };
+    // 相位：相位递增整条线朝 to 走（所以这里取负号）；取模保证首尾无缝衔接
+    let mut start = -((phase.rem_euclid(1.0)) * period) - on;
+    let mut dashes = Vec::new();
+    while start < length {
+        let dash_start = start.max(0.0);
+        let dash_end = (start + on).min(length);
+        if dash_end > dash_start {
+            dashes.push((point_at(dash_start), point_at(dash_end)));
+        }
+        start += period;
+    }
+    dashes
+}

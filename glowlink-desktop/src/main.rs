@@ -7,7 +7,9 @@ use gpui::App;
 
 use std::sync::Arc;
 
-use glowlink_desktop::controller::{DeviceSource, IpcSource, PairingSource, PreviewSource};
+use glowlink_desktop::controller::{
+    DeviceSource, IpcSource, PairingSource, PreviewSource, PreviewTransfer, TransferSource,
+};
 
 fn main() {
     // 与 CLI 同一套日志口径：先看 stderr。gpui 的字体/渲染问题会把原因直接打日志，
@@ -24,13 +26,21 @@ fn main() {
 
     // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
     // 不自动拉起的话，每次测试都得先手敲一遍 `glowlink on` —— 那是把服务当命令行工具的用法。
-    let (source, service, pairing): (
+    let (source, service, pairing, transfers): (
         Arc<dyn DeviceSource>,
         Option<Arc<IpcSource>>,
         Option<Arc<dyn PairingSource>>,
+        Option<Arc<dyn TransferSource>>,
     ) = if preview {
         log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
-        (Arc::new(PreviewSource::discovered()), None, None)
+        // 预览默认**不带**传输卡（那是真实传输态）；想单独看卡片用 GLOWLINK_PREVIEW=xfer
+        let preview_transfer: Option<Arc<dyn TransferSource>> =
+            match std::env::var("GLOWLINK_PREVIEW").unwrap_or_default().as_str() {
+                "xfer" => Some(Arc::new(PreviewTransfer::halfway())),
+                "xfer-done" => Some(Arc::new(PreviewTransfer::finished_receive())),
+                _ => None,
+            };
+        (Arc::new(PreviewSource::discovered()), None, None, preview_transfer)
     } else {
         if !ipc.running() {
             log::info!("服务没在跑，正在拉起守护进程…");
@@ -40,6 +50,7 @@ fn main() {
             Arc::clone(&ipc) as Arc<dyn DeviceSource>,
             Some(Arc::clone(&ipc)),
             Some(Arc::clone(&ipc) as Arc<dyn PairingSource>),
+            Some(Arc::clone(&ipc) as Arc<dyn TransferSource>),
         )
     };
 
@@ -47,7 +58,7 @@ fn main() {
         // 图标必须注册资源源，否则 `svg()` 静默不画（不报错、不警告）
         .with_assets(glowlink_desktop::assets::Assets)
         .run(move |cx: &mut App| {
-            glowlink_desktop::view::app::open(name.clone(), source, service, pairing, cx);
+            glowlink_desktop::view::app::open(name.clone(), source, service, pairing, transfers, cx);
             cx.activate(true);
         });
 }

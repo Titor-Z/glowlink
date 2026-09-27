@@ -10,7 +10,8 @@ use glowlink_core::DeviceKind;
 use glowlink_core::model::error::{GlowError, Result};
 
 use crate::controller::source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, ProgressView, TransferSource,
+    DeviceSource, DeviceView, PairingSource, PairingView, TransferDirection, TransferRow,
+    TransferSource, TransferState,
 };
 
 /// 固定的一组「附近设备」：与设计稿上的三台一一对应。
@@ -128,31 +129,50 @@ impl PairingSource for PreviewPairing {
 /// 预览传输：给一张固定的进度卡。
 #[derive(Clone, Debug, Default)]
 pub struct PreviewTransfer {
-    progress: Option<ProgressView>,
+    transfers: Vec<TransferRow>,
 }
 
 impl PreviewTransfer {
     pub fn idle() -> Self {
-        PreviewTransfer { progress: None }
+        PreviewTransfer { transfers: Vec::new() }
     }
 
-    /// 传到大半的进度（设计稿那张卡片的形态）。
+    /// 传到大半的那条（设计稿那张卡片的形态：842MB 的录屏，已传 480MB）。
     pub fn halfway() -> Self {
         PreviewTransfer {
-            progress: Some(ProgressView {
+            transfers: vec![TransferRow {
+                token: "001".into(),
+                direction: TransferDirection::Send,
                 name: "屏幕录制 2026-09-15 040220.mp4".into(),
-                total: 842_400_000,
+                peer: "iPad mini".into(),
                 done: 480_000_000,
-                speed: 48.6 * 1024.0 * 1024.0,
-                finished: false,
-            }),
+                total: 842_400_000,
+                state: TransferState::Running,
+                note: String::new(),
+            }],
+        }
+    }
+
+    /// 刚收完的那条（完成态：卡片留着，等用户自己关）。
+    pub fn finished_receive() -> Self {
+        PreviewTransfer {
+            transfers: vec![TransferRow {
+                token: "002".into(),
+                direction: TransferDirection::Receive,
+                name: "设计交付包.zip".into(),
+                peer: "桌面主机".into(),
+                done: 12_500_000,
+                total: 12_500_000,
+                state: TransferState::Done,
+                note: String::new(),
+            }],
         }
     }
 }
 
 impl TransferSource for PreviewTransfer {
-    fn progress(&self) -> Option<ProgressView> {
-        self.progress.clone()
+    fn transfers(&self) -> Vec<TransferRow> {
+        self.transfers.clone()
     }
 
     fn decide(&self, _token: &str, _accept: bool) -> Result<()> {

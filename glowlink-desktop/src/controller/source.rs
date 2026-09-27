@@ -41,16 +41,11 @@ pub struct PairingView {
     pub state: PairingState,
 }
 
-/// 传输进度快照。
-#[derive(Clone, Debug, PartialEq)]
-pub struct ProgressView {
-    pub name: String,
-    pub total: u64,
-    pub done: u64,
-    /// 1 秒滑动窗口速度（不是全程平均：中途掉速时全程平均会骗人）。
-    pub speed: f64,
-    pub finished: bool,
-}
+/// 传输进度的**速度**（界面自己算：协议里不带速度，因为它可以从字节与耗时推出来）。
+///
+/// 行本身直接用协议类型 [`glowlink_ipc::row::TransferRow`]：它就是「跨进程契约」，
+/// 再包一层同字段的 View 只会多一处要同步的拷贝。
+pub use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
 
 /// 设备表来源。
 pub trait DeviceSource: Send + Sync {
@@ -78,10 +73,13 @@ pub trait PairingSource: Send + Sync {
     fn reject(&self, token: &str) -> Result<()>;
 }
 
-/// 传输进度来源。
+/// 传输来源。
 pub trait TransferSource: Send + Sync {
-    /// 最近一次传输的进度；没有传输时返回 `None`。
-    fn progress(&self) -> Option<ProgressView>;
+    /// 当前登记表里的传输（守护进程保留结束项一小段时间，界面据此显示完成态）。
+    ///
+    /// 速度**不在**这里：它由界面用相邻快照的字节差除以真实间隔算出来
+    /// （`model::transfer::SpeedMeter`）——协议里塞速度就得让守护进程也维护一个时钟。
+    fn transfers(&self) -> Vec<TransferRow>;
     /// 接受 / 拒绝一个待确认的接收请求。
     fn decide(&self, token: &str, accept: bool) -> Result<()>;
     /// 当前待确认请求。
