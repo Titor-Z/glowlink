@@ -9,7 +9,6 @@ use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::DaemonView;
 use glowlink_core::controller::transfer::TransferView;
 
-
 /// 把 HOME 指到临时目录，避免测试往真实的 ~/.glowlink/daemon.log 里写日志。
 fn isolate_home(tag: &str) {
     let dir = std::env::temp_dir().join(format!("glowlink-daemonview-{tag}"));
@@ -17,8 +16,8 @@ fn isolate_home(tag: &str) {
     std::env::set_var("HOME", &dir);
 }
 
-fn view(slot: Arc<PendingQueue>, timeout: Duration) -> DaemonView {
-    DaemonView::new(slot, timeout)
+fn view(queue: Arc<PendingQueue>, timeout: Duration) -> DaemonView {
+    DaemonView::new(queue, timeout)
 }
 
 #[test]

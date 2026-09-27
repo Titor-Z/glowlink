@@ -1,15 +1,24 @@
 //! `glowlink-cli/src/state.rs` 的单元测试：状态文件读写与路径。
 
 use std::env;
+use std::sync::{Mutex, MutexGuard};
 
 use glowlink_cli::state::{remove_state, state_path, write_state, State};
 
+/// 这些用例改的是**进程级**环境变量 `HOME`，而测试默认并行跑：
+/// 不串行化就会互相把 HOME 改到别的目录，写出「写 A 读 B」的假故障。
+static HOME_LOCK: Mutex<()> = Mutex::new(());
+
 /// 把 HOME 指到临时目录，避免测试碰用户真实的 ~/.glowlink。
-fn isolate_home(tag: &str) {
+///
+/// 返回的守卫必须持有到用例结束（`let _guard = isolate_home(...)`）。
+fn isolate_home(tag: &str) -> MutexGuard<'static, ()> {
+    let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = env::temp_dir().join(format!("glowlink-state-{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::create_dir_all(&dir);
     env::set_var("HOME", &dir);
+    guard
 }
 
 fn sample() -> State {
@@ -46,7 +55,7 @@ fn parse_rejects_corrupt_file() {
 
 #[test]
 fn write_then_read_is_atomic_and_leaves_no_temp_file() {
-    isolate_home("atomic");
+    let _guard = isolate_home("atomic");
     let state = sample();
     write_state(&state).unwrap();
 
@@ -60,7 +69,7 @@ fn write_then_read_is_atomic_and_leaves_no_temp_file() {
 
 #[test]
 fn write_is_idempotent_and_overwrites() {
-    isolate_home("overwrite");
+    let _guard = isolate_home("overwrite");
     write_state(&sample()).unwrap();
     let mut second = sample();
     second.pid = 777;
@@ -72,7 +81,7 @@ fn write_is_idempotent_and_overwrites() {
 
 #[test]
 fn remove_state_is_ok_when_missing_and_then_effective() {
-    isolate_home("remove");
+    let _guard = isolate_home("remove");
     // 不存在时也应成功（off 在没跑过守护进程的机器上不该报错）
     remove_state().unwrap();
     write_state(&sample()).unwrap();
@@ -85,7 +94,7 @@ fn remove_state_is_ok_when_missing_and_then_effective() {
 
 #[test]
 fn paths_live_under_dot_glowlink() {
-    isolate_home("paths");
+    let _guard = isolate_home("paths");
     let dir = glowlink_cli::state::state_dir();
     assert!(dir.ends_with(".glowlink"), "实际：{}", dir.display());
     assert_eq!(glowlink_cli::state::state_path(), dir.join("state.json"));

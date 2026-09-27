@@ -298,15 +298,18 @@ fn client_and_server_talk_over_loopback() {
     let err = client.call_first("RESOLVE 幽灵机").unwrap_err().to_string();
     assert!(err.contains("幽灵机"), "实际：{err}");
 
+    // 必须先关客户端：服务端是「读到对端关闭才退出」的循环，
+    // 否则 join 会永远等下去（CI 上就是这么挂住 30 分钟的）。
+    drop(client);
     server.join().unwrap();
 }
 
 #[test]
 fn bind_ipc_shifts_when_port_is_taken() {
     let (first, port) = bind_ipc(0).unwrap();
-    // 再绑同一个端口必然失败，应自动顺延
+    // 再绑同一个端口必然失败，应自动顺延（并行测试可能已占住 port+1，所以只要求更大）
     let (_second, next) = bind_ipc(port).unwrap();
-    assert_eq!(next, port + 1, "顺延到相邻端口");
+    assert!(next > port, "应顺延到更大的端口，实际 {port} → {next}");
     drop(first);
 }
 
