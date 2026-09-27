@@ -3,7 +3,7 @@
 //! 这里钉住的都是用户真机上出过问题的行为，不是「跑通就行」。
 
 use glowlink_desktop::model::layout::{self, Point};
-use glowlink_desktop::model::motion::{Ghost, Motion};
+use glowlink_desktop::model::motion::{rubber_clamp, Ghost, Motion, RUBBER_LIMIT};
 
 const DT: f32 = 1.0 / 60.0;
 
@@ -235,4 +235,52 @@ fn a_connected_device_sits_on_its_slot_and_stays_clear_of_the_center() {
         self_radius + device_radius
     );
     assert!((landed.x - slot.x).abs() < 2.0 && (landed.y - slot.y).abs() < 2.0, "该停在它的槽位上");
+}
+
+#[test]
+fn a_body_dragged_out_of_the_window_never_leaves_the_figure() {
+    // 用户真机：把气泡拖到窗口外松手，事件收不到 → 气泡贴在边框上不动。
+    // 第一道防线是几何：拖起来的坐标先过橡皮筋，圆心永远留在图区里。
+    let (x0, x1) = layout::bound_x();
+    let (y0, y1) = layout::bound_y();
+    let far = at(-800.0, -500.0);
+    let (clamped, was_clamped) = rubber_clamp(far, layout::DEVICE_RADIUS);
+    assert!(was_clamped, "越界了就该报「夹过」");
+    // 允许最多 RUBBER_LIMIT 的越界（渐近线），但绝不能「跟到无穷远」
+    assert!(clamped.x >= x0 - RUBBER_LIMIT, "圆心出图区太远：{clamped:?}");
+    assert!(clamped.x <= x1 + RUBBER_LIMIT, "圆心出图区太远：{clamped:?}");
+    assert!(clamped.y >= y0 - RUBBER_LIMIT, "圆心出图区太远：{clamped:?}");
+    assert!(clamped.y <= y1 + RUBBER_LIMIT, "圆心出图区太远：{clamped:?}");
+    // 图区内的点一个像素都不许动
+    let inside = at(160.0, 200.0);
+    assert_eq!(rubber_clamp(inside, layout::DEVICE_RADIUS), (inside, false));
+}
+
+#[test]
+fn the_boundary_resists_more_the_further_you_push() {
+    // 橡皮筋：越界越多、跟得越少（硬夹读起来是「冻住了」）
+    let one = glowlink_desktop::model::motion::rubberband(10.0, RUBBER_LIMIT, 0.55);
+    let two = glowlink_desktop::model::motion::rubberband(20.0, RUBBER_LIMIT, 0.55);
+    assert!(one < 10.0 && two < 20.0, "越界部分必须被打折：{one:.1} / {two:.1}");
+    assert!(two > one, "越界越多还是该多跟一点：{one:.1} / {two:.1}");
+    assert!(two < 2.0 * one, "但不许线性跟下去（那就不叫阻力了）");
+    // 渐近线就是上限：推得再远也不超过它
+    let far = glowlink_desktop::model::motion::rubberband(10_000.0, RUBBER_LIMIT, 0.55);
+    assert!(far < RUBBER_LIMIT, "越界必须有上限：{far:.1}");
+}
+
+#[test]
+fn the_dragged_body_stops_at_the_edge_when_the_pointer_leaves() {
+    let mut motion = Motion::default();
+    motion.sync(&[body("dragged", at(160.0, 200.0))]);
+    motion.jump("dragged", at(160.0, 200.0));
+    let ghost = Ghost {
+        id: "dragged".into(),
+        point: at(-400.0, 200.0),
+        radius: layout::DEVICE_RADIUS,
+    };
+    motion.step(DT, Some(&ghost));
+    let point = motion.position("dragged").unwrap();
+    let (x0, _) = layout::bound_x();
+    assert!(point.x >= x0 - RUBBER_LIMIT, "拖出去的坐标要被橡皮筋拦住：{point:?}");
 }

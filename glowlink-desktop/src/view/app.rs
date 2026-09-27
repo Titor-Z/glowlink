@@ -265,10 +265,24 @@ impl AppRoot {
         layout::DEVICE_RADIUS * scale
     }
 
+    /// 正在拖（拖动期间才需要每帧问窗口「指针还在不在里面」）。
+    pub fn is_dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
     /// 一帧物理（**唯一的时钟**）。`dt` 用真实间隔，弹簧内部会夹住异常大的值。
     ///
     /// 返回下一帧该隔多久：正在拖/弹簧在跑 → 快；只剩漂浮 → 慢（省 CPU）。
-    pub fn tick(&mut self) -> Duration {
+    /// `pointer_inside`：指针是否还在窗口里（由调用方向窗口问，见 `open`）。
+    ///
+    /// 拖到窗口外时松手事件**收不到**，拖动态会永远挂在那儿（表现就是「气泡贴在
+    /// 边框上不动、要再点一下才恢复」）——所以指针一出窗口就取消这次拖动，
+    /// 让它自己弹回去（skill §10「允许拖离再回来取消」）。
+    pub fn tick(&mut self, pointer_inside: bool) -> Duration {
+        if self.dragging.is_some() && !pointer_inside {
+            log::info!("指针离开窗口：取消这次拖动（气泡自己弹回去）");
+            self.settle_drag();
+        }
         let now = std::time::Instant::now();
         let dt = (now - self.last_tick).as_secs_f32();
         self.last_tick = now;
@@ -903,7 +917,28 @@ pub fn open(
             loop {
                 cx.background_executor().timer(interval).await;
                 let alive = weak.update(cx, |root, cx| {
-                    let next = root.tick();
+                    // 只在拖的时候才问窗口：空闲路径不碰任何窗口 API
+                    let pointer_inside = if root.is_dragging() {
+                        cx.windows()
+                            .first()
+                            .and_then(|handle| {
+                                handle
+                                    .update(cx, |_, window, _| {
+                                        let point = window.mouse_position();
+                                        let size = window.bounds().size;
+                                        let (x, y) = (point.x.as_f32(), point.y.as_f32());
+                                        let (w, h) =
+                                            (size.width.as_f32(), size.height.as_f32());
+                                        // 留 2px 容差：贴着边不算出去
+                                        x >= -2.0 && y >= -2.0 && x <= w + 2.0 && y <= h + 2.0
+                                    })
+                                    .ok()
+                            })
+                            .unwrap_or(true)
+                    } else {
+                        true
+                    };
+                    let next = root.tick(pointer_inside);
                     cx.notify();
                     next
                 });

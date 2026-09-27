@@ -24,6 +24,49 @@ pub const DRIFT_PERIOD_MS: f32 = 7000.0;
 pub const DRIFT_AMP_X: f32 = 3.0;
 pub const DRIFT_AMP_Y: f32 = 3.75;
 
+/// 橡皮筋：越界越多、跟得越少（skill §9）。
+///
+/// 公式与 Apple 一致：`overshoot * dimension * c / (dimension + c * |overshoot|)`。
+/// 注意 `dimension` 是**渐近线**——也就是「最多允许越界多少像素」，不是窗口尺寸
+/// （曾按窗口宽传 396，结果渐近线也在 396，等于没拦）。小块越界按 `c` 打折（≈0.55 倍）。
+pub fn rubberband(overshoot: f32, dimension: f32, constant: f32) -> f32 {
+    (overshoot * dimension * constant) / (dimension + constant * overshoot.abs())
+}
+
+/// 橡皮筋的最大越界量（px）：圆心最多出界这么多，再多也不动。
+/// 图区外面本来就是圆的窗角与 `overflow_hidden`，24px 的余量读起来就是「到头了」。
+pub const RUBBER_LIMIT: f32 = 24.0;
+
+/// 把一个点按橡皮筋夹进图区：返回（夹后坐标，是否被夹过）。
+///
+/// 拖到窗口外时用：气泡**永远不许真的出图区**（松手事件可能在窗口外丢失，
+/// 那就会留下一个贴在边框上的气泡），越界时给出渐增的阻力。
+pub fn rubber_clamp(point: Point, radius: f32) -> (Point, bool) {
+    let (x0, x1) = layout::bound_x();
+    let (y0, y1) = layout::bound_y();
+    let mut clamped = false;
+    let mut fix = |value: f32, low: f32, high: f32| {
+        let _ = high;
+        if value < low {
+            clamped = true;
+            low - rubberband(low - value, RUBBER_LIMIT, RUBBER_CONSTANT)
+        } else if value > high {
+            clamped = true;
+            high + rubberband(value - high, RUBBER_LIMIT, RUBBER_CONSTANT)
+        } else {
+            value
+        }
+    };
+    // 半径不参与夹取：圆心范围（`bound_x/bound_y`）本来就已经把盘与名字算进去了
+    let _ = radius;
+    let x = fix(point.x, x0, x1);
+    let y = fix(point.y, y0, y1);
+    (Point { x, y }, clamped)
+}
+
+/// 橡皮筋常数：越小越「硬」（Apple 网页版给 0.55）。
+pub const RUBBER_CONSTANT: f32 = 0.55;
+
 /// 拖起来的那一枚：**运动学**物体——位置就是指针（1:1，不加弹簧），
 /// 且对别人来说是不可推动的障碍物（只有它推别人，别人推不动它）。
 /// 它的速度由指针的位移算出来，松手时正好当速度交接用（skill §5）。
@@ -194,10 +237,12 @@ impl Motion {
                         y: (ghost.point.y - previous.y) / dt,
                     };
                 }
+                // 指针可能跑到图区外（窗口外）：先过橡皮筋，气泡绝不真的出图
+                let (point, _) = rubber_clamp(ghost.point, ghost.radius);
                 body.radius = ghost.radius;
-                body.base = ghost.point;
-                body.sx.jump(ghost.point.x);
-                body.sy.jump(ghost.point.y);
+                body.base = point;
+                body.sx.jump(point.x);
+                body.sy.jump(point.y);
             }
         }
 
