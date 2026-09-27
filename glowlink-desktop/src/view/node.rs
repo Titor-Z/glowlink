@@ -25,12 +25,34 @@ const HALO_PERIOD_MS: u64 = 3000;
 /// 呼吸过程里外圈再向外扩多少像素（起始外径 = 直径 + 16，即 `haloInset: -8px`）。
 const HALO_MAX_GROW: f32 = 12.0;
 
+/// 漂浮：外围设备在慢速椭圆轨道上来回漂（设计稿 `drift 7s`）。
+///
+/// 幅度取自设计稿关键帧：横向 +3.5 / −2.5、纵向 −4.5 / +3。
+/// 我们只用一个正弦对（sin/cos 就是一圈椭圆），所以取对称的极值包住原区间：
+/// 横向 ±3.0、纵向 ±3.75。（设计稿还带 -1.2° 旋转，gpui-ce 没有 rotate，这一项舍去。）
+const FLOAT_PERIOD_MS: u64 = 7000;
+const FLOAT_AMP_X: f32 = 3.0;
+const FLOAT_AMP_Y: f32 = 3.75;
+
 fn breath() -> Animation {
     // 设计稿：呼吸 3s（传输中加快到 1.5s，等有传输态再按状态给不同周期）。
     // `with_animation` 会自动尊重系统的「减少动态效果」（`App::reduce_motion` 时停在起始态）。
     Animation::new(Duration::from_millis(HALO_PERIOD_MS))
         .repeat()
         .with_easing(|delta| (1.0 - (delta * std::f32::consts::PI * 2.0).cos()) * 0.5)
+}
+
+/// 漂浮用**线性**推进：自己取正弦，缓动在这里没意义（要的就是匀速转圈）。
+fn drift() -> Animation {
+    Animation::new(Duration::from_millis(FLOAT_PERIOD_MS)).repeat()
+}
+
+/// 漂浮圈的动画 id（与呼吸圈、各节点都不能撞）。
+fn drift_id(rect: Rect) -> ElementId {
+    ElementId::NamedInteger(
+        SharedString::new_static("drift"),
+        ((rect.x as u64) << 32) | rect.y as u64,
+    )
 }
 
 /// 呼吸圈的动画 id：同一帧里可能有多个圈（本机 + 拖拽目标），必须各不相同。
@@ -227,9 +249,13 @@ pub struct NodeSpec<'a> {
     pub look: NodeLook,
     /// 设备才可点；本机中心盘不可点。
     pub interactive: bool,
+    /// 漂浮相位（0..1，来自 `layout::float_phase`）。本机不使用。
+    pub float_phase: f32,
 }
-
 /// 节点元素。
+///
+/// 返回 `AnyElement` 而不是具体的 `Div`：因为「本机不漂、设备才漂」这一支分叉会让
+/// 两条分支的元素类型不同（一个裸 `Div`，一个 `AnimationElement<Div>`）。
 pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
     let node_size = spec.who.node_size();
     let tone = spec.who.tone();
@@ -272,10 +298,8 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
         })
     });
 
-    div()
+    let base = div()
         .absolute()
-        .left(px(spec.rect.x))
-        .top(px(spec.rect.y))
         .w(px(diameter))
         .h(px(diameter))
         .children(halo)
@@ -333,5 +357,19 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
                 .font_weight(FontWeight::NORMAL)
                 .text_color(label_color)
                 .child(SharedString::from(spec.label.to_string())),
-        )
+        );
+
+    if spec.who.is_self() {
+        // 本机是图面的锚点，**不漂**——漂浮只属于「周围的设备」
+        return base.into_any_element();
+    }
+
+    // 漂浮：以槽位为中心的慢椭圆（错相由 `layout::float_phase` 给）
+    let (x, y, phase) = (spec.rect.x, spec.rect.y, spec.float_phase);
+    base.with_animation(drift_id(spec.rect), drift(), move |el, delta| {
+        let theta = (delta + phase) * std::f32::consts::PI * 2.0;
+        el.left(px(x + FLOAT_AMP_X * theta.sin()))
+            .top(px(y + FLOAT_AMP_Y * theta.cos()))
+    })
+    .into_any_element()
 }

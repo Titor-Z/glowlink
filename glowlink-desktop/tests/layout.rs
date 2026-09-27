@@ -4,6 +4,7 @@
 //! 只能靠肉眼发现。所以几何全部抽成纯函数，在这里钉死。
 
 use glowlink_desktop::model::layout::{
+    float_phase,
     self, device_center, hits_center, self_center, snap_to_device, NodeSize, Point, Rect,
 };
 use glowlink_desktop::theme;
@@ -99,4 +100,21 @@ fn snapping_prefers_the_closer_one_when_two_overlap() {
 fn slot_count_matches_the_designed_layout() {
     // 设计稿只画了三台设备；增删槽位等于改设计，必须在此显式确认
     assert_eq!(layout::SLOTS.len(), 3);
+}
+
+#[test]
+fn float_phase_walks_around_the_circle_and_never_repeats_at_the_design_delays() {
+    // 设计稿的三个延迟 0s / -2.3s / -4.7s（周期 7s）= 相位 0 / 0.329 / 0.671。
+    // 错相是硬要求：同拍的话三个节点像被同一根线扯着，顿时变机械舞。
+    assert_eq!(float_phase(0), 0.0);
+    assert!((float_phase(1) - 0.335).abs() < 0.001, "实际 {}", float_phase(1));
+    assert!((float_phase(2) - 0.670).abs() < 0.001, "实际 {}", float_phase(2));
+
+    // 步长 0.335 到第 4 台就绕回一圈（3 × 0.335 = 1.005 → 0.005）。
+    // 这几台本来就被设计稿叠在同一个槽位上（配 +N 提示），相位接近不算问题。
+    assert!((float_phase(3) - 0.005).abs() < 0.001, "实际 {}", float_phase(3));
+    for index in 0..24 {
+        let phase = float_phase(index);
+        assert!((0.0..1.0).contains(&phase), "相位必须落在 0..1：{index} → {phase}");
+    }
 }

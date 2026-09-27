@@ -158,6 +158,7 @@ impl Render for AppRoot {
                         label: &device.name,
                         look: node::NodeLook::device_default(),
                         interactive: true,
+                        float_phase: layout::float_phase(index),
                     },
                 )
             })
@@ -212,6 +213,7 @@ impl Render for AppRoot {
                             label: &self.device_name.to_string(),
                             look: node::NodeLook::self_node(),
                             interactive: false,
+                            float_phase: 0.0,
                         },
                     )),
             )
