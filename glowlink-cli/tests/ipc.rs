@@ -95,7 +95,13 @@ impl IpcHost for FakeHost {
 }
 
 fn pending_offer(peer: &str, name: &str, size: u64) -> PendingOffer {
-    PendingOffer { peer: peer.into(), name: name.into(), size }
+    PendingOffer {
+        peer: peer.into(),
+        name: name.into(),
+        size,
+        fingerprint: "abcdef0123456789".into(),
+        code: "482913".into(),
+    }
 }
 
 // ---------------------------------------------------------------- 协议分支
@@ -171,8 +177,14 @@ fn pending_returns_a_list_with_tokens() {
     let (lines, _) = handle_line(&host, "PENDING");
     assert_eq!(lines[0], "OK 2", "首行是数量");
     assert_eq!(lines.len(), 3, "数量 + 两行数据");
-    let (token, peer, name, size) = parse_pending_line(&lines[1]).unwrap();
-    assert_eq!((token.as_str(), peer.as_str(), name.as_str(), size), ("001", "192.168.31.9", "甲.bin", 2048));
+    let (token, peer, name, size, fingerprint, code) = parse_pending_line(&lines[1]).unwrap();
+    assert_eq!(
+        (token.as_str(), peer.as_str(), name.as_str(), size),
+        ("001", "192.168.31.9", "甲.bin", 2048)
+    );
+    // 未配对设备必须把指纹与校验码带到客户端，否则用户无从核对
+    assert_eq!(fingerprint, "abcdef0123456789");
+    assert_eq!(code, "482913");
     assert_eq!(parse_pending_line(&lines[2]).unwrap().0, "002");
 }
 

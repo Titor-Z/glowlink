@@ -12,11 +12,18 @@ use std::time::{Duration, Instant};
 use glowlink_core::model::error::{GlowError, Result};
 
 /// 一个待确认的接收请求。
+///
+/// 带上**指纹与校验码**：未配对的设备必须让用户先把校验码与发送方屏幕核对，
+/// 确认后才接收，并把指纹写进信任列表（下次免确认）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingOffer {
     pub peer: String,
     pub name: String,
     pub size: u64,
+    /// 对端设备指纹。
+    pub fingerprint: String,
+    /// 6 位校验码（两端相同，供人工比对）。
+    pub code: String,
 }
 
 /// 队列里的一个槽位：`token` 给用户手敲，`decision` 由 IPC 线程写入。

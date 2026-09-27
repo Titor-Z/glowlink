@@ -9,7 +9,7 @@
 //! - `STATUS`                  → `OK <设备数> <待确认数> <接收目录>`
 //! - `DEVICES`                 → `OK <n>` + n 行 `名称\tID\t地址\t存活毫秒`
 //! - `RESOLVE <名称|ID>`       → `OK 名称\tID\t地址`
-//! - `PENDING`                 → `OK <n>` + n 行 `编号\t来源\t文件名\t字节数`
+//! - `PENDING`                 → `OK <n>` + n 行 `编号\t来源\t文件名\t字节数\t指纹\t校验码`
 //! - `ACCEPT [编号]` / `REJECT [编号]` → `OK <编号>`
 //! - `STOP`                    → `OK …` 并关闭连接
 //!
@@ -123,8 +123,8 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
             let mut lines = vec![format!("OK {}", pending.len())];
             for (token, offer) in &pending {
                 lines.push(format!(
-                    "{}\t{}\t{}\t{}",
-                    token, offer.peer, offer.name, offer.size
+                    "{}\t{}\t{}\t{}\t{}\t{}",
+                    token, offer.peer, offer.name, offer.size, offer.fingerprint, offer.code
                 ));
             }
             (lines, true)
@@ -302,14 +302,21 @@ pub fn parse_device_line(line: &str) -> Option<(String, String, SocketAddr, u128
     ))
 }
 
-/// 把 `PENDING` 的数据行解析成 `(编号, 来源, 文件名, 字节数)`。
-pub fn parse_pending_line(line: &str) -> Option<(String, String, String, u64)> {
+/// 把 `PENDING` 的数据行解析成 `(编号, 来源, 文件名, 字节数, 指纹, 校验码)`。
+pub fn parse_pending_line(line: &str) -> Option<(String, String, String, u64, String, String)> {
     let mut parts = line.split('\t');
-    let (token, peer, name, size) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    let token = parts.next()?;
+    let peer = parts.next()?;
+    let name = parts.next()?;
+    let size: u64 = parts.next()?.parse().ok()?;
+    let fingerprint = parts.next().unwrap_or("").to_string();
+    let code = parts.next().unwrap_or("").to_string();
     Some((
         token.to_string(),
         peer.to_string(),
         name.to_string(),
-        size.parse().ok()?,
+        size,
+        fingerprint,
+        code,
     ))
 }

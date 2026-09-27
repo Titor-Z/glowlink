@@ -6,7 +6,13 @@ use std::time::{Duration, Instant};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
 
 fn offer(name: &str) -> PendingOffer {
-    PendingOffer { peer: "192.168.31.9".into(), name: name.into(), size: 1024 }
+    PendingOffer {
+        peer: "192.168.31.9".into(),
+        name: name.into(),
+        size: 1024,
+        fingerprint: "abcdef0123456789".into(),
+        code: "482913".into(),
+    }
 }
 
 /// 等某个请求出现在列表里（另一个线程刚登记完）。

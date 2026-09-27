@@ -15,6 +15,7 @@ use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_a
 use glowlink_cli::config;
 use glowlink_cli::daemon;
 use glowlink_cli::ipc::{self, IpcHost};
+use glowlink_cli::keys::{load_or_create_identity, TrustFile};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
@@ -22,6 +23,7 @@ use glowlink_cli::DaemonView;
 use glowlink_cli::CliView;
 use glowlink_core::controller::transfer::TransferListener;
 use glowlink_core::model::probe::{compare_versions, identify, PortOwner, VersionVerdict};
+use glowlink_core::patterns::secure::{session_slot, SecureTransport, SessionSlot, TrustList};
 use glowlink_core::patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };
@@ -176,6 +178,13 @@ fn list_via_daemon(state: &State, timeout: Duration, watch: bool) -> Result<()> 
     }
 }
 
+/// 客户端侧判断某指纹是否已信任（仅用于显示提示，读失败就当未信任）。
+fn daemon_trusts(fingerprint: &str) -> bool {
+    TrustFile::open_default()
+        .map(|trust| trust.is_trusted(fingerprint))
+        .unwrap_or(false)
+}
+
 /// 把 `DEVICES` 响应还原成设备列表（首行是 `OK <数量>`）。
 fn ipc_devices(lines: &[String]) -> Vec<glowlink_core::Device> {
     lines
@@ -204,14 +213,25 @@ fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
     }
     println!();
     for line in lines.iter().skip(1) {
-        let Some((token, peer, name, size)) = ipc::parse_pending_line(line) else {
+        let Some((token, peer, name, size, fingerprint, code)) = ipc::parse_pending_line(line)
+        else {
             continue;
         };
+        let trust_hint = if fingerprint.is_empty() {
+            String::new()
+        } else if daemon_trusts(&fingerprint) {
+            format!("设备指纹 {fingerprint}（已信任）")
+        } else {
+            format!("设备指纹 {fingerprint}  校验码 **{code}**（请与发送方屏幕核对）")
+        };
         println!(
-            "[等待确认 #{token}] {peer} 想发来「{name}」（{}）：\
-             glowlink accept {token} / glowlink reject {token}",
+            "[等待确认 #{token}] {peer} 想发来「{name}」（{}）",
             human_size(size)
         );
+        if !trust_hint.is_empty() {
+            println!("             {trust_hint}");
+        }
+        println!("             确认：glowlink accept {token} / glowlink reject {token}");
     }
     Ok(())
 }
@@ -339,31 +359,53 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
         query_interval(config),
     );
 
-    let transfer = TransferController::new(config.chunk_size(), config.ring_capacity());
-    let view = Arc::new(CliView::new(auto_accept));
+    // 线程里不能再借用 config，先把需要的值取出来
+    let chunk_size = config.chunk_size();
+    let ring_capacity = config.ring_capacity();
+    let identity_key = load_or_create_identity()?;
+    let trust = TrustFile::open_default()?;
 
     println!(
         "萤光节点「{}」已启动：传输端口 {port}，接收目录 {}",
         identity.name,
         dir.display()
     );
+    println!(
+        "本机设备指纹 {}（加密已启用，首次配对需与对端核对 6 位校验码）",
+        identity_key.fingerprint()
+    );
     if !auto_accept {
-        println!("收到文件时会先询问是否接收（--yes 可自动接收）。");
+        println!("收到文件时会先询问是否接收（--yes 对已信任设备免确认）。");
     }
 
     // 接收在独立线程中进行，主线程持续查询与刷新设备列表。
     {
         let listener: Arc<Box<dyn TransferListener>> = Arc::from(listener);
-        let view = Arc::clone(&view);
         let dir = dir.clone();
+        let trust = Arc::clone(&trust);
         std::thread::spawn(move || loop {
             match listener.accept() {
-                Ok((mut stream, peer)) => {
-                    let label = peer.ip().to_string();
-                    match transfer.receive_file(stream.as_mut(), &dir, &label, view.as_ref()) {
-                        Ok(path) => println!("\n已接收：{}", path.display()),
-                        Err(e) => eprintln!("\n接收失败：{e}"),
-                    }
+                Ok((stream, peer)) => {
+                    // 每个连接各自握手、各自一份会话信息与视图
+                    let trust = Arc::clone(&trust);
+                    let identity_key = Arc::clone(&identity_key);
+                    let dir = dir.clone();
+                    std::thread::spawn(move || {
+                        let session: SessionSlot = session_slot();
+                        let mut secure = SecureTransport::responder(
+                            stream,
+                            identity_key,
+                            Arc::clone(&trust) as Arc<dyn TrustList>,
+                            Arc::clone(&session),
+                        );
+                        let transfer = TransferController::new(chunk_size, ring_capacity);
+                        let view = CliView::with_session(auto_accept, session, trust);
+                        let label = peer.ip().to_string();
+                        match transfer.receive_file(&mut secure, &dir, &label, &view) {
+                            Ok(path) => println!("\n已接收：{}", path.display()),
+                            Err(e) => eprintln!("\n接收失败：{e}"),
+                        }
+                    });
                 }
                 Err(e) => eprintln!("接受连接失败：{e}"),
             }
@@ -442,10 +484,33 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
 
     let transfer = TransferController::new(config.chunk_size(), config.ring_capacity());
     let connect_timeout = Duration::from_secs(config.connect_timeout_secs);
-    let view = CliView::new(true);
+    let identity_key = load_or_create_identity()?;
+    let trust = TrustFile::open_default()?;
+    println!("本机设备指纹 {}", identity_key.fingerprint());
     for file in &files {
-        let mut stream = factory.connect(target, connect_timeout)?;
-        let sent = transfer.send_file(stream.as_mut(), file, &view)?;
+        let stream = factory.connect(target, connect_timeout)?;
+        let session: SessionSlot = session_slot();
+        let mut secure = SecureTransport::initiator(
+            stream,
+            Arc::clone(&identity_key),
+            Arc::clone(&trust) as Arc<dyn TrustList>,
+            Arc::clone(&session),
+        );
+        // 先握手拿到校验码：接收方要靠它核对，所以必须发文件之前就显示
+        secure.handshake()?;
+        if let Some(info) = secure.session_info() {
+            println!(
+                "已与 {} 建立加密连接：对端指纹 {}{}",
+                target,
+                info.peer_fingerprint,
+                if info.trusted { "（已信任）" } else { "" }
+            );
+            if !info.trusted {
+                println!("校验码 **{}** ← 请与接收方屏幕上显示的核对", info.code);
+            }
+        }
+        let view = CliView::new(true);
+        let sent = transfer.send_file(&mut secure, file, &view)?;
         println!("\n已发送：{}（{}）", file.display(), human_size(sent));
     }
     Ok(())
@@ -461,13 +526,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `glowlink on`：后台拉起守护进程（幂等：已在跑就直接报告）。
 fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
-    if has_flag(args, "--yes") {
-        return Err(GlowError::Usage(
-            "自动接收（--yes）要等加密与配对完成（Step 3）后才开放；\
-             当前守护进程只做人工确认（glowlink accept / reject）。"
-                .into(),
-        ));
-    }
+    // --yes 已开放，但**只对已信任指纹生效**：陌生设备仍必须人工确认，
+    // 否则「无感」等于「谁都能往你机器里塞文件」。
+    let auto_accept = has_flag(args, "--yes");
     if let Some(state) = daemon::running_state() {
         print_on_summary(&state, "已在运行");
         return Ok(());
@@ -478,6 +539,9 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
 
     let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
     let mut child_args = vec![daemon::DAEMON_COMMAND.to_string()];
+    if auto_accept {
+        child_args.push("--yes".to_string());
+    }
     for flag in ["--dir", "--port", "--discovery-port"] {
         if let Some(value) = flag_value(args, flag) {
             child_args.push(flag.to_string());
@@ -514,11 +578,13 @@ fn print_on_summary(state: &State, prefix: &str) {
         state.discovery_port,
         state.receive_dir.display()
     );
+    if let Ok(identity) = load_or_create_identity() {
+        println!("本机设备指纹 {}", identity.fingerprint());
+    }
     println!(
-        "收到文件时会等待人工确认：glowlink accept / glowlink reject；日志 {}",
-        state::log_path().display()
+        "加密已启用；未配对设备需核对校验码后确认：glowlink list / accept <编号> / reject <编号>"
     );
-    println!("停止：glowlink off");
+    println!("日志 {}    停止：glowlink off", state::log_path().display());
 }
 
 /// `glowlink off`：优先优雅停止，IPC 不通时兜底强杀。
@@ -578,6 +644,8 @@ struct DaemonShared {
     state: Mutex<State>,
     devices: Mutex<Vec<glowlink_core::Device>>,
     pending: Arc<PendingQueue>,
+    /// 是否对**已信任**设备免确认自动接收（`on --yes`）。
+    auto_accept: bool,
     stop: AtomicBool,
 }
 
@@ -622,11 +690,16 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     };
     let discovery_port = discovery_port(config, args)?;
     let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
+    let auto_accept = has_flag(args, "--yes");
     let dir = match flag_value(args, "--dir") {
         Some(value) => PathBuf::from(value),
         None => config.receive_dir.clone(),
     };
     fs::create_dir_all(&dir)?;
+
+    // 长期身份与信任列表：守护进程全程复用同一份
+    let identity_key = load_or_create_identity()?;
+    let trust = TrustFile::open_default()?;
 
     let factory = NativeTransportFactory;
     let listener = factory.listen(port)?;
@@ -662,15 +735,23 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     };
     state::write_state(&state)?;
     state::append_log(&format!(
-        "守护进程已启动：PID {}，传输端口 {port}，IPC 端口 {ipc_port}，接收目录 {}",
+        "守护进程已启动：PID {}，传输端口 {port}，IPC 端口 {ipc_port}，接收目录 {}，\
+         本机指纹 {}，{}",
         state.pid,
-        dir.display()
+        dir.display(),
+        identity_key.fingerprint(),
+        if auto_accept {
+            "自动接收：仅限已信任设备"
+        } else {
+            "自动接收：关闭（全部人工确认）"
+        }
     ));
 
     let shared = Arc::new(DaemonShared {
         state: Mutex::new(state),
         devices: Mutex::new(Vec::new()),
         pending: Arc::new(PendingQueue::new()),
+        auto_accept,
         stop: AtomicBool::new(false),
     });
 
@@ -699,21 +780,41 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     // 接收线程：默认人工确认（DaemonView 阻塞等 IPC 落决定）
     {
         let listener: Arc<Box<dyn TransferListener>> = Arc::from(listener);
-        let view = Arc::new(DaemonView::new(Arc::clone(&shared.pending), PENDING_TIMEOUT));
         let chunk_size = config.chunk_size();
         let ring_capacity = config.ring_capacity();
         let dir = dir.clone();
+        let trust = Arc::clone(&trust);
+        let identity_key = Arc::clone(&identity_key);
+        let auto_accept = shared.auto_accept;
+        let pending = Arc::clone(&shared.pending);
         std::thread::spawn(move || loop {
             match listener.accept() {
                 // 每个到达的连接单开一个线程：等待确认期间不能挡住后面来的设备，
                 // 否则第二个发送方只会静默挂在 backlog 里（就是单槽版本的毛病）。
-                Ok((mut stream, peer)) => {
-                    let view = Arc::clone(&view);
+                Ok((stream, peer)) => {
+                    let trust = Arc::clone(&trust);
+                    let identity_key = Arc::clone(&identity_key);
                     let dir = dir.clone();
+                    let pending = Arc::clone(&pending);
                     std::thread::spawn(move || {
+                        // 每个连接各自握手，会话信息（指纹 + 校验码）交给本连接的视图
+                        let session: SessionSlot = session_slot();
+                        let mut secure = SecureTransport::responder(
+                            stream,
+                            identity_key,
+                            Arc::clone(&trust) as Arc<dyn TrustList>,
+                            Arc::clone(&session),
+                        );
                         let transfer = TransferController::new(chunk_size, ring_capacity);
+                        let view = DaemonView::new(
+                            pending,
+                            PENDING_TIMEOUT,
+                            session,
+                            trust,
+                            auto_accept,
+                        );
                         let label = peer.ip().to_string();
-                        match transfer.receive_file(stream.as_mut(), &dir, &label, view.as_ref()) {
+                        match transfer.receive_file(&mut secure, &dir, &label, &view) {
                             Ok(path) => state::append_log(&format!("已接收：{}", path.display())),
                             Err(e) => state::append_log(&format!("接收失败：{e}")),
                         }
@@ -770,14 +871,16 @@ fn print_help() {
          \x20                                           直连发送，绕过发现层\n\
          \x20 glowlink config                          显示生效配置与配置文件位置\n\n\
          守护进程：\n\
-         \x20 glowlink on   [--dir 目录] [--ipc-port 端口]\n\
-         \x20                                           后台常驻（只做人工确认，不自动接收）\n\
+         \x20 glowlink on   [--dir 目录] [--yes] [--ipc-port 端口]\n\
+         \x20                                           后台常驻；--yes 仅对已信任设备免确认\n\
          \x20 glowlink accept [编号] | reject [编号]   确认/拒绝待接收的文件（编号见 list）\n\
          \x20 glowlink off                           停止守护进程\n\n\
          配置文件：{}（工程默认）→ ~/.config/glowlink/config.toml（用户覆盖）\n\
          也可用 $GLOWLINK_CONFIG 指定用户配置文件路径。\n\
          发现端口默认 {}；被占用时自动顺延到相邻端口。\n\
-         守护进程在跑时，list / send 自动改走本地 IPC。\n",
+         守护进程在跑时，list / send 自动改走本地 IPC。\n\
+         传输已启用端到端加密（X25519 + ChaCha20-Poly1305）；\n\
+         首次配对时请核对两端显示的 6 位校验码，确认后该设备进入信任列表。\n",
         env!("CARGO_PKG_VERSION"),
         config::PROJECT_CONFIG,
         Config::default().discovery_port

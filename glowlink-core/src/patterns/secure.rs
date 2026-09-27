@@ -127,8 +127,9 @@ impl SecureTransport {
 
     /// 握手：交换 hello 与身份证明，派生会话密钥。
     ///
-    /// 幂等——已握手就直接返回，方便第一帧时才触发。
-    fn ensure_ready(&mut self) -> Result<()> {
+    /// 幂等——已握手就直接返回。发送方应在发送前显式调用一次，
+    /// 好把 6 位校验码先打印出来给用户核对（否则要等文件发完才知道码）。
+    pub fn handshake(&mut self) -> Result<()> {
         if !matches!(self.state, State::Fresh) {
             return Ok(());
         }
@@ -202,14 +203,14 @@ impl SecureTransport {
 
 impl TransferTransport for SecureTransport {
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        self.ensure_ready()?;
+        self.handshake()?;
         let plaintext = frame.encode()?;
         let sealed = self.send_cipher()?.seal(&plaintext)?;
         self.inner.send_frame(&Frame::SecureData(sealed))
     }
 
     fn recv_frame(&mut self) -> Result<Frame> {
-        self.ensure_ready()?;
+        self.handshake()?;
         let sealed = match self.inner.recv_frame()? {
             Frame::SecureData(payload) => payload,
             other => {

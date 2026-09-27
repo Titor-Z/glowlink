@@ -3,10 +3,13 @@
 //! 核心库只定义 [`TransferView`] 接口，终端表现全部收敛在这里。
 
 use std::io::{self, IsTerminal, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use glowlink_core::controller::transfer::TransferView;
+use glowlink_core::patterns::secure::SessionSlot;
+
+use crate::keys::TrustFile;
 
 /// 进度条宽度（字符数）。
 const BAR_WIDTH: usize = 24;
@@ -14,7 +17,12 @@ const BAR_WIDTH: usize = 24;
 const REFRESH: Duration = Duration::from_millis(100);
 
 pub struct CliView {
+    /// 是否对**已信任**设备免确认自动接收。
     auto_accept: bool,
+    /// 本次连接的会话信息（指纹 + 校验码）；发起方用于打印校验码。
+    session: Option<SessionSlot>,
+    /// 用户确认配对后写入这里；`None` 表示这次运行不记信任（例如仅发送）。
+    trust: Option<Arc<TrustFile>>,
     /// 进度状态：同一时刻只有一个传输在进行，用一把锁保护即可。
     state: Mutex<Option<Progress>>,
 }
@@ -28,26 +36,90 @@ struct Progress {
 }
 
 impl CliView {
+    /// 简单视图：只用于发送侧与无配对的场景。
     pub fn new(auto_accept: bool) -> Self {
-        CliView { auto_accept, state: Mutex::new(None) }
+        CliView {
+            auto_accept,
+            session: None,
+            trust: None,
+            state: Mutex::new(None),
+        }
+    }
+
+    /// 带加密会话信息的视图（接收侧用它显示指纹与校验码、并在确认后记住设备）。
+    pub fn with_session(
+        auto_accept: bool,
+        session: SessionSlot,
+        trust: Arc<TrustFile>,
+    ) -> Self {
+        CliView {
+            auto_accept,
+            session: Some(session),
+            trust: Some(trust),
+            state: Mutex::new(None),
+        }
+    }
+
+    fn session_info(&self) -> Option<glowlink_core::patterns::secure::SessionInfo> {
+        let slot = self.session.as_ref()?;
+        slot.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
 impl TransferView for CliView {
     fn confirm_receive(&self, peer: &str, name: &str, size: u64) -> bool {
-        if self.auto_accept {
-            return true;
+        let info = self.session_info();
+        // 已信任设备 + 允许自动接收 ⇒ 不问
+        if let Some(info) = &info {
+            if info.trusted && self.auto_accept {
+                println!(
+                    "\n已信任设备「{}」（{}）发来「{name}」，自动接收。",
+                    info.peer_fingerprint, peer
+                );
+                return true;
+            }
         }
-        print!(
-            "\n来自 {peer} 的文件「{name}」（{}），接收？[y/N] ",
-            human_size(size)
-        );
+
+        println!("\n来自 {peer} 的文件「{name}」（{}）", human_size(size));
+        let untrusted = match &info {
+            Some(info) if !info.trusted => {
+                // 用户要把这两个跟发送方屏幕上显示的核对一遍
+                println!(
+                    "  设备指纹 {}    校验码 **{}**（请与发送方屏幕核对）",
+                    info.peer_fingerprint, info.code
+                );
+                true
+            }
+            Some(_) => {
+                println!("  已信任设备（指纹 {}）", info.as_ref().unwrap().peer_fingerprint);
+                false
+            }
+            None => {
+                println!("  [警告] 没有加密会话信息，无法核对来源");
+                true
+            }
+        };
+        print!("接收？[y/N] ");
         let _ = io::stdout().flush();
         let mut line = String::new();
         if io::stdin().read_line(&mut line).is_err() {
             return false;
         }
-        matches!(line.trim().to_lowercase().as_str(), "y" | "yes")
+        let accepted = matches!(line.trim().to_lowercase().as_str(), "y" | "yes");
+
+        // 用户既然确认了这台设备，就记住它，下次免确认
+        if accepted && untrusted {
+            if let (Some(info), Some(trust)) = (&info, self.trust.as_ref()) {
+                match trust.trust(&info.peer_fingerprint, peer) {
+                    Ok(()) => println!(
+                        "已记住设备 {}（{}），下次免确认。",
+                        info.peer_fingerprint, peer
+                    ),
+                    Err(e) => eprintln!("写入信任列表失败：{e}"),
+                }
+            }
+        }
+        accepted
     }
 
     fn progress(&self, label: &str, done: u64, total: u64) {
