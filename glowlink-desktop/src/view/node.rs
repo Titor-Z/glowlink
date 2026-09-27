@@ -84,13 +84,15 @@ pub fn drift_offset(rect: Rect, phase: f32, delta: f32) -> (f32, f32) {
     (rect.x + FLOAT_AMP_X * theta.sin(), rect.y + FLOAT_AMP_Y * theta.cos())
 }
 
-/// 呼吸圈的动画 id：同一帧里可能有多个圈（本机 + 拖拽目标），必须各不相同。
-/// 用节点位置当后缀：同一个节点跨帧保持同一个 id，动画才不会每帧重头开始。
-fn halo_id(rect: Rect) -> ElementId {
-    ElementId::NamedInteger(
-        SharedString::new_static("halo"),
-        ((rect.x as u64) << 32) | rect.y as u64,
-    )
+/// 呼吸圈的动画 id：从节点自己的 id 派生。
+///
+/// 同一帧里可能有多个圈（本机盘 + 它的染色层 + 拖拽目标），必须各不相同；
+/// 而同一个节点跨帧又必须**相同**，否则动画每帧从头开始（看着像卡住）。
+/// 用节点 id 当前缀正好两头都满足。
+fn halo_id(node_id: &ElementId) -> ElementId {
+    // 穷举 `ElementId` 的变体会随框架升级而失效（它还有 View / Uuid / FocusHandle……），
+    // 这里只要一个「对同一节点稳定、对不同节点不同」的前缀，Debug 串正好够用。
+    ElementId::Name(format!("halo-{node_id:?}").into())
 }
 
 /// 辉光：零模糊偏移，只有扩散。
@@ -306,7 +308,12 @@ impl NodeWho {
 
 /// 画一枚节点：`rect` 是**全窗坐标**。
 pub struct NodeSpec<'a> {
-    pub rect: Rect,
+    /// 节点自己的 id（同时派生呼吸圈的动画 id）。
+    ///
+    /// **不带坐标**：位置一律由调用方的容器决定——曾经的坑是「节点内部按 rect 定位、
+    /// 外面又套一层同样按 rect 定位的容器」，于是设备被画到两倍坐标上，跑出窗口。
+    /// 现在节点根本没有坐标可用，这种写法在类型上就不可能了。
+    pub id: ElementId,
     pub who: NodeWho,
     pub label: &'a str,
     pub look: NodeLook,
@@ -315,8 +322,12 @@ pub struct NodeSpec<'a> {
 }
 /// 节点元素：盘 + 环 + 图标 + 名字。
 ///
+/// **它自己不摆位置**：位置一律由调用方的容器决定（[`positioned`] 或一个静态容器）。
+/// 曾经的坑：节点内部按 `rect` 定位、外面又套了一层同样按 `rect` 定位的容器，
+/// 于是设备被画到两倍坐标上——320px 宽的窗口装不下，看着就是「设备全没了」。
+///
 /// 返回 `Stateful<Div>`（**带 id 才算「可交互元素」**）：拖动、点击、hover
-/// 都要求它；而漂浮动画改由调用方用 [`drifting`] 套上——两者顺序不能反。
+/// 都要求它；而漂浮动画改由调用方用 [`positioned`] 套上——两者顺序不能反。
 pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     let node_size = spec.who.node_size();
     let tone = spec.look.tone_override.unwrap_or_else(|| spec.who.tone());
@@ -344,7 +355,7 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
         let span = diameter + 16.0;
         // 色先取出来：动画回调要求 `'static`，闭包里不能持有 `&Theme`
         let halo_color = t.halo;
-        div().absolute().with_animation(halo_id(spec.rect), breath(), move |el, delta| {
+        div().absolute().with_animation(halo_id(&spec.id), breath(), move |el, delta| {
             let grow = HALO_MAX_GROW * delta;
             let size = span + grow;
             el.left(px(-8.0 - grow / 2.0))
@@ -361,10 +372,6 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
 
     let base = div()
         .absolute()
-        // 先给一个静态坐标：动画每帧会覆盖它，但不能没有——
-        // 没有的话在「动画未参与/被 reduce_motion 冻结」的那一帧会跑到 (0,0)。
-        .left(px(spec.rect.x))
-        .top(px(spec.rect.y))
         .w(px(diameter))
         .h(px(diameter))
         .children(halo)
@@ -427,10 +434,7 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     // id 由**初始位置**派生：跨帧必须稳定，否则动画每帧从头开始、拖动也会断。
     // 坐标本身由调用方的漂浮动画每帧覆盖；这里给静态值兜底（没有它，
     // 在「动画未参与 / 被 reduce_motion 冻结」的那一帧会落到 (0,0)，也就是左上角）。
-    base.id(ElementId::NamedInteger(
-        SharedString::new_static("node"),
-        ((spec.rect.x as u64) << 32) | spec.rect.y as u64,
-    ))
+    base.id(spec.id)
 }
 
 /// 拖动时的「拖影」：跟着指针走的那一枚。
@@ -461,7 +465,7 @@ impl Render for DragGhost {
                     el.opacity(0.65 + 0.35 * delta).child(node(
                         &t,
                         NodeSpec {
-                            rect: Rect { x: 0.0, y: 0.0, size: 0.0 },
+                            id: ElementId::Name("ghost-node".into()),
                             who: NodeWho::Device(kind),
                             label: &name,
                             look: NodeLook::device_default(),

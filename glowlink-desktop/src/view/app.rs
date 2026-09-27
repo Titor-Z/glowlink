@@ -327,7 +327,8 @@ impl Render for AppRoot {
                 let visual = node::node(
                     &t,
                     node::NodeSpec {
-                        rect,
+                        // id 由设备 ID 派生（不是坐标）：位置变了动画也不重头开始
+                        id: ElementId::Name(format!("node-{}", device.id).into()),
                         who: node::NodeWho::Device(device.kind),
                         label: &device.name,
                         look: node::NodeLook::device_default(),
@@ -443,42 +444,58 @@ impl Render for AppRoot {
                     .h(px(theme::GRAPH_H))
                     .w_full()
                     .when(show_devices, |el| el.children(devices))
-                    // 中心盘：命中时**染上被拖那台的辉光色**并加强（不是只换个环）。
-                    // 过渡靠 `with_animation` 一次性按状态重播（id 里带命中与否）——
-                    // gpui 没有 CSS transition，这是等价做法。
+                    // 中心盘：**本机盘 + 一层「染色版」叠加**，染色层的不透明度做过渡。
+                    //
+                    // 为什么是叠两层而不是逐帧改色：`with_animation` 的回调只能改
+                    // 它自己那个元素的样式，改不了子元素的颜色——而 `Fn` 回调又没法
+                    // 把新的子元素塞进去。叠一层、调它的 opacity，就是 gpui 里的 crossfade。
                     .child({
                         let highlighted = self.over_center();
                         let dragged_tone = self.dragged_tone();
                         let name = self.device_name.clone();
                         let rect = graph_space(self_rect);
-                        div().absolute().left(px(0.0)).top(px(0.0)).with_animation(
-                            ElementId::Name(
-                                format!(
-                                    "center-tint-{}-{}",
-                                    highlighted,
-                                    dragged_tone.map(|_| 1).unwrap_or(0)
-                                )
-                                .into(),
-                            ),
-                            gpui::Animation::new(Duration::from_millis(
-                                crate::model::drag::CENTER_TINT_MS,
-                            ))
-                            .with_easing(gpui::ease_out_quint()),
-                            move |el, delta| {
-                                let t = if highlighted { delta } else { 1.0 - delta };
-                                let tone = dragged_tone.unwrap_or(theme::NODE_SELF);
-                                el.child(node::node(
-                                    &t_theme,
-                                    node::NodeSpec {
-                                        rect,
-                                        who: node::NodeWho::SelfNode,
-                                        label: &name.to_string(),
-                                        look: node::NodeLook::self_node_blended(t, tone),
-                                        scale: 1.0,
-                                    },
-                                ))
+                        let tinted = node::node(
+                            &t_theme,
+                            node::NodeSpec {
+                                id: ElementId::Name("node-self-tinted".into()),
+                                who: node::NodeWho::SelfNode,
+                                label: &name.to_string(),
+                                look: node::NodeLook::self_node_blended(1.0, dragged_tone.unwrap_or(theme::NODE_SELF)),
+                                scale: 1.0,
                             },
-                        )
+                        );
+                        div()
+                            .absolute()
+                            .left(px(rect.x))
+                            .top(px(rect.y))
+                            .child(node::node(
+                                &t_theme,
+                                node::NodeSpec {
+                                    id: ElementId::Name("node-self".into()),
+                                    who: node::NodeWho::SelfNode,
+                                    label: &name.to_string(),
+                                    look: node::NodeLook::self_node(),
+                                    scale: 1.0,
+                                },
+                            ))
+                            .child(tinted.with_animation(
+                                ElementId::Name(
+                                    format!(
+                                        "center-tint-{}-{}",
+                                        highlighted,
+                                        dragged_tone.map(|_| 1).unwrap_or(0)
+                                    )
+                                    .into(),
+                                ),
+                                gpui::Animation::new(Duration::from_millis(
+                                    crate::model::drag::CENTER_TINT_MS,
+                                ))
+                                .with_easing(gpui::ease_out_quint()),
+                                // 命中：染色层淡入；离开：淡出回本机蓝
+                                move |el, delta| {
+                                    el.opacity(if highlighted { delta } else { 1.0 - delta })
+                                },
+                            ))
                     })
                     // 中心盘的落点区：84px 的盘本身（不含呼吸光圈）。
                     // 设计稿那句「落在中心 84px 内才生效」就是它。
