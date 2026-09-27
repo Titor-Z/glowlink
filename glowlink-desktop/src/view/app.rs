@@ -63,6 +63,12 @@ pub struct AppRoot {
     returning: Option<Returning>,
     /// 回弹序号（只增不减）：动画 id 靠它区分「这一次」和「上一次」。
     return_seq: u64,
+    /// 染色层是否曾经出现过（没出现过就压根不渲染——否则首帧会闪一下）。
+    tint_shown: bool,
+    /// 每次「进入命中」递增：过渡动画的 id 靠它每次都换新，才会重播。
+    tint_seq: u64,
+    /// 上一次命中时的目标色：淡出时用它，免得颜色在淡出途中跳回品牌蓝。
+    tint_tone: gpui::Rgba,
 }
 
 /// 一次「飞回原位」的记录。
@@ -117,12 +123,14 @@ impl AppRoot {
             pair: None,
             returning: None,
             return_seq: 0,
+            tint_shown: false,
+            tint_seq: 0,
+            tint_tone: theme::NODE_SELF,
         }
     }
 
-    /// 正在被拖的那台设备的辉光色（没有拖动时 `None`）。
-    fn dragged_tone(&self) -> Option<gpui::Rgba> {
-        let id = self.dragging.as_deref()?;
+    /// 某台设备的辉光色（用于把中心盘染成它的色）。
+    fn dragged_tone_of(&self, id: &str) -> Option<gpui::Rgba> {
         self.devices
             .iter()
             .find(|device| device.id == id)
@@ -344,7 +352,17 @@ impl Render for AppRoot {
                 .on_drag_move(cx.listener(
                     |this, event: &DragMoveEvent<DeviceDrag>, _window, cx| {
                         let point = window_point(event.bounds.origin, event.event.position);
+                        // 先看**上一帧的落点**在不在命中区：只有「刚进来」才换动画 id
+                        let was_over = this.over_center();
                         let dragging = Some(event.drag(cx).id.clone());
+                        let now_over = layout::snaps_to_center(point);
+                        if now_over && !was_over {
+                            this.tint_shown = true;
+                            this.tint_seq += 1;
+                            if let Some(tone) = this.dragged_tone_of(&event.drag(cx).id) {
+                                this.tint_tone = tone;
+                            }
+                        }
                         // 再次按住 = 打断回弹：否则那份「飞回原位」的一次性动画
                         // 还在每帧摆位置，跟拖动抢同一个坐标
                         this.returning = None;
@@ -454,20 +472,9 @@ impl Render for AppRoot {
                     // 把新的子元素塞进去。叠一层、调它的 opacity，就是 gpui 里的 crossfade。
                     .child({
                         let highlighted = self.over_center();
-                        let dragged_tone = self.dragged_tone();
                         let name = self.device_name.clone();
                         let rect = graph_space(self_rect);
-                        let tinted = node::node(
-                            &t_theme,
-                            node::NodeSpec {
-                                id: ElementId::Name("node-self-tinted".into()),
-                                who: node::NodeWho::SelfNode,
-                                label: &name.to_string(),
-                                look: node::NodeLook::self_node_blended(1.0, dragged_tone.unwrap_or(theme::NODE_SELF)),
-                                scale: 1.0,
-                            },
-                        );
-                        div()
+                        let container = div()
                             .absolute()
                             .left(px(rect.x))
                             .top(px(rect.y))
@@ -480,15 +487,29 @@ impl Render for AppRoot {
                                     look: node::NodeLook::self_node(),
                                     scale: 1.0,
                                 },
-                            ))
-                            .child(tinted.with_animation(
+                            ));
+                        let tinted = node::node(
+                            &t_theme,
+                            node::NodeSpec {
+                                id: ElementId::Name("node-self-tinted".into()),
+                                who: node::NodeWho::SelfNode,
+                                label: &name.to_string(),
+                                look: node::NodeLook::self_node_blended(1.0, self.tint_tone),
+                                scale: 1.0,
+                            },
+                        );
+                        // 动画 id **只用「命中与否 + 每次命中的序号」**：
+                        // 掺进别的会变的东西（比如色是否为 None）就会在无关时刻重播一次——
+                        // 而重播的起点是 `1.0 - 0 = 1.0`，于是「一拖动中心就亮」。
+                        // 没出现过就**不渲染这一层**：否则首帧会按「关」的起点（满亮）
+                        // 闪一下，等于什么都没拖就先亮一次
+                        if !self.tint_shown {
+                            container
+                        } else {
+                            container.child(tinted.with_animation(
                                 ElementId::Name(
-                                    format!(
-                                        "center-tint-{}-{}",
-                                        highlighted,
-                                        dragged_tone.map(|_| 1).unwrap_or(0)
-                                    )
-                                    .into(),
+                                    format!("center-tint-{}-{}", highlighted, self.tint_seq)
+                                        .into(),
                                 ),
                                 gpui::Animation::new(Duration::from_millis(
                                     crate::model::drag::CENTER_TINT_MS,
@@ -499,6 +520,7 @@ impl Render for AppRoot {
                                     el.opacity(if highlighted { delta } else { 1.0 - delta })
                                 },
                             ))
+                        }
                     })
                     // 落点区：**得装下 r=50 的吸附圆**（84px 的方框装不下它的四角），
                     // 否则边缘上「明明该吸附」的位置会因为落点区没盖住而收不到松手事件。
