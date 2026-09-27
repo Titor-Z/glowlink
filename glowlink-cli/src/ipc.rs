@@ -116,7 +116,11 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
                 )],
                 true,
             ),
-            None => (vec![format!("ERR 未找到设备「{arg}」")], true),
+            // 走统一的错误编码：手写 ERR 行会漏掉种类，客户端只能当通用错误（退出码会不对）
+            None => (
+                vec![error_reply(&GlowError::NotFound(arg.to_string()))],
+                true,
+            ),
         },
         "PENDING" => {
             let pending = host.pending();
@@ -138,15 +142,73 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
                     (vec![format!("OK {verb} #{token}")], true)
                 }
                 // 回原文而不是 `e.to_string()`：否则客户端会叠成「协议错误：用法错误：…」
-                Err(e) => (vec![format!("ERR {}", plain_message(&e))], true),
+                // `ERR <种类> <正文>`：客户端据此还原错误种类，退出码才不会「守护进程在跑就变 1」
+                Err(e) => (vec![error_reply(&e)], true),
             }
         }
         "STOP" => {
             host.request_stop();
             (vec!["OK 正在停止".to_string()], false)
         }
-        "" => (vec!["ERR 空指令".to_string()], true),
-        other => (vec![format!("ERR 未知指令「{other}」")], true),
+        "" => (
+            vec![error_reply(&GlowError::Protocol("空指令".to_string()))],
+            true,
+        ),
+        other => (
+            vec![error_reply(&GlowError::Protocol(format!("未知指令「{other}」")))],
+            true,
+        ),
+    }
+}
+
+/// 把错误编码成 IPC 响应行：`ERR <种类> <正文>`。
+///
+/// 为什么要带种类：退出码依赖错误种类（用法 2 / 网络 3 / 信任 4 / 拒绝 5），
+/// 只回正文的话守护进程在跑时所有错误都会退化成通用错误 1，脚本行为会随
+/// 「有没有开守护进程」而变——这种不一致最难排查。
+pub fn error_reply(error: &GlowError) -> String {
+    format!("ERR {} {}", error_kind(error), plain_message(error))
+}
+
+/// 错误种类名（IPC 协议的一部分，改名等于改协议）。
+fn error_kind(error: &GlowError) -> &'static str {
+    match error {
+        GlowError::Usage(_) => "usage",
+        GlowError::Config(_) => "config",
+        GlowError::NotFound(_) => "notfound",
+        GlowError::Missing(_) => "missing",
+        GlowError::Crypto(_) => "crypto",
+        GlowError::Rejected(_) => "rejected",
+        // 网络类 IO 单独一种：只回 "io" 的话，客户端还原出的是「其它 IO 错误」，
+        // 退出码会从 3（网络）掉成 1（通用）——脚本的重试策略就跟着失效了
+        GlowError::Io(e) if crate::exit::is_network_io(e.kind()) => "net",
+        GlowError::Io(_) => "io",
+        GlowError::Protocol(_) => "protocol",
+        GlowError::Remote(_) => "remote",
+    }
+}
+
+/// `ERR <种类> <正文>` → 错误。种类不认识时退回 `Remote`（老守护进程仍能配合）。
+pub fn error_from_line(line: &str) -> GlowError {
+    let body = line.strip_prefix("ERR ").unwrap_or(line);
+    let (kind, text) = match body.split_once(' ') {
+        Some((kind, text)) => (kind, text.to_string()),
+        None => ("", body.to_string()),
+    };
+    match kind {
+        "usage" => GlowError::Usage(text),
+        "config" => GlowError::Config(text),
+        "notfound" => GlowError::NotFound(text),
+        "missing" => GlowError::Missing(text),
+        "crypto" => GlowError::Crypto(text),
+        "rejected" => GlowError::Rejected(text),
+        "net" => GlowError::Io(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            text,
+        )),
+        "io" => GlowError::Io(std::io::Error::other(text)),
+        "protocol" => GlowError::Protocol(text),
+        _ => GlowError::Remote(text),
     }
 }
 
@@ -157,6 +219,7 @@ fn plain_message(error: &GlowError) -> String {
         GlowError::Protocol(m)
         | GlowError::Rejected(m)
         | GlowError::NotFound(m)
+        | GlowError::Missing(m)
         | GlowError::Usage(m)
         | GlowError::Config(m)
         | GlowError::Remote(m)
@@ -258,9 +321,7 @@ impl IpcClient {
             lines.push(line);
         }
         match lines.first() {
-            Some(first) if first.starts_with("ERR ") => {
-                Err(GlowError::Remote(first[4..].to_string()))
-            }
+            Some(first) if first.starts_with("ERR ") => Err(error_from_line(first)),
             Some(_) => Ok(lines),
             None => Err(GlowError::Protocol("守护进程返回了空响应".into())),
         }

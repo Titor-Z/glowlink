@@ -3,7 +3,7 @@
 //! 为什么不是单槽：单槽下第二个发送方会静默挂在 TCP backlog 里，
 //! 既没有提示也没有拒绝，对发送方来说就是「卡死」，体验是灾难。
 //! 所以每个到达的 OFFER 各占一个槽位、各拿一个短 token，
-//! 由接收线程各自阻塞等待，`glowlink pending` 能看到全部，
+//! 由接收线程各自阻塞等待，`glowlink list` 能看到全部，
 //! `glowlink accept <token>` 按号下决定，超时则各自自动拒绝。
 
 use std::sync::{Condvar, Mutex};
@@ -135,14 +135,18 @@ impl PendingQueue {
                 .iter()
                 .copied()
                 .find(|index| inner.waiting[*index].token == token)
-                .ok_or_else(|| GlowError::Usage(format!("没有编号为 {token} 的待确认请求")))?,
+                .ok_or_else(|| {
+                    GlowError::Usage(format!(
+                        "没有编号为 {token} 的待确认请求（编号见 glowlink list）"
+                    ))
+                })?,
             None => match undecided.len() {
                 0 => return Err(GlowError::Usage("当前没有待确认的接收请求".into())),
                 1 => undecided[0],
                 n => {
                     return Err(GlowError::Usage(format!(
                         "有 {n} 个待确认请求，请用 glowlink accept <编号> / reject <编号> 指定，\
-                         编号见 glowlink pending"
+                         编号见 glowlink list"
                     )))
                 }
             },

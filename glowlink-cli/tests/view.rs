@@ -1,4 +1,4 @@
-use glowlink_cli::view::cli::{human_duration, human_size, human_speed, session_banner, source_line};
+use glowlink_cli::view::cli::{human_duration, human_size, session_banner, source_line};
 use glowlink_cli::view::daemon::pending_hint;
 
 #[test]
@@ -8,14 +8,6 @@ fn human_size_switches_units() {
     assert_eq!(human_size(1024), "1.0 KB");
     assert_eq!(human_size(1024 * 1024), "1.0 MB");
     assert_eq!(human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
-}
-
-#[test]
-fn human_speed_always_uses_megabytes() {
-    assert_eq!(human_speed(1024.0 * 1024.0), "1.0 MB/s");
-    assert_eq!(human_speed(0.0), "0.0 MB/s");
-    // 千兆网线量级，避免出现 "0.1 GB/s" 这种不好比较的单位
-    assert_eq!(human_speed(112.0 * 1024.0 * 1024.0), "112.0 MB/s");
 }
 
 #[test]

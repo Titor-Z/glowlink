@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
 use glowlink_cli::config;
 use glowlink_cli::daemon;
+use glowlink_cli::exit;
 use glowlink_cli::ipc::{self, IpcHost};
 use glowlink_cli::keys::{install_device_id, load_or_create_identity, TrustFile};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
@@ -41,23 +42,19 @@ fn main() {
     install_device_id();
 
     reset_sigpipe();
-    match run() {
-        Ok(()) => {}
-        // 用法错误自己就是完整的一句话（含命令名与用法），不再套「错误：用法错误：」两层
-        Err(GlowError::Usage(message)) => {
-            eprintln!("{}", style().error(&message));
-            std::process::exit(EXIT_USAGE);
-        }
+    let code = match run() {
+        Ok(()) => exit::OK,
         Err(e) => {
-            eprintln!("{}", style().error(&format!("错误：{e}")));
-            std::process::exit(EXIT_FAILURE);
+            // 用法错误自己就是完整的一句话（含命令名与用法），不再套「错误：用法错误：」两层
+            match &e {
+                GlowError::Usage(message) => eprintln!("{}", style().error(message)),
+                other => eprintln!("{}", style().error(&format!("错误：{other}"))),
+            }
+            exit::code_of(&e)
         }
-    }
+    };
+    std::process::exit(code);
 }
-
-/// 退出码：0 成功、1 通用错误、2 用法错误（脚本可据此判断）。
-const EXIT_FAILURE: i32 = 1;
-const EXIT_USAGE: i32 = 2;
 
 /// 恢复 SIGPIPE 的默认行为，让 `glowlink list | head` 这类下游提前关管道时静默退出。
 ///
@@ -947,7 +944,11 @@ fn cmd_trust(args: &[String]) -> Result<()> {
                 .devices()
                 .into_iter()
                 .find(|d| d.fingerprint == *key || d.name == *key)
-                .ok_or_else(|| GlowError::NotFound(format!("信任列表里没有「{key}」")))?;
+                .ok_or_else(|| {
+                    GlowError::Missing(format!(
+                        "信任列表里没有「{key}」，用 glowlink trust 看看有哪些设备"
+                    ))
+                })?;
             trust.forget(&target.fingerprint)?;
             println!(
                 "已取消 {}（{}）的免确认，下次它发文件会重新要求人工确认。",
@@ -980,12 +981,12 @@ fn relative_time(paired_at: u64) -> String {
 /// `glowlink accept [编号]` / `glowlink reject [编号]`：
 /// 为守护进程里挂起的接收请求落决定；有多个请求时必须给编号。
 fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
+    // 命令本身没写错、只是环境没准备好，所以算通用错误（1）而不是用法错误（2）
     let state = daemon::running_state().ok_or_else(|| {
-        GlowError::Usage(
-            "glowlink accept / reject: 后台服务未在运行\n\n\
-             提示：先 glowlink on 启动后台服务；前台接收请用 glowlink serve。"
-                .into(),
-        )
+        GlowError::Missing(format!(
+            "glowlink {}: 后台服务未在运行\n\n提示：先跑 glowlink on；前台接收请用 glowlink serve。",
+            if accept { "accept" } else { "reject" }
+        ))
     })?;
     let token = positional_args(args).first().cloned();
     let command = match (&token, accept) {

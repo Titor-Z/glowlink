@@ -7,7 +7,11 @@ pub enum GlowError {
     Io(io::Error),
     Protocol(String),
     Rejected(String),
+    /// 找不到**设备**（对端不在线 / 还没被发现），属于网络侧问题。
     NotFound(String),
+    /// 本地可预期的失败（例如信任列表里没有这个名字、后台服务没跑）：与网络无关，
+    /// 文案由调用方组织，**原样展示**，退出码为通用错误。
+    Missing(String),
     Usage(String),
     Config(String),
     /// 对端（守护进程）返回的错误：直接展示原文，不再叠加本机前缀。
@@ -23,6 +27,7 @@ impl fmt::Display for GlowError {
             GlowError::Protocol(m) => write!(f, "协议错误：{m}"),
             GlowError::Rejected(m) => write!(f, "传输被拒绝：{m}"),
             GlowError::NotFound(m) => write!(f, "未找到设备：{m}"),
+            GlowError::Missing(m) => write!(f, "{m}"),
             GlowError::Usage(m) => write!(f, "用法错误：{m}"),
             GlowError::Config(m) => write!(f, "配置错误：{m}"),
             GlowError::Remote(m) => write!(f, "{m}"),

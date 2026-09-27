@@ -284,7 +284,10 @@ pub fn help_text(version: &str, discovery_port: u16) -> String {
          \n\
          配置：内置默认 < ./glowlink.toml < ~/.config/glowlink/config.toml（可用 \
          $GLOWLINK_CONFIG 指定）< 命令行开关。\n\
-         发现端口默认 {discovery_port}，被占用时自动顺延到相邻端口。\n"
+         发现端口默认 {discovery_port}，被占用时自动顺延到相邻端口。\n\
+         \n\
+         退出码：0 成功 · 1 通用错误 · 2 用法/配置错误 · 3 网络不可达\n\
+         \x20       4 加密或信任失败 · 5 被拒绝或超时。\n"
     ));
     out
 }
