@@ -137,7 +137,8 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
                     let verb = if accept { "已接受" } else { "已拒绝" };
                     (vec![format!("OK {verb} #{token}")], true)
                 }
-                Err(e) => (vec![format!("ERR {e}")], true),
+                // 回原文而不是 `e.to_string()`：否则客户端会叠成「协议错误：用法错误：…」
+                Err(e) => (vec![format!("ERR {}", plain_message(&e))], true),
             }
         }
         "STOP" => {
@@ -146,6 +147,19 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
         }
         "" => (vec!["ERR 空指令".to_string()], true),
         other => (vec![format!("ERR 未知指令「{other}」")], true),
+    }
+}
+
+/// 取错误的正文，去掉本机错误类型的前缀。
+fn plain_message(error: &GlowError) -> String {
+    match error {
+        GlowError::Io(e) => e.to_string(),
+        GlowError::Protocol(m)
+        | GlowError::Rejected(m)
+        | GlowError::NotFound(m)
+        | GlowError::Usage(m)
+        | GlowError::Config(m)
+        | GlowError::Remote(m) => m.clone(),
     }
 }
 
@@ -244,7 +258,7 @@ impl IpcClient {
         }
         match lines.first() {
             Some(first) if first.starts_with("ERR ") => {
-                Err(GlowError::Protocol(first[4..].to_string()))
+                Err(GlowError::Remote(first[4..].to_string()))
             }
             Some(_) => Ok(lines),
             None => Err(GlowError::Protocol("守护进程返回了空响应".into())),
