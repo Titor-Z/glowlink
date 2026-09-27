@@ -1,9 +1,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use glowlink_core::controller::transfer::TransferView;
-use glowlink_core::patterns::singleton::DeviceIdentity;
+use glowlink_cli::keys::TrustFile;
 use glowlink_cli::CliView;
+use glowlink_core::controller::transfer::TransferView;
+use glowlink_core::patterns::secure::{session_slot, SessionInfo, SessionSlot};
+use glowlink_core::patterns::singleton::DeviceIdentity;
 
 /// 名称探测：环境变量优先级最高，且不接受空白值。
 #[test]
@@ -27,10 +29,46 @@ fn progress_handles_edge_inputs() {
     view.progress("接收", 300, 200);
 }
 
+/// 造一份「刚握手完成」的会话（Step 3 起确认逻辑要看它）。
+fn session(trusted: bool) -> SessionSlot {
+    let slot = session_slot();
+    *slot.lock().unwrap() = Some(SessionInfo {
+        peer_fingerprint: "abcdef0123456789".to_string(),
+        peer_public: [0u8; 32],
+        code: "482913".to_string(),
+        trusted,
+        initiator: false,
+    });
+    slot
+}
+
+fn trust(tag: &str) -> Arc<TrustFile> {
+    let path = std::env::temp_dir().join(format!("glowlink-progress-{tag}/trusted.txt"));
+    let trust = TrustFile::open(path).unwrap();
+    trust.trust("abcdef0123456789", "peer").unwrap();
+    trust
+}
+
+/// 已信任设备 + `--yes` ⇒ 免确认（这是 Step 3 之后的语义）。
 #[test]
-fn auto_accept_flag_is_respected() {
-    let accept = CliView::new(true);
-    assert!(accept.confirm_receive("peer", "a.bin", 1));
+fn auto_accept_applies_to_trusted_session() {
+    let view = CliView::with_session(true, session(true), trust("trusted"));
+    // 已信任会话不再读 stdin，直接收
+    assert!(view.confirm_receive("peer", "a.bin", 1));
+}
+
+/// 未信任会话 ⇒ 即使 `--yes` 也不能免确认（安全边界，读不到 stdin 即拒绝）。
+#[test]
+fn auto_accept_does_not_cover_untrusted_session() {
+    let view = CliView::with_session(true, session(false), trust("untrusted"));
+    assert!(!view.confirm_receive("peer", "a.bin", 1), "陌生设备必须人工确认");
+}
+
+/// 没有加密会话信息 ⇒ 直接拒绝，绝不能因为 `--yes` 就放行。
+#[test]
+fn auto_accept_requires_a_session_at_all() {
+    let view = CliView::new(true);
+    assert!(!view.confirm_receive("peer", "a.bin", 1), "没有会话信息不能收");
 }
 
 #[test]
