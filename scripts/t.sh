@@ -23,20 +23,37 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-target="$1"
+# 支持 `cli:xxx` / `core:xxx` 显式指定 crate：
+# `config`、`transfer` 这类名字两个 crate 里都有，故意不猜。
+spec="$1"
 shift
-
-# 自动识别测试文件属于哪个 crate
-if [ -f "glowlink-cli/tests/${target}.rs" ]; then
-  package=glowlink-cli
-elif [ -f "glowlink-core/tests/${target}.rs" ]; then
-  package=glowlink-core
-else
-  echo "找不到测试文件：glowlink-cli/tests/${target}.rs 或 glowlink-core/tests/${target}.rs" >&2
-  echo "现有测试文件：" >&2
-  ls glowlink-cli/tests/*.rs glowlink-core/tests/*.rs 2>/dev/null | sed 's#.*/tests/##; s/\.rs$//; s/^/  /' >&2
-  exit 1
-fi
+case "${spec}" in
+  cli:*)  target="${spec#cli:}";  package=glowlink-cli ;;
+  core:*) target="${spec#core:}"; package=glowlink-core ;;
+  *:*)
+    echo "未知的 crate 前缀：${spec%%:*}（只支持 cli: / core:）" >&2
+    exit 1
+    ;;
+  *)
+    target="${spec}"
+    if [ -f "glowlink-cli/tests/${target}.rs" ] && [ -f "glowlink-core/tests/${target}.rs" ]; then
+      echo "「${target}」在 glowlink-cli 与 glowlink-core 里都有，请显式指定：" >&2
+      echo "  ./scripts/t.sh cli:${target}   或   ./scripts/t.sh core:${target}" >&2
+      exit 1
+    fi
+    if [ -f "glowlink-cli/tests/${target}.rs" ]; then
+      package=glowlink-cli
+    elif [ -f "glowlink-core/tests/${target}.rs" ]; then
+      package=glowlink-core
+    else
+      echo "找不到测试文件：glowlink-cli/tests/${target}.rs 或 glowlink-core/tests/${target}.rs" >&2
+      echo "现有测试文件：" >&2
+      ls glowlink-cli/tests/*.rs glowlink-core/tests/*.rs 2>/dev/null \
+        | sed 's#.*/tests/##; s/\.rs$//; s/^/  /' >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # 只编译这一个测试目标，并从 cargo 输出里取回二进制路径（比猜 hash 稳）。
 # 输出先落文件：编译报错时必须原样打出来，不能被管道吞掉（否则表现为「脚本什么都不干」）。

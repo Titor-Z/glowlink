@@ -14,6 +14,10 @@ fn defaults_match_shipped_config() {
     assert_eq!(default.receive_dir.to_string_lossy(), "./received");
     assert_eq!(default.chunk_size_kib, 64);
     assert_eq!(default.ring_capacity_kib, 1024);
+    assert_eq!(
+        default.pending_timeout_secs, 300,
+        "等待人工确认的上限默认给 5 分钟：人可能离开一会儿"
+    );
 
     // 随工程分发的 glowlink.toml 应与内置默认一致，避免两处数值漂移。
     let shipped = include_str!("../../glowlink.toml");

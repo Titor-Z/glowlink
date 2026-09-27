@@ -15,7 +15,7 @@ use crate::model::error::{GlowError, Result};
 use crate::model::packet::DISCOVERY_PORT;
 
 /// 全部受支持的配置项，用于拼装「未知配置项」提示。
-pub const KEYS: [&str; 9] = [
+pub const KEYS: [&str; 10] = [
     "discovery_port",
     "transfer_port",
     "receive_dir",
@@ -23,6 +23,7 @@ pub const KEYS: [&str; 9] = [
     "device_timeout_secs",
     "scan_timeout_secs",
     "connect_timeout_secs",
+    "pending_timeout_secs",
     "chunk_size_kib",
     "ring_capacity_kib",
 ];
@@ -45,6 +46,10 @@ pub struct Config {
     pub scan_timeout_secs: u64,
     /// 建连超时（秒）。
     pub connect_timeout_secs: u64,
+    /// 守护进程等待人工确认接收的上限（秒），超时按拒绝处理。
+    ///
+    /// 给得宽一些：人可能离开一会儿，60 秒那种「回来发现被自动拒了」很恼人。
+    pub pending_timeout_secs: u64,
     /// 分块大小（KiB）。
     pub chunk_size_kib: usize,
     /// 环形缓冲容量（KiB），背压控制的上限。
@@ -61,6 +66,7 @@ impl Default for Config {
             device_timeout_secs: 6,
             scan_timeout_secs: 3,
             connect_timeout_secs: 10,
+            pending_timeout_secs: 300,
             chunk_size_kib: 64,
             ring_capacity_kib: 1024,
         }
@@ -111,6 +117,9 @@ impl Config {
             "device_timeout_secs" => self.device_timeout_secs = parse_u64(line_no, key, value)?,
             "scan_timeout_secs" => self.scan_timeout_secs = parse_u64(line_no, key, value)?,
             "connect_timeout_secs" => self.connect_timeout_secs = parse_u64(line_no, key, value)?,
+            "pending_timeout_secs" => {
+                self.pending_timeout_secs = parse_u64(line_no, key, value)?
+            }
             "chunk_size_kib" => self.chunk_size_kib = parse_usize(line_no, key, value)?,
             "ring_capacity_kib" => self.ring_capacity_kib = parse_usize(line_no, key, value)?,
             other => {

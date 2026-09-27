@@ -221,7 +221,8 @@ fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
         let trust_hint = if fingerprint.is_empty() {
             String::new()
         } else if daemon_trusts(&fingerprint) {
-            format!("设备指纹 {fingerprint}（已信任）")
+            // 说清楚「已信任」为什么还要问：免确认由 --yes 控制
+            format!("设备指纹 {fingerprint}（已信任；免确认请用 glowlink on --yes）")
         } else {
             format!("设备指纹 {fingerprint}  校验码 **{code}**（请与发送方屏幕核对）")
         };
@@ -518,9 +519,6 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
 }
 
 // ================================================================ 守护进程
-
-/// 待确认接收的等待上限：超时按拒绝处理。
-const PENDING_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 拉起守护进程等待其就绪的上限。
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -850,6 +848,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         let identity_key = Arc::clone(&identity_key);
         let auto_accept = shared.auto_accept;
         let pending = Arc::clone(&shared.pending);
+        let config_pending_timeout = config.pending_timeout_secs;
         std::thread::spawn(move || loop {
             match listener.accept() {
                 // 每个到达的连接单开一个线程：等待确认期间不能挡住后面来的设备，
@@ -871,7 +870,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                         let transfer = TransferController::new(chunk_size, ring_capacity);
                         let view = DaemonView::new(
                             pending,
-                            PENDING_TIMEOUT,
+                            Duration::from_secs(config_pending_timeout),
                             session,
                             trust,
                             auto_accept,

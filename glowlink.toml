@@ -27,6 +27,10 @@ scan_timeout_secs = 3
 # 建立 TCP 连接的超时（秒）。
 connect_timeout_secs = 10
 
+# 守护进程等待人工确认接收的上限（秒）：超时按拒绝处理。
+# 给得宽一些，人离开一会儿回来还能确认。
+pending_timeout_secs = 300
+
 # 分块大小（KiB）：影响单帧体积与校验粒度。
 chunk_size_kib = 64
 
