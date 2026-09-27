@@ -45,10 +45,26 @@ pub fn self_center() -> Point {
 /// 2. **不重叠**：两圆心距离至少 `MIN_DIST`，靠排斥迭代推开；
 /// 3. **不出图区**：盘与标签都留在节点图内。
 
-/// 与中心盘的**净空**：本机盘半径 42 + 设备盘半径 26 + 间隙 24。
-pub const CENTER_CLEAR: f32 = 92.0;
-/// 两圆心最小距离 = 盘直径 + 间隙（52 + 8）。
-pub const MIN_DIST: f32 = 60.0;
+/// 本机盘半径（84/2）。
+pub const SELF_RADIUS: f32 = 42.0;
+/// 设备盘半径（52/2）。
+pub const DEVICE_RADIUS: f32 = 26.0;
+/// 两枚节点之间留的缝（圆心距 = 双方半径之和 + 这个缝）。
+pub const GAP: f32 = 8.0;
+/// 与中心盘的净空：本机盘 + 设备盘 + 更宽的缝（24）——中心盘是画面主角，别贴太紧。
+pub const CENTER_CLEAR: f32 = SELF_RADIUS + DEVICE_RADIUS + 24.0;
+/// 两枚**常规**设备的圆心最小距离（= 52 + 8 = 60）。
+pub const MIN_DIST: f32 = 2.0 * DEVICE_RADIUS + GAP;
+
+/// 已被「钉住」的节点：位置固定，别人绕着它排。
+///
+/// 用途：拖到中心连上的那台，位置由吸附规则决定并保留下来（断开也不回原位）。
+/// 它带着自己的**半径**——已连接的盘被缩小了，排斥计算不能拿常规半径去量它。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pinned {
+    pub point: Point,
+    pub radius: f32,
+}
 /// 种子点最远的生成半径（最终还要受窗口边界约束）。
 const SPAWN_MAX: f32 = 200.0;
 /// 设备名的最大半宽（10px 字号下约 8 个汉字 / 16 个字母）：名字盒比盘宽得多，
@@ -95,12 +111,12 @@ pub struct Placement {
 ///
 /// **与输入顺序无关**（内部先按 ID 排序再算，最后映回原顺序）：
 /// 发现层返回设备表的顺序可能变（谁先应答），顺序一变位置就整体挪一下，看起来像全体抽搐。
-pub fn place_devices(ids: &[&str]) -> Placement {
+pub fn place_devices(ids: &[&str], pinned: &[Pinned]) -> Placement {
     let mut sorted: Vec<&str> = ids.to_vec();
     sorted.sort_unstable();
 
     let mut points: Vec<Point> = sorted.iter().map(|id| seeded_point(id)).collect();
-    relax(&mut points);
+    relax(&mut points, pinned);
 
     // 映回调用者的顺序
     let mut centers = vec![Point { x: 0.0, y: 0.0 }; ids.len()];
@@ -111,6 +127,11 @@ pub fn place_devices(ids: &[&str]) -> Placement {
         phases[index] = seeded_phase(id);
     }
     Placement { centers, phases }
+}
+
+/// 只要「不重叠」的位置（没有钉子时用）。
+pub fn place_devices_free(ids: &[&str]) -> Placement {
+    place_devices(ids, &[])
 }
 
 /// ID → 一个看起来随机的落点（在中心盘净空之外、窗口之内）。
@@ -133,22 +154,27 @@ fn seeded_phase(id: &str) -> f32 {
 /// 排斥迭代：两两推开 + 卡回净空与边界。
 ///
 /// 纯几何、无随机数：同一输入永远得到同一输出（测试才能钉住）。
-fn relax(points: &mut [Point]) {
+fn relax(points: &mut [Point], pinned: &[Pinned]) {
     let center = self_center();
+    // 钉子（已连接、位置固定）在最前面，活节点从它后面开始，避免互相踩
     for _ in 0..RELAX_STEPS {
         for i in 0..points.len() {
+            // 与钉子：只推活节点，钉子一动不动
+            for fixed in pinned {
+                let (a, b) = (points[i], fixed.point);
+                let need = DEVICE_RADIUS + fixed.radius + GAP;
+                let push = separation(a, b, need);
+                if let Some((nx, ny, amount)) = push {
+                    points[i] = Point { x: a.x - nx * amount, y: a.y - ny * amount };
+                }
+            }
             for j in (i + 1)..points.len() {
                 let (a, b) = (points[i], points[j]);
-                let (dx, dy) = (b.x - a.x, b.y - a.y);
-                let d = (dx * dx + dy * dy).sqrt();
-                if d >= MIN_DIST {
-                    continue;
+                if let Some((nx, ny, amount)) = separation(a, b, MIN_DIST) {
+                    // 各让一半：只有一边动的话，活节点会被钉子挤成一条线
+                    points[i] = Point { x: a.x - nx * amount / 2.0, y: a.y - ny * amount / 2.0 };
+                    points[j] = Point { x: b.x + nx * amount / 2.0, y: b.y + ny * amount / 2.0 };
                 }
-                // 完全重合时给一个确定的方向，否则除零就飞了
-                let (nx, ny) = if d < 0.001 { (1.0, 0.0) } else { (dx / d, dy / d) };
-                let push = (MIN_DIST - d) / 2.0;
-                points[i] = Point { x: a.x - nx * push, y: a.y - ny * push };
-                points[j] = Point { x: b.x + nx * push, y: b.y + ny * push };
             }
         }
         for point in points.iter_mut() {
@@ -166,6 +192,18 @@ fn relax(points: &mut [Point]) {
             point.y = point.y.clamp(y0, y1);
         }
     }
+}
+
+/// 两点若比 `need` 更近，返回「推开方向 + 还差多少」。
+fn separation(a: Point, b: Point, need: f32) -> Option<(f32, f32, f32)> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let d = (dx * dx + dy * dy).sqrt();
+    if d >= need {
+        return None;
+    }
+    // 完全重合时给一个确定的方向，否则除零就飞了
+    let (nx, ny) = if d < 0.001 { (1.0, 0.0) } else { (dx / d, dy / d) };
+    Some((nx, ny, need - d))
 }
 
 /// splitmix64 的收尾混合。

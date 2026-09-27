@@ -4,8 +4,8 @@
 //! 只能靠肉眼发现。所以几何全部抽成纯函数，在这里钉死。
 
 use glowlink_desktop::model::layout::{
-    self, place_devices, self_center, snap_to_device, snaps_to_center, NodeSize, Point, Rect,
-    CENTER_CLEAR, MIN_DIST,
+    self, place_devices, place_devices_free, self_center, snap_to_device, snaps_to_center,
+    NodeSize, Pinned, Point, Rect, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
 };
 use glowlink_desktop::theme;
 
@@ -28,8 +28,8 @@ fn self_center_is_a_full_window_coordinate() {
 #[test]
 fn placements_do_not_depend_on_the_order_of_the_device_list() {
     // 发现层返回的顺序可能变（谁先应答），位置若跟着顺序走，界面会整体抽一下。
-    let forward = place_devices(&["alpha", "beta", "gamma"]);
-    let backward = place_devices(&["gamma", "beta", "alpha"]);
+    let forward = place_devices_free(&["alpha", "beta", "gamma"]);
+    let backward = place_devices_free(&["gamma", "beta", "alpha"]);
 
     assert_eq!(forward.centers[0], backward.centers[2]);
     assert_eq!(forward.centers[1], backward.centers[1]);
@@ -41,13 +41,13 @@ fn placements_do_not_depend_on_the_order_of_the_device_list() {
 #[test]
 fn same_device_is_always_placed_in_the_same_spot() {
     // 稳定：调用两次必须完全一致（否则每 300ms 的刷新都会让节点跳一下）
-    let first = place_devices(&["alpha", "beta"]);
-    let second = place_devices(&["alpha", "beta"]);
+    let first = place_devices_free(&["alpha", "beta"]);
+    let second = place_devices_free(&["alpha", "beta"]);
     assert_eq!(first, second);
 
     // 别的设备进出时，它最多被排斥推开一点点，不会跑到窗口另一头
-    let alone = place_devices(&["beta"]);
-    let crowded = place_devices(&["alpha", "beta", "gamma", "delta"]);
+    let alone = place_devices_free(&["beta"]);
+    let crowded = place_devices_free(&["alpha", "beta", "gamma", "delta"]);
     let drift = distance(alone.centers[0], crowded.centers[1]);
     assert!(drift < MIN_DIST, "设备因他人进出被挪了 {drift:.1}px（上限 {MIN_DIST}）");
 }
@@ -59,7 +59,7 @@ fn scattered_nodes_are_not_frozen_on_one_orbit() {
     let names = device_ids(4);
     let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
     let radii: Vec<f32> =
-        place_devices(&ids).centers.iter().map(|c| distance(*c, self_center())).collect();
+        place_devices_free(&ids).centers.iter().map(|c| distance(*c, self_center())).collect();
     let spread = radii.iter().cloned().fold(f32::MIN, f32::max)
         - radii.iter().cloned().fold(f32::MAX, f32::min);
     assert!(spread > 10.0, "四台的半径几乎一样（差 {spread:.1}px），看不出是散点");
@@ -72,7 +72,7 @@ fn devices_never_overlap_the_center_or_each_other() {
     for count in 1..=10 {
         let names = device_ids(count);
         let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        let placement = place_devices(&ids);
+        let placement = place_devices_free(&ids);
 
         for (index, center) in placement.centers.iter().enumerate() {
             let to_center = distance(*center, self_center());
@@ -109,7 +109,7 @@ fn devices_never_overlap_the_center_or_each_other() {
 fn drift_phase_is_stable_in_range_and_spread_out() {
     let names = device_ids(6);
     let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-    let placement = place_devices(&ids);
+    let placement = place_devices_free(&ids);
 
     for phase in &placement.phases {
         assert!((0.0..1.0).contains(phase), "相位必须落在 0..1：{phase}");
@@ -122,7 +122,7 @@ fn drift_phase_is_stable_in_range_and_spread_out() {
         }
     }
     // 同一台设备的相位也必须稳定
-    assert_eq!(placement.phases, place_devices(&ids).phases);
+    assert_eq!(placement.phases, place_devices_free(&ids).phases);
 }
 
 #[test]
@@ -183,10 +183,44 @@ fn snapping_prefers_the_closer_one_when_two_are_in_range() {
 
 #[test]
 fn empty_device_list_places_nothing() {
-    let placement = place_devices(&[]);
+    let placement = place_devices_free(&[]);
     assert!(placement.centers.is_empty());
     assert!(placement.phases.is_empty());
     // 顺手确认常量之间的关系没被改坏：净空必须让开「本机盘 + 设备盘 + 间隙」
     assert!(CENTER_CLEAR >= (theme::NODE_SELF_SIZE + theme::NODE_DEVICE_SIZE) / 2.0);
     assert_eq!(layout::MIN_DIST, theme::NODE_DEVICE_SIZE + 8.0);
+}
+
+#[test]
+fn a_pinned_node_keeps_its_exact_spot_and_others_move_out_of_its_way() {
+    // 拖到中心连上的那台会被「钉住」：位置由吸附规则定，断开也不回原位。
+    // 所以它必须**精确**留在那个点，而其他节点绕着它排——而不是把它挤走。
+    let pinned = Pinned { point: Point { x: 220.0, y: 300.0 }, radius: 17.0 };
+    let names = device_ids(6);
+    let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let placement = place_devices(&ids, &[pinned]);
+
+    for center in &placement.centers {
+        let gap = distance(*center, pinned.point);
+        // 已连接的盘变小了（半径 17），所以间距也按小盘算，不该再要求 60
+        assert!(
+            gap >= DEVICE_RADIUS + pinned.radius + GAP - 0.5,
+            "活节点压在钉住的节点上：{gap:.1}px"
+        );
+    }
+    // 钉子不受影响：它不在返回的 centers 里（它自己那台由界面直接摆）
+    assert_eq!(placement.centers.len(), ids.len());
+}
+
+#[test]
+fn pinned_nodes_do_not_drag_the_floating_ones_across_the_window() {
+    // 钉子只影响附近：远处的活节点不该被它拽过去
+    let names = device_ids(3);
+    let ids: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+    let free = place_devices_free(&ids);
+    let pinned = Pinned { point: Point { x: 60.0, y: 100.0 }, radius: 17.0 };
+    let with_pin = place_devices(&ids, &[pinned]);
+    for (a, b) in free.centers.iter().zip(with_pin.centers.iter()) {
+        assert!(distance(*a, *b) < MIN_DIST, "位置被钉子拽动了：{a:?} → {b:?}");
+    }
 }

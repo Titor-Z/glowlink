@@ -183,7 +183,7 @@ impl AppRoot {
     /// 给一批设备算位置（纯几何，见 `layout::place_devices`）。
     fn layout_for(devices: &[DeviceView]) -> (layout::Placement, Vec<String>) {
         let ids: Vec<&str> = devices.iter().map(|d| d.id.as_str()).collect();
-        (layout::place_devices(&ids), devices.iter().map(|d| d.id.clone()).collect())
+        (layout::place_devices_free(&ids), devices.iter().map(|d| d.id.clone()).collect())
     }
 
     /// 拉一次快照；**真变了才返回 `true`**（调用方据此决定要不要重绘）。
