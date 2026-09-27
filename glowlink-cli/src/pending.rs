@@ -90,32 +90,48 @@ impl PendingQueue {
         }
     }
 
-    /// 当前所有待确认请求（按登记顺序），供 `PENDING` 列表使用。
+    /// 当前所有**尚未落决定**的待确认请求（按登记顺序），供 `PENDING` 列表使用。
+    ///
+    /// 已落决定的条目要等接收线程醒来才摘除，必须在这里过滤掉：
+    /// 否则刚 accept 完的几毫秒内，列表与计数仍把它当成待确认。
     pub fn list(&self) -> Vec<(String, PendingOffer)> {
         self.lock()
             .waiting
             .iter()
+            .filter(|w| w.decision.is_none())
             .map(|w| (w.token.clone(), w.offer.clone()))
             .collect()
     }
 
     pub fn count(&self) -> usize {
-        self.lock().waiting.len()
+        self.lock()
+            .waiting
+            .iter()
+            .filter(|w| w.decision.is_none())
+            .count()
     }
 
     /// 落决定。`token` 为空表示「就一个，直接决定」；
     /// 有多个待确认请求时**必须**给 token，否则容易点错对象。
     pub fn decide(&self, token: Option<&str>, accept: bool) -> Result<String> {
         let mut inner = self.lock();
+        // 只能对还没落决定的下手：已决定的条目只是等接收线程来取走
+        let undecided: Vec<usize> = inner
+            .waiting
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| w.decision.is_none())
+            .map(|(index, _)| index)
+            .collect();
         let target = match token {
-            Some(token) => inner
-                .waiting
+            Some(token) => undecided
                 .iter()
-                .position(|w| w.token == token)
+                .copied()
+                .find(|index| inner.waiting[*index].token == token)
                 .ok_or_else(|| GlowError::Usage(format!("没有编号为 {token} 的待确认请求")))?,
-            None => match inner.waiting.len() {
+            None => match undecided.len() {
                 0 => return Err(GlowError::Usage("当前没有待确认的接收请求".into())),
-                1 => 0,
+                1 => undecided[0],
                 n => {
                     return Err(GlowError::Usage(format!(
                         "有 {n} 个待确认请求，请用 glowlink accept <编号> / reject <编号> 指定，\

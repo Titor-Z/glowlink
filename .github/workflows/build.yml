@@ -1,15 +1,20 @@
 name: 构建与发布
 
-# 触发时机：
-# - push 到 main / PR：只跑测试与构建，不产出任何 Artifact（账号 Actions 存储额度已满，全程不碰）
-# - workflow_dispatch：手动触发，同样只验证构建
-# - push 形如 v0.1.4 的标签：各平台 job 直接创建 Release 并上传压缩包（Release 资产不计入存储额度）
+# 触发时机（私有仓库的 Actions 分钟数是**按量计费**的，倍率 macOS ×10 / Windows ×2，
+# 所以除了发版一律不跑，把额度全留给发版）：
+# - push 形如 v0.1.4 的标签：跑全量测试 + 各平台构建，并直接创建 Release 上传压缩包
+# - workflow_dispatch：手动触发，用于验证构建
+# 有意不接 push 到 main / pull_request：日常改动本地用 `cargo check` 与
+# `./scripts/t.sh <测试文件>` 验证，不再让每次提交都烧 15~25 分钟额度。
 on:
   push:
-    branches: [main]
     tags: ["v*"]
-  pull_request:
   workflow_dispatch:
+
+# 同一分支/标签重复触发时取消前一个，避免排队堆着跑浪费额度。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,6 +25,8 @@ jobs:
   build:
     name: 构建 ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
+    # 硬上限：万一再出现死锁之类的挂起，最多烧 15 分钟而不是 34 分钟 ×10 倍率
+    timeout-minutes: 15
     # permissions 不接受表达式，只能写固定值；非标签触发时不会执行写操作
     permissions:
       contents: write
@@ -35,6 +42,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # 缓存 Cargo 仓库与构建产物：一次发版的构建时间从约 1.2 分降到几十秒，
+      # 直接换算成省下的额度（macOS 要 ×10）。
+      - name: 缓存 Cargo 依赖与构建产物
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
       # 交叉编译前置：在 arm64 runner 上编出 Intel 版
       - name: 安装 Intel 目标标准库
         if: runner.os == 'macOS'
@@ -42,7 +62,6 @@ jobs:
 
       - name: 运行测试
         run: cargo test --locked --workspace
-
       # macOS：两个架构都用 runner 自带的 zip 打包（zip 保留可执行位）
       - name: 打包（macOS）
         if: runner.os == 'macOS'
