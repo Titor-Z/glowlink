@@ -7,9 +7,9 @@
 //! Windows = DWM 组合属性），窗内再叠 `backdrop_filter` 做卡片玻璃。
 
 use gpui::{
-    div, prelude::*, px, App, Context, DragMoveEvent, ElementId, IntoElement, MouseButton,
-    ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions,
+    div, prelude::*, px, App, Context, DragMoveEvent, ElementId, FocusHandle, IntoElement,
+    MouseButton, ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowOptions,
 };
 
 use std::sync::Arc;
@@ -22,6 +22,7 @@ use crate::model::connect::{self, Connection};
 use crate::model::drag::{self, DeviceDrag};
 use crate::model::layout;
 use crate::model::motion::{Ghost, Motion};
+use crate::model::paircode::CodeInput;
 use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{Phase, UiState};
@@ -108,6 +109,17 @@ pub struct AppRoot {
     grab_offset: layout::Point,
     /// 本机发起、正在等的配对（编号 + 对端 + 码 + 状态）。
     pair: Option<PairingCard>,
+    /// 对端发起、等本机拍板的请求（接收侧卡片）。
+    ///
+    /// 与 `pair` 一个槽位：一个是「我求人」，一个是「人求我」，不同时强调两件事。
+    pair_request: Option<paircard::RequestCard>,
+    /// 接收侧那 6 位码的输入（纯状态机见 `model::paircode`）。
+    code_input: CodeInput,
+    /// 输入框的焦点：键盘事件只发给**拿到焦点**的那个元素，
+    /// 不拿焦点的话用户敲数字毫无反应（看起来像卡死）。
+    code_focus: FocusHandle,
+    /// 焦点是否已交给输入框（每个请求只交一次，别每帧抢）。
+    code_focused: bool,
     /// 全场运动状态：意图 → 弹簧 → 接触约束 → 只读位置（见 `model::motion`）。
     ///
     /// 位置**只住在这里**。渲染层不再有「该用哪个位置」的 if，
@@ -152,6 +164,7 @@ struct PairingCard {
 
 impl AppRoot {
     pub fn new(
+        cx: &mut Context<Self>,
         device_name: impl Into<SharedString>,
         source: Arc<dyn DeviceSource>,
         service: Option<Arc<IpcSource>>,
@@ -185,6 +198,10 @@ impl AppRoot {
             meter: SpeedMeter::default(),
             dismissed: Vec::new(),
             dismissed_pairs: Vec::new(),
+            pair_request: None,
+            code_input: CodeInput::new(),
+            code_focus: cx.focus_handle(),
+            code_focused: false,
             progress: Spring::new(0.0, ZETA_CRITICAL, PROGRESS_RESPONSE),
             pulse: 0.0,
             transfer_speed: 0.0,
@@ -338,6 +355,85 @@ impl AppRoot {
         log::info!("请求取消传输 #{token}");
         if let Err(e) = source.cancel(token) {
             log::info!("取消失败：{e}");
+        }
+    }
+
+    /// 接收侧第一段：用户点了「允许」——把卡片切到输入段，**此时还不发任何东西**
+    /// （协议里「允许」与「码」是同一次提交：码要从对方屏幕上抄过来）。
+    pub fn allow_pairing(&mut self) {
+        if let Some(request) = self.pair_request.as_mut() {
+            request.allowed = true;
+            request.wrong = false;
+            self.code_input.clear();
+            self.code_focused = false;
+        }
+    }
+
+    /// 接收侧：提交输入的码（对错由守护进程/对端判定，错了会话保持、可重输）。
+    pub fn submit_pair_code(&mut self) {
+        let Some(request) = self.pair_request.clone() else {
+            return;
+        };
+        if !self.code_input.is_complete() {
+            return;
+        }
+        let Some(pairing) = self.pairing.clone() else {
+            return;
+        };
+        let code = self.code_input.digits().to_string();
+        log::info!("提交配对码 #{0}", request.token);
+        if let Err(e) = pairing.approve(&request.token, &code) {
+            log::info!("提交配对码失败：{e}");
+            return;
+        }
+        // 先不收起卡片：对没对由对端说了算；下一轮快照里「请求仍在 + 剩余次数减少」
+        // 就是输了（那时清空输入，用户重输）
+        self.code_input.clear();
+        self.code_focused = false;
+    }
+
+    /// 接收侧：拒绝（或卡片上的 ✕）。
+    pub fn reject_pairing(&mut self, token: String) {
+        if let Some(pairing) = self.pairing.clone() {
+            log::info!("拒绝配对 #{token}");
+            if let Err(e) = pairing.reject(&token) {
+                log::info!("拒绝配对失败：{e}");
+            }
+        }
+        self.pair_request = None;
+        self.code_input.clear();
+        self.code_focused = false;
+    }
+
+    /// 该不该把焦点交给输入框：请求在、已允许、且还没交过。
+    pub fn wants_code_focus(&self) -> bool {
+        self.pair_request.as_ref().map(|r| r.allowed).unwrap_or(false) && !self.code_focused
+    }
+
+    /// 键盘：只吃数字与退格；回车 = 确认，Esc = 拒绝。
+    ///
+    /// **不碰 IME / `EntityInputHandler`**：6 位数字用不上输入法，
+    /// 碰那套就要处理 UTF-16 换算与组合态，代价远大于收益。
+    pub fn code_key(&mut self, key: &str) -> bool {
+        match key {
+            "backspace" => self.code_input.backspace(),
+            "enter" => {
+                self.submit_pair_code();
+                true
+            }
+            "escape" => {
+                if let Some(request) = self.pair_request.clone() {
+                    self.reject_pairing(request.token);
+                }
+                true
+            }
+            _ => {
+                let mut typed = false;
+                for ch in key.chars() {
+                    typed |= self.code_input.push(ch);
+                }
+                typed
+            }
         }
     }
 
@@ -618,10 +714,23 @@ impl AppRoot {
                 }
             }
         }
+        // 接收侧的请求要先**取出来**再判断（`PAIRPENDING` 不属于上面那三样）：
+        // 守卫只看设备表/服务/传输，设备表没变就直接早退的话，
+        // 新来的配对请求永远轮不到处理——界面看着像没反应（这个坑刚踩过）。
+        let incoming = self
+            .pairing
+            .as_ref()
+            .and_then(|pairing| pairing.pending().into_iter().next());
+        let incoming_changed = match (&incoming, &self.pair_request) {
+            (Some(row), Some(card)) => row.token != card.token || row.remaining != card.remaining,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
         if fresh == self.devices
             && service_on == self.service_on
             && self.pair.is_none()
             && !transfer_changed
+            && !incoming_changed
         {
             return false;
         }
@@ -640,6 +749,54 @@ impl AppRoot {
         }
         // 目标点可能变了（设备上下线、连接、断开）：重算意图，运动系统自己会走过去
         self.refresh_floating();
+
+        // 接收侧的请求跟着 `PAIRPENDING` 走：**码不在里面**（它只存在于对端屏幕上），
+        // 这里只有「谁在问、还剩几次机会」。
+        if self.pairing.is_some() {
+            match (incoming, self.pair_request.clone()) {
+                (Some(row), Some(card)) if row.token == card.token => {
+                    let mut fresh = card;
+                    // 剩余次数变少 = 上一次输入不对（由对端判定，界面不自己判对错）
+                    if row.remaining < fresh.remaining {
+                        fresh.wrong = true;
+                        fresh.allowed = true;
+                        log::info!(
+                            "配对 #{0}：校验码不符，还剩 {1} 次",
+                            row.token,
+                            row.remaining
+                        );
+                    }
+                    fresh.remaining = row.remaining;
+                    let changed_here = fresh != self.pair_request.clone().unwrap();
+                    if changed_here {
+                        self.pair_request = Some(fresh);
+                        changed = true;
+                    }
+                }
+                (Some(row), _) => {
+                    log::info!("收到配对请求 #{}：来自「{}」", row.token, row.peer);
+                    self.code_input.clear();
+                    self.code_focused = false;
+                    // 新请求一律从「询问段」开始（码还没在对方屏幕上出现）
+                    self.pair_request = Some(paircard::RequestCard {
+                        token: row.token,
+                        peer: row.peer,
+                        remaining: row.remaining,
+                        allowed: false,
+                        wrong: false,
+                    });
+                    changed = true;
+                }
+                // 请求没了（对方放弃 / 超时 / 已落定）：收起卡片
+                (None, Some(_)) => {
+                    self.pair_request = None;
+                    self.code_input.clear();
+                    self.code_focused = false;
+                    changed = true;
+                }
+                (None, None) => {}
+            }
+        }
 
         // 配对卡跟着 `PAIRINGS` 走：码与状态都在那些行里，界面不自己猜
         if let (Some(card), Some(pairing)) = (self.pair.clone(), self.pairing.clone()) {
@@ -1036,12 +1193,22 @@ impl Render for AppRoot {
             // 浮层卡（配对 / 传输）画在拖拽区**之上**（层级：拖拽区 < 卡 < 隐私浮层）：
             // 两张卡占**同一个槽位**（同一个 `view::card` 外壳），所以同时出现时
             // 配对卡优先——配对是等人拍板的事，传输卡让它一步回去（「一次只强调一件事」）。
-            .when(self.pair.is_none(), |el| {
+            // 槽位只有一个，优先级：**等人的请求**（接收侧）> 出示码（发起侧）> 传输卡
+            .when(self.pair.is_none() && self.pair_request.is_none(), |el| {
                 el.when_some(self.transfer.clone(), |el, row| {
                     let numbers = transfer::numbers(&row, self.transfer_speed);
                     let fraction = self.progress.x() as f64;
                     el.child(progress::card(&t, &row, &numbers, fraction, cx))
                 })
+            })
+            .when_some(self.pair_request.clone(), |el, request| {
+                el.child(paircard::request_card(
+                    &t,
+                    &request,
+                    &self.code_input,
+                    &self.code_focus,
+                    cx,
+                ))
             })
             .when_some(self.pair.clone(), |el, card| {
                 el.child(paircard::card(
@@ -1095,7 +1262,7 @@ pub fn open(
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let view = cx.new(|_| AppRoot::new(device_name, source, service, pairing, transfers));
+        let view = cx.new(|cx| AppRoot::new(cx, device_name, source, service, pairing, transfers));
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
         // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
         let weak = view.downgrade();
@@ -1105,7 +1272,22 @@ pub fn open(
             loop {
                 cx.background_executor().timer(SYNC_INTERVAL).await;
                 let alive = weak.update(cx, |root, cx| {
-                    if root.sync() {
+                    let changed = root.sync();
+                    // 输入段一出现就把键盘焦点交过去（**只交一次**）：
+                    // 不交的话用户敲数字毫无反应，而界面上看不出缺了什么。
+                    // 焦点要在有窗口的地方拿，所以借用窗口句柄走一趟。
+                    if root.wants_code_focus() {
+                        let handle = root.code_focus.clone();
+                        if let Some(window) = cx.windows().first() {
+                            if window
+                                .update(cx, |_, window, cx| window.focus(&handle, cx))
+                                .is_ok()
+                            {
+                                root.code_focused = true;
+                            }
+                        }
+                    }
+                    if changed {
                         cx.notify();
                     }
                 });

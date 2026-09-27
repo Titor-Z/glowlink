@@ -34,7 +34,11 @@ pub fn pair_state_note(state: PairingState) -> &'static str {
 }
 
 /// 发起侧出示码时的那句话（设计稿原文）。
-pub const PAIR_CODE_HINT: &str = "请在此设备上输入此码";
+pub const PAIR_CODE_HINT: &str = "请在对方设备上输入此码";
+/// 接收侧（输入方）的提示：码在对方屏幕上，**自己这台没有码**。
+pub const PAIR_INPUT_HINT: &str = "请输入对方屏幕上显示的 6 位数字";
+/// 询问阶段（接收侧）：要不要允许这次配对。
+pub const PAIR_ASK_HINT: &str = "允许后需要用对方屏幕上的 6 位数字确认";
 
 /// 吸附余量：气泡盘与中心盘相切之外再给这么多（手抖余量）。
 ///

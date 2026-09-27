@@ -85,3 +85,35 @@ fn close_button(
 pub fn title_reserve() -> f32 {
     CLOSE_SIZE + 6.0
 }
+
+/// 卡片里的小按钮：24px 高、8px 圆角、9px 文字，hover 只提亮底色。
+///
+/// 三张卡（传输 / 发起配对 / 接收配对）都要它，所以放在共用处——
+/// 各写一份的话，圆角与高度迟早各偏 1px。
+pub fn mini_button(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    strong: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> Stateful<Div> {
+    // 「重要动作」与「次要动作」的差别只用**字色**表达（不加第五种颜色）
+    let ink = if strong { t.text_primary } else { t.text_secondary };
+    div()
+        .id(ElementId::Name(format!("card-btn-{id}").into()))
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(MINI_BTN_H))
+        .px(px(10.0))
+        .rounded(px(theme::RADIUS_BUTTON))
+        .cursor_pointer()
+        .hover(|style| style.bg(t.hover_bg))
+        .text_size(px(theme::TEXT_META))
+        .text_color(ink)
+        .child(gpui::SharedString::from(label.to_string()))
+        .on_click(on_click)
+}
+
+/// 小按钮高度（设计稿 `minibtn` 24px）。
+pub const MINI_BTN_H: f32 = 24.0;

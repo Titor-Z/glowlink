@@ -17,6 +17,7 @@ pub mod drop;
 pub mod format;
 pub mod layout;
 pub mod motion;
+pub mod paircode;
 pub mod spring;
 pub mod state;
 pub mod transfer;

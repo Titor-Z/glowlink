@@ -363,46 +363,14 @@ impl PairingHub {
             "配对请求 #{token} 来自「{peer_name}」；本机校验码 {code}"
         ));
 
-        let deadline = Instant::now() + self.wait;
-        let mut accepted = false;
-        // 短切片轮询而不是一觉睡到超时：等的是「用户拍板」，但也可能是
-        // **对方放弃了**（关窗走人）。不轮询的话我们这边要傻等到超时。
-        loop {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            let slice = remaining.min(DECISION_SLICE);
-            match self.queue.wait_decision(&token, slice) {
-                Verdict::Allow(typed) => {
-                    if session.approve(&typed)? {
-                        accepted = true;
-                        break;
-                    }
-                    // 码不符：不发拒绝帧，会话保持，让用户再输一次
-                    append_log(&format!("配对 #{token}：校验码不符"));
-                    if !self.queue.record_failure(&token) {
-                        append_log(&format!("配对 #{token}：校验码错误次数用尽，已终止"));
-                        session.deny("校验码不符")?;
-                        break;
-                    }
-                }
-                Verdict::Deny => {
-                    session.deny("用户拒绝")?;
-                    break;
-                }
-                Verdict::Timeout => {
-                    // 切片到期 ≠ 总时限到期：只有真的等满了才自动拒绝
-                    if Instant::now() >= deadline {
-                        session.deny("等待确认超时")?;
-                        append_log(&format!("配对 #{token}：等待确认超时，已自动拒绝"));
-                        break;
-                    }
-                    if session.peer_closed() {
-                        append_log(&format!("配对 #{token}：对方放弃了配对，已收起"));
-                        break;
-                    }
-                }
-            }
-        }
+        // 先把「等人拍板」跑完，**再无条件摘掉槽位**。
+        //
+        // 原先是在函数末尾 `remove`，而流程里有多处 `?`（approve / deny 出错就返回），
+        // 那些路径会**跳过** remove —— 于是对端一断线就留下一条「等待确认」的幽灵请求，
+        // 永远挂着（用户看到的是一屏没人认领的配对卡，重启守护进程才会消失）。
+        let outcome = self.await_decision(&mut session, &token);
         self.queue.remove(&token);
+        let accepted = outcome?;
 
         if accepted {
             let peer = session.peer()?;
@@ -411,8 +379,53 @@ impl PairingHub {
                 "已与「{peer_name}」配对（指纹 {}，校验码 {}）",
                 peer.peer_fingerprint, peer.code
             ));
+        } else {
+            append_log(&format!("配对 #{token} 未完成"));
         }
         Ok(accepted)
+    }
+
+    /// 等本机用户拍板（允许并输码 / 拒绝 / 超时 / 对方放弃）。
+    ///
+    /// 只管**判断**，不碰槽位表：摘除由调用方无条件做（见上面的注释）。
+    fn await_decision(&self, session: &mut PairingSession, token: &str) -> Result<bool> {
+        let deadline = Instant::now() + self.wait;
+        // 短切片轮询而不是一觉睡到超时：等的是「用户拍板」，但也可能是
+        // **对方放弃了**（关窗走人）。不轮询的话我们这边要傻等到超时。
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let slice = remaining.min(DECISION_SLICE);
+            match self.queue.wait_decision(token, slice) {
+                Verdict::Allow(typed) => {
+                    if session.approve(&typed)? {
+                        return Ok(true);
+                    }
+                    // 码不符：不发拒绝帧，会话保持，让用户再输一次
+                    append_log(&format!("配对 #{token}：校验码不符"));
+                    if !self.queue.record_failure(token) {
+                        append_log(&format!("配对 #{token}：校验码错误次数用尽，已终止"));
+                        session.deny("校验码不符")?;
+                        return Ok(false);
+                    }
+                }
+                Verdict::Deny => {
+                    session.deny("用户拒绝")?;
+                    return Ok(false);
+                }
+                Verdict::Timeout => {
+                    // 切片到期 ≠ 总时限到期：只有真的等满了才自动拒绝
+                    if Instant::now() >= deadline {
+                        session.deny("等待确认超时")?;
+                        append_log(&format!("配对 #{token}：等待确认超时，已自动拒绝"));
+                        return Ok(false);
+                    }
+                    if session.peer_closed() {
+                        append_log(&format!("配对 #{token}：对方放弃了配对，已收起"));
+                        return Ok(false);
+                    }
+                }
+            }
+        }
     }
 }
 

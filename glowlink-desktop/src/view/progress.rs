@@ -9,8 +9,7 @@
 //! （DESIGN.md：「Don't 写没有来源的指标」）。
 
 use gpui::{
-    div, prelude::*, px, Context, Div, ElementId, FontWeight, ParentElement, SharedString,
-    Stateful, Styled,
+    div, prelude::*, px, Context, Div, FontWeight, ParentElement, SharedString, Stateful, Styled,
 };
 
 use crate::model::transfer::{Action, CardNumbers};
@@ -21,8 +20,6 @@ use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
 
 /// 进度条高度（设计稿 4px）。
 const BAR_H: f32 = 4.0;
-/// 小按钮高度（设计稿 `minibtn` 24px）。
-const MINI_BTN_H: f32 = 24.0;
 /// 「已传 / 总量 · 剩余」那行与进度条之间的呼吸（设计稿 `spacing.md 0 spacing.sm`）。
 const META_GAP: f32 = 8.0;
 
@@ -132,37 +129,20 @@ fn buttons(t: &Theme, row: &TransferRow, cx: &mut Context<AppRoot>) -> Option<Di
         return None;
     }
     Some(
-        div().flex().flex_row().gap(px(8.0)).mt(px(10.0)).child(mini_button(
-            t,
-            "open",
-            "打开目录",
-            cx.listener(|this, _, _, cx| {
-                this.open_received_folder();
-                cx.notify();
-            }),
-        )),
+        div()
+            .flex()
+            .flex_row()
+            .gap(px(8.0))
+            .mt(px(10.0))
+            .child(card::mini_button(
+                t,
+                "open",
+                "打开目录",
+                false,
+                cx.listener(|this, _, _, cx| {
+                    this.open_received_folder();
+                    cx.notify();
+                }),
+            )),
     )
-}
-
-/// 卡片里的小按钮：24px 高、8px 圆角、9px 文字，hover 只提亮底色。
-fn mini_button(
-    t: &Theme,
-    id: &'static str,
-    label: &'static str,
-    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(ElementId::Name(format!("xfer-btn-{id}").into()))
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(MINI_BTN_H))
-        .px(px(10.0))
-        .rounded(px(theme::RADIUS_BUTTON))
-        .cursor_pointer()
-        .hover(|style| style.bg(t.hover_bg))
-        .text_size(px(theme::TEXT_META))
-        .text_color(t.text_secondary)
-        .child(SharedString::from(label))
-        .on_click(on_click)
 }
