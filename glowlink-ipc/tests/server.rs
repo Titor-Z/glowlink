@@ -330,3 +330,28 @@ fn transfers_lists_rows_with_the_count_line_first() {
     assert_eq!(row.done, 3);
     assert_eq!(row.direction, TransferDirection::Send);
 }
+
+#[test]
+fn cancel_stops_a_running_transfer_and_says_so() {
+    let host = FakeHost::default();
+    host.transfers.lock().unwrap().push(TransferRow {
+        token: "007".into(),
+        direction: TransferDirection::Send,
+        name: "big.bin".into(),
+        peer: "iPad mini".into(),
+        done: 1024,
+        total: 4096,
+        state: TransferState::Running,
+        note: String::new(),
+    });
+
+    let (lines, _) = handle_line(&host, "CANCEL 007");
+    assert!(lines[0].starts_with("OK "), "{}", lines[0]);
+    assert!(lines[0].contains("007"), "要带上编号：{}", lines[0]);
+    assert_eq!(*host.canceled.lock().unwrap(), vec!["007".to_string()]);
+    // 取消之后那条已经是「已取消」：再取消一次要如实报错，不能假装成功
+    let (lines, _) = handle_line(&host, "CANCEL 007");
+    assert!(lines[0].starts_with("ERR "), "{}", lines[0]);
+    let (lines, _) = handle_line(&host, "CANCEL 999");
+    assert!(lines[0].starts_with("ERR "), "不存在的编号也该报错：{}", lines[0]);
+}

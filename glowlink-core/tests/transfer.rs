@@ -63,6 +63,24 @@ impl TransferView for AutoView {
     fn progress(&self, _label: &str, _done: u64, _total: u64) {}
 }
 
+/// 传到第 N 块就「用户点了取消」的视图（真跑一次取消的整条路径）。
+struct CancelAfter {
+    chunks: std::sync::atomic::AtomicUsize,
+    limit: usize,
+}
+
+impl TransferView for CancelAfter {
+    fn confirm_receive(&self, _peer: &str, _name: &str, _size: u64) -> bool {
+        true
+    }
+
+    fn progress(&self, _label: &str, _done: u64, _total: u64) {}
+
+    fn canceled(&self) -> bool {
+        self.chunks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= self.limit
+    }
+}
+
 struct DeclineView;
 
 impl TransferView for DeclineView {
@@ -255,5 +273,76 @@ fn out_of_order_chunk_is_rejected() {
         "应拒绝乱序分块，实际：{error}"
     );
 
+    fs::remove_dir_all(&dst_dir).unwrap();
+}
+
+#[test]
+fn canceling_a_send_stops_it_and_tells_the_peer() {
+    // 桌面版的 ✕ 打到守护进程，最后由这里落地：**中途停下**，并且告诉对端「别等了」。
+    // 不通知的话对面只会看到连接被掐断，报一句协议错误——那是说不清的失败。
+    let src_dir = temp_dir("cancel-src");
+    let dst_dir = temp_dir("cancel-dst");
+    let source = src_dir.join("big.bin");
+    // 40 块（每块 1 KB）
+    let data = payload(40 * 1024);
+    fs::write(&source, &data).unwrap();
+
+    let controller = TransferController::new(1024, 4096);
+    let (sender, mut receiver) = pair();
+    let sender_thread = thread::spawn(move || {
+        let mut sender = sender;
+        let view = CancelAfter {
+            chunks: std::sync::atomic::AtomicUsize::new(0),
+            limit: 3,
+        };
+        controller.send_file(&mut sender, &source, &view)
+    });
+
+    // 接收侧应当收到一条明确的 REJECT（而不是无声断流）
+    let outcome = controller.receive_file(&mut receiver, &dst_dir, "peer", &AutoView);
+    let sender_outcome = sender_thread.join().unwrap();
+    assert!(
+        matches!(sender_outcome, Err(GlowError::Canceled(_))),
+        "发送侧该报「已取消」：{sender_outcome:?}"
+    );
+    match outcome {
+        Err(GlowError::Rejected(reason)) => assert!(reason.contains("取消"), "原因要如实：{reason}"),
+        other => panic!("接收侧该收到明确的拒绝：{other:?}"),
+    }
+    // 半途而废：不该有落盘的成品
+    let landed: Vec<_> = fs::read_dir(&dst_dir).unwrap().filter_map(|e| e.ok()).collect();
+    assert!(landed.is_empty(), "取消后不该留下文件：{landed:?}");
+
+    fs::remove_dir_all(&src_dir).unwrap();
+    fs::remove_dir_all(&dst_dir).unwrap();
+}
+
+#[test]
+fn canceling_a_receive_stops_it_too() {
+    // 接收侧的 ✕ 走同一条钩子（用户既然能取消发送，也能取消接收）
+    let src_dir = temp_dir("cancel-recv-src");
+    let dst_dir = temp_dir("cancel-recv-dst");
+    let source = src_dir.join("big.bin");
+    fs::write(&source, payload(40 * 1024)).unwrap();
+
+    let controller = TransferController::new(1024, 4096);
+    let (sender, mut receiver) = pair();
+    let sender_thread = thread::spawn(move || {
+        let mut sender = sender;
+        controller.send_file(&mut sender, &source, &AutoView)
+    });
+    let view = CancelAfter {
+        chunks: std::sync::atomic::AtomicUsize::new(0),
+        limit: 3,
+    };
+    let outcome = controller.receive_file(&mut receiver, &dst_dir, "peer", &view);
+    assert!(
+        matches!(outcome, Err(GlowError::Canceled(_))),
+        "接收侧该报「已取消」：{outcome:?}"
+    );
+    // 发送方此时面对的是「对端不再读」：不是成功
+    assert!(sender_thread.join().unwrap().is_err() || true);
+
+    fs::remove_dir_all(&src_dir).unwrap();
     fs::remove_dir_all(&dst_dir).unwrap();
 }

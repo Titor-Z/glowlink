@@ -27,6 +27,7 @@ pub fn error_kind(error: &GlowError) -> &'static str {
         GlowError::Missing(_) => "missing",
         GlowError::Crypto(_) => "crypto",
         GlowError::Rejected(_) => "rejected",
+        GlowError::Canceled(_) => "canceled",
         // 网络类 IO 单独一种：只回 "io" 的话，客户端还原出的是「其它 IO 错误」，
         // 退出码会从 3（网络）掉成 1（通用）——脚本的重试策略就跟着失效了
         GlowError::Io(e) if is_network_io(e.kind()) => "net",
@@ -50,6 +51,7 @@ pub fn error_from_line(line: &str) -> GlowError {
         "missing" => GlowError::Missing(text),
         "crypto" => GlowError::Crypto(text),
         "rejected" => GlowError::Rejected(text),
+        "canceled" => GlowError::Canceled(text),
         "net" => GlowError::Io(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             text,
@@ -93,7 +95,8 @@ fn plain_message(error: &GlowError) -> String {
         | GlowError::Usage(m)
         | GlowError::Config(m)
         | GlowError::Remote(m)
-        | GlowError::Crypto(m) => m.clone(),
+        | GlowError::Crypto(m)
+        | GlowError::Canceled(m) => m.clone(),
     }
 }
 

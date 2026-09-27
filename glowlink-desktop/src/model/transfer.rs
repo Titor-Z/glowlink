@@ -115,26 +115,25 @@ pub fn numbers(row: &TransferRow, speed: f64) -> CardNumbers {
         TransferState::Done => "已完成".to_string(),
         TransferState::Rejected => "被拒绝".to_string(),
         TransferState::Failed => "失败".to_string(),
+        TransferState::Canceled => "已取消".to_string(),
     };
+    // 元信息行（用户定的版式）：`2.4 MB / 3.9 MB · 剩余 4 秒`。
+    // **不写方向**（卡片本来就只放一条传输，方向由发起方自己心里清楚），
+    // 也不写速度（剩余时间已经是速度的结论，两个一起放是重复）。
     let meta = match row.state {
         TransferState::Running => {
             let mut text = format!(
-                "{direction}中 · {} / {}",
+                "{} / {}",
                 format::human_size(row.done),
                 format::human_size(row.total)
             );
-            if speed > 0.0 {
-                text.push_str(&format!(" · {}", format::human_speed(speed)));
-                if let Some(eta) = format::eta_seconds(row.total.saturating_sub(row.done), speed) {
-                    text.push_str(&format!(" · 剩 {}", format::human_eta(eta)));
-                }
+            if let Some(eta) = format::eta_seconds(row.total.saturating_sub(row.done), speed) {
+                text.push_str(&format!(" · 剩余 {}", format::human_eta(eta)));
             }
             text
         }
-        TransferState::Done => {
-            // 平均速度（完成时用它）：这是「真实字节 / 真实耗时」，不是编出来的倍数
-            format!("{direction}完成 · {}", format::human_size(row.total))
-        }
+        TransferState::Done => format!("{} · {direction}完成", format::human_size(row.total)),
+        TransferState::Canceled => "已取消".to_string(),
         TransferState::Rejected => {
             if row.note.is_empty() {
                 "对方拒绝了这次传输".to_string()
@@ -166,5 +165,23 @@ pub fn action(row: &TransferRow) -> Option<Action> {
     match (row.state, row.direction) {
         (TransferState::Done, TransferDirection::Receive) => Some(Action::OpenFolder),
         _ => None,
+    }
+}
+
+/// 交替高亮的周期（秒）：一次「本机亮 → 对端亮」。
+pub const PULSE_PERIOD_SECS: f32 = 1.2;
+
+/// 传输中的交替高亮：返回 `(本机强度, 对端强度)`，都在 0..1。
+///
+/// 为什么不画连线：环上的气泡本来就贴在本机盘边上，一条线几乎没有信息量；
+/// 而「光在这两台之间来回跳」既说清了**哪两台**在传，又说清了**还在传**——
+/// 灯一停就是传完了。两个半周期各一条升余弦包络（0→1→0），所以不会有硬闪。
+pub fn pulse(phase: f32) -> (f32, f32) {
+    let cycle = phase.rem_euclid(1.0);
+    let bump = |local: f32| (1.0 - (local * std::f32::consts::TAU).cos()) * 0.5;
+    if cycle < 0.5 {
+        (bump(cycle * 2.0), 0.0)
+    } else {
+        (0.0, bump((cycle - 0.5) * 2.0))
     }
 }

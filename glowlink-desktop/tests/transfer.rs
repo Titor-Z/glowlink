@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use glowlink_desktop::model::transfer::{action, numbers, pick, Action, SpeedMeter};
+use glowlink_desktop::model::transfer::{action, numbers, pick, pulse, Action, SpeedMeter};
 use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
 
 fn row(done: u64, total: u64, state: TransferState) -> TransferRow {
@@ -81,11 +81,9 @@ fn the_card_numbers_come_from_real_bytes() {
     let card = numbers(&running, 1024.0 * 1024.0);
     assert!((card.fraction - 0.3).abs() < 0.001);
     assert_eq!(card.percent, "30%");
-    // 元信息要有方向、大小、速度、剩余——全都来自真实字节与耗时
-    assert!(card.meta.contains("接收中"), "{}", card.meta);
-    assert!(card.meta.contains("3.0 MB"), "{}", card.meta);
-    assert!(card.meta.contains("1.0 MB/s"), "{}", card.meta);
-    assert!(card.meta.contains("剩 7.0 秒"), "{}", card.meta);
+    // 元信息行（用户定的版式）：`已传 / 总量 · 剩余 X`——不带方向、不带速度。
+    // 剩余时间仍是**真算的**（速度 × 剩余字节），不是编出来的数。
+    assert_eq!(card.meta, "3.0 MB / 10.0 MB · 剩余 7.0 秒", "{}", card.meta);
 }
 
 #[test]
@@ -93,9 +91,8 @@ fn a_stalled_transfer_does_not_invent_a_speed_or_an_eta() {
     // 「不编造没有来源的指标」：速度为 0 时既不给速度也不给剩余时间
     let running = row(1024, 4096, TransferState::Running);
     let card = numbers(&running, 0.0);
-    assert!(!card.meta.contains("MB/s"), "速度为 0 就不该出现速度：{}", card.meta);
-    assert!(!card.meta.contains("剩"), "也别编「剩 0 秒」：{}", card.meta);
-    assert!(card.meta.contains("接收中"), "但「在传」这件事要说：{}", card.meta);
+    assert!(!card.meta.contains("剩余"), "速度不明就别编剩余时间：{}", card.meta);
+    assert_eq!(card.meta, "1.0 KB / 4.0 KB", "但「传了多少」必须如实说：{}", card.meta);
 }
 
 #[test]
@@ -133,4 +130,30 @@ fn only_received_files_can_be_opened() {
     sent.direction = TransferDirection::Send;
     assert_eq!(action(&sent), None);
     assert_eq!(action(&row(5, 10, TransferState::Running)), None, "没传完不给打开");
+}
+
+#[test]
+fn the_pulse_alternates_between_the_two_ends() {
+    // 「中心亮一下，然后 A 亮一下」：任何时刻只有一端亮，且各自都能到峰。
+    // 灯一停就是传完了 —— 这是「还在传」唯一的信息来源（连线已经删掉）。
+    let mut center_peak = 0.0f32;
+    let mut peer_peak = 0.0f32;
+    for step in 0..=100 {
+        let phase = step as f32 / 100.0;
+        let (center, peer) = pulse(phase);
+        assert!((0.0..=1.0).contains(&center), "强度必须落在 0..1：{center}");
+        assert!((0.0..=1.0).contains(&peer), "强度必须落在 0..1：{peer}");
+        assert!(center * peer == 0.0, "不许两端同时亮（那就是一起闪，不是交替）：{phase}");
+        center_peak = center_peak.max(center);
+        peer_peak = peer_peak.max(peer);
+    }
+    assert!(center_peak > 0.99 && peer_peak > 0.99, "两端都要真的亮到峰");
+    // 起点在本机侧、半周期后轮到对端；整周期无缝循环
+    assert!(pulse(0.0).0 < 0.01, "起点在本机侧（从暗开始升起）");
+    assert!(pulse(0.25).0 > 0.99, "四分之一周期时本机最亮");
+    assert!(pulse(0.75).1 > 0.99, "四分之三周期时对端最亮");
+    for (a, b) in [(0.0, 1.0), (0.3, 1.3), (0.55, 2.55)] {
+        let (x, y) = (pulse(a), pulse(b));
+        assert!((x.0 - y.0).abs() < 0.001 && (x.1 - y.1).abs() < 0.001, "周期性：{a} vs {b}");
+    }
 }

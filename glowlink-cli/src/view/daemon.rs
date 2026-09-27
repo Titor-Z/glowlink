@@ -144,6 +144,16 @@ impl TransferView for DaemonView {
         accepted
     }
 
+    /// 用户取消了这次接收吗（桌面版的 ✕）。
+    fn canceled(&self) -> bool {
+        self.job
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|job| job.is_canceled())
+            .unwrap_or(false)
+    }
+
     /// 进度写入登记表：守护进程没有终端，日志里刷进度会把有用信息淹掉。
     fn progress(&self, _label: &str, done: u64, total: u64) {
         if let Some(job) = self.job.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {

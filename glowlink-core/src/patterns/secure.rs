@@ -202,6 +202,11 @@ impl SecureTransport {
 }
 
 impl TransferTransport for SecureTransport {
+    /// 转发给内层：加密层自己不知道有没有字节，能等的只有那条 TCP。
+    fn wait_readable(&mut self, timeout: std::time::Duration) -> Result<bool> {
+        self.inner.wait_readable(timeout)
+    }
+
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         self.handshake()?;
         let plaintext = frame.encode()?;

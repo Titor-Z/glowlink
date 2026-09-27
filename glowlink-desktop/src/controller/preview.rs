@@ -175,6 +175,10 @@ impl TransferSource for PreviewTransfer {
         self.transfers.clone()
     }
 
+    fn cancel(&self, _token: &str) -> Result<()> {
+        Ok(())
+    }
+
     fn decide(&self, _token: &str, _accept: bool) -> Result<()> {
         Ok(())
     }

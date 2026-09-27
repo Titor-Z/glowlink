@@ -13,7 +13,7 @@ use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::{Device, DeviceId};
 use glowlink_ipc::row::{
-    PairingRow, PairingState, PendingRow, SendTicket, TransferRow,
+    PairingRow, PairingState, PendingRow, SendTicket, TransferRow, TransferState,
 };
 use glowlink_ipc::server::IpcHost;
 use glowlink_ipc::state::State;
@@ -80,6 +80,8 @@ pub struct FakeHost {
     pub sent: Mutex<Vec<(String, String)>>,
     /// 要展示的传输行。
     pub transfers: Mutex<Vec<TransferRow>>,
+    /// 被取消的传输编号（测 `CANCEL` 打到宿主上）。
+    pub canceled: Mutex<Vec<String>>,
     /// 让 `send_file` 报错（测错误分支）。
     pub send_fails: AtomicBool,
 }
@@ -148,6 +150,19 @@ impl IpcHost for FakeHost {
             return Err(GlowError::NotFound(device_id.to_string()));
         }
         Ok(SendTicket { token: "001".to_string(), code: "513904".to_string() })
+    }
+
+    fn cancel(&self, token: &str) -> Result<String> {
+        let mut rows = self.transfers.lock().unwrap();
+        let Some(index) = rows
+            .iter()
+            .position(|row| row.token == token && row.state == TransferState::Running)
+        else {
+            return Err(GlowError::Missing(format!("没有正在进行的传输 #{token}")));
+        };
+        rows[index].state = TransferState::Canceled;
+        self.canceled.lock().unwrap().push(token.to_string());
+        Ok(token.to_string())
     }
 
     fn transfers(&self) -> Vec<TransferRow> {

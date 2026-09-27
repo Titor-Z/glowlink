@@ -356,6 +356,11 @@ impl TransferSource for IpcSource {
             .clone()
     }
 
+    fn cancel(&self, token: &str) -> Result<()> {
+        self.submit(format!("CANCEL {token}"));
+        Ok(())
+    }
+
     fn decide(&self, token: &str, accept: bool) -> Result<()> {
         let verb = if accept { "ACCEPT" } else { "REJECT" };
         self.submit(format!("{verb} {token}"));

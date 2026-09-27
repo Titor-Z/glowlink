@@ -18,6 +18,8 @@ pub enum GlowError {
     Remote(String),
     /// 加密/认证失败。
     Crypto(String),
+    /// 用户自己取消（不是故障，也不是对端拒绝）：界面据此显示「已取消」。
+    Canceled(String),
 }
 
 impl fmt::Display for GlowError {
@@ -32,6 +34,7 @@ impl fmt::Display for GlowError {
             GlowError::Config(m) => write!(f, "配置错误：{m}"),
             GlowError::Remote(m) => write!(f, "{m}"),
             GlowError::Crypto(m) => write!(f, "加密错误：{m}"),
+            GlowError::Canceled(m) => write!(f, "{m}"),
         }
     }
 }

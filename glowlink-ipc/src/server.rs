@@ -78,6 +78,13 @@ pub trait IpcHost: Send + Sync {
     fn transfers(&self) -> Vec<TransferRow> {
         Vec::new()
     }
+
+    /// 取消一次传输（桌面版的 ✕）。
+    ///
+    /// 返回被取消的编号。默认实现如实报错：不支持取消的守护进程不该静默成功。
+    fn cancel(&self, _token: &str) -> Result<String> {
+        Err(GlowError::Usage("这个守护进程不支持 CANCEL".into()))
+    }
 }
 
 /// 处理一行 IPC 指令，返回要写回的行；`true` 表示连接可以继续复用。
@@ -207,6 +214,11 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
             }
             (lines, true)
         }
+        // `CANCEL <编号>`：用户在半途掐掉一次传输（桌面版的 ✕）
+        "CANCEL" => match host.cancel(arg) {
+            Ok(token) => (vec![format!("OK 已取消 #{token}")], true),
+            Err(e) => (vec![error_reply(&e)], true),
+        },
         // `SEND <设备 ID> <文件路径>`：路径可能带空格，所以只切第一个空白。
         // 设备 ID 是 16 位十六进制指纹，本身不会带空格。
         "SEND" => match arg.split_once(char::is_whitespace) {

@@ -14,10 +14,25 @@ use crate::model::error::{GlowError, Result};
 use crate::model::packet::Frame;
 use crate::model::ring::SharedRing;
 
+/// 「等对方答复」的轮询步长：够短才能让取消立刻生效，够长则不打转。
+/// 150ms 对用户是无感的（比一次点击的反馈还快）。
+pub const ANSWER_POLL: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// 传输通道（接口）。
 pub trait TransferTransport: Send {
     fn send_frame(&mut self, frame: &Frame) -> Result<()>;
     fn recv_frame(&mut self) -> Result<Frame>;
+
+    /// 等对方发来东西，最多等 `timeout`；返回「到底有没有可读的」。
+    ///
+    /// **必须是非消耗性的**（TCP 上用 `peek`）：实现不能把半个帧读走，
+    /// 否则加密层的流位置就错位了（那种 bug 只在超时发生时出现，极难查）。
+    ///
+    /// 默认返回 `true`（内存通道 / 测试替身总是「马上就有」）：
+    /// 这样调用方不用为测试特判，而真实 TCP 实现会真的等。
+    fn wait_readable(&mut self, _timeout: std::time::Duration) -> Result<bool> {
+        Ok(true)
+    }
 }
 
 /// 监听端（接口），接收方使用。
@@ -31,6 +46,13 @@ pub trait TransferView: Send + Sync {
     /// 收到 OFFER 后询问用户是否接收。
     fn confirm_receive(&self, peer: &str, name: &str, size: u64) -> bool;
     fn progress(&self, label: &str, done: u64, total: u64);
+    /// 用户在半途取消了这次传输吗？**每个分块问一次**。
+    ///
+    /// 默认 `false`：不需要取消的调用方（CLI 的一次性进度视图、测试替身）什么都不用写。
+    /// 有取消需求的是守护进程（桌面版的 ✕ 按钮经 IPC 打到这儿）。
+    fn canceled(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,7 +85,19 @@ impl TransferController {
         let name = file_name(path)?;
 
         transport.send_frame(&Frame::Offer { name, size })?;
-        match transport.recv_frame()? {
+        // 等对方拍板。这一段**必须可取消**：对方可能正在等人点「允许」（最长几分钟），
+        // 而死等在 `recv_frame` 上时，用户点的 ✕ 要等到对方答复才有机会生效——
+        // 表现就是「取消按钮像坏的」。
+        let reply = loop {
+            if view.canceled() {
+                let _ = transport.send_frame(&Frame::Reject { reason: "对方取消了这次发送".into() });
+                return Err(GlowError::Canceled("已取消发送".into()));
+            }
+            if transport.wait_readable(ANSWER_POLL)? {
+                break transport.recv_frame()?;
+            }
+        };
+        match reply {
             Frame::Accept => {}
             Frame::Reject { reason } => return Err(GlowError::Rejected(reason)),
             other => return Err(GlowError::Protocol(format!("期望 ACCEPT，收到 {other:?}"))),
@@ -117,6 +151,13 @@ impl TransferController {
             }
             offset += n as u64;
             view.progress("发送", offset, size);
+            if view.canceled() {
+                // 告诉对端「别等了」再断，比无声无息地掐断干净：
+                // 对面会显示「对方取消了这次发送」，而不是一句协议错误。
+                let _ = transport.send_frame(&Frame::Reject { reason: "对方取消了这次发送".into() });
+                failure = Err(GlowError::Canceled("已取消发送".into()));
+                break;
+            }
         }
 
         // 无论成功失败都关闭环并回收读盘线程，避免线程泄漏。
@@ -178,6 +219,9 @@ impl TransferController {
                         crc.update(&data);
                         written += data.len() as u64;
                         view.progress("接收", written, size);
+                        if view.canceled() {
+                            return Err(GlowError::Canceled("已取消接收".into()));
+                        }
                     }
                     Frame::Done { size: done_size, crc: done_crc } => {
                         if done_size != size {
@@ -194,6 +238,15 @@ impl TransferController {
                             return Err(GlowError::Protocol("文件整体校验失败".into()));
                         }
                         break;
+                    }
+                    // 对端**中途**取消：这是一条明确结论，不是协议错误
+                    //（发件人点 ✕ 时我们会收到它，而不是看到连接被掐断）
+                    Frame::Reject { reason } => {
+                        return Err(GlowError::Rejected(if reason.is_empty() {
+                            "对方取消了这次传输".to_string()
+                        } else {
+                            reason
+                        }))
                     }
                     other => {
                         return Err(GlowError::Protocol(format!(

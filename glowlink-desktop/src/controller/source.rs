@@ -80,6 +80,8 @@ pub trait TransferSource: Send + Sync {
     /// 速度**不在**这里：它由界面用相邻快照的字节差除以真实间隔算出来
     /// （`model::transfer::SpeedMeter`）——协议里塞速度就得让守护进程也维护一个时钟。
     fn transfers(&self) -> Vec<TransferRow>;
+    /// 取消一次传输（桌面版的 ✕）。**只请求**：真正的收尾由守护进程的传输线程做。
+    fn cancel(&self, token: &str) -> Result<()>;
     /// 接受 / 拒绝一个待确认的接收请求。
     fn decide(&self, token: &str, accept: bool) -> Result<()>;
     /// 当前待确认请求。

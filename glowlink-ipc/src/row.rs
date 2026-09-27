@@ -128,6 +128,8 @@ pub enum TransferState {
     Failed,
     /// 对方拒绝接收。
     Rejected,
+    /// 本机或对方**取消**（用户主动掐掉，不是故障）。
+    Canceled,
 }
 
 impl TransferState {
@@ -137,6 +139,7 @@ impl TransferState {
             TransferState::Done => "done",
             TransferState::Failed => "failed",
             TransferState::Rejected => "rejected",
+            TransferState::Canceled => "canceled",
         }
     }
 
@@ -145,6 +148,7 @@ impl TransferState {
             "done" => TransferState::Done,
             "failed" => TransferState::Failed,
             "rejected" => TransferState::Rejected,
+            "canceled" => TransferState::Canceled,
             _ => TransferState::Running,
         }
     }

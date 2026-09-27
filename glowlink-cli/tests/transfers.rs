@@ -133,3 +133,49 @@ fn two_threads_can_report_progress_at_once() {
     reader.join().unwrap();
     assert_eq!(transfers.rows()[0].state, TransferState::Done);
 }
+
+#[test]
+fn canceling_marks_the_transfer_and_stops_the_thread() {
+    // 桌面版的 ✕ 打到登记表：置标志 + 落「已取消」终态。
+    // 传输线程每个分块问 `TransferView::canceled`，所以这里断言的是两件事：
+    // 登记表能按编号找到它、并且标志真的会被读到。
+    let transfers = Transfers::new();
+    let job = transfers.start(TransferDirection::Send, "big.bin", "iPad mini", 4096);
+    job.update(1024, 4096);
+    assert!(!job.is_canceled(), "一开始当然没取消");
+
+    assert_eq!(transfers.cancel(&job.token()), Some(job.token()));
+    assert!(job.is_canceled(), "标志要能被传输线程读到");
+    // 取消是**两段式**：登记表只置标志，状态由传输线程落（它才知道传到哪儿了）——
+    // 此刻仍显示「进行中」是对的，假装已经停了才是骗人
+    assert_eq!(transfers.rows()[0].state, TransferState::Running);
+    // 线程在下一个分块看到标志 → 落终态
+    job.cancel();
+    let rows = transfers.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].state, TransferState::Canceled);
+    job.cancel();
+    assert!(job.is_canceled(), "重复取消不出事，状态也不改口");
+    assert_eq!(transfers.rows()[0].state, TransferState::Canceled);
+}
+
+#[test]
+fn canceling_a_finished_or_unknown_transfer_fails_loudly() {
+    // 编号不存在 / 已经结束：如实报错，不假装取消成功（界面据此提示用户）
+    let transfers = Transfers::new();
+    assert_eq!(transfers.cancel("999"), None);
+    let job = transfers.start(TransferDirection::Receive, "a.bin", "甲机", 10);
+    job.finish();
+    assert_eq!(transfers.cancel(&job.token()), None, "已经结束的不该还能取消");
+}
+
+#[test]
+fn a_canceled_transfer_never_reports_done() {
+    // 终态幂等：取消之后传输线程的收尾回调不能把它改回「已完成」
+    let transfers = Transfers::new();
+    let job = transfers.start(TransferDirection::Send, "big.bin", "乙机", 100);
+    job.cancel();
+    job.finish();
+    let rows = transfers.rows();
+    assert_eq!(rows[0].state, TransferState::Canceled, "终态只有第一个算数");
+}

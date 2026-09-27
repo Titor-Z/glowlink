@@ -211,6 +211,29 @@ impl TransferTransport for TcpTransportAdapter {
     fn recv_frame(&mut self) -> Result<Frame> {
         Frame::read_from(&mut self.stream)
     }
+
+    /// 用 `peek` 探一探：**读过就走**会把帧切开，加密层当场错位。
+    ///
+    /// 临时设读超时、探完恢复——不恢复的话后面每个分块都会有个「超时窗口」。
+    fn wait_readable(&mut self, timeout: std::time::Duration) -> Result<bool> {
+        self.stream.set_read_timeout(Some(timeout))?;
+        let mut probe = [0u8; 1];
+        let outcome = self.stream.peek(&mut probe);
+        // 无论结果如何都要复原：这是「借一下超时设置」，不是改它
+        self.stream.set_read_timeout(None)?;
+        match outcome {
+            Ok(_) => Ok(true),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
 }
 
 /// TCP 监听适配器（监听端）。

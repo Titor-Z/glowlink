@@ -168,3 +168,23 @@ fn parse_transfers_skips_the_count_line() {
     assert_eq!(rows[0].name, "a.bin");
     assert_eq!(rows[1].state, TransferState::Done);
 }
+
+#[test]
+fn canceled_is_its_own_state_and_survives_a_round_trip() {
+    // 「已取消」不能混进「失败」：一个是用户主动掐掉，一个是真出故障，
+    // 界面文案与用户的下一步动作都不一样（前者别再重试，后者要排查）。
+    let row = TransferRow {
+        token: "004".into(),
+        direction: TransferDirection::Send,
+        name: "big.bin".into(),
+        peer: "iPad mini".into(),
+        done: 3 * 1024,
+        total: 40 * 1024,
+        state: TransferState::Canceled,
+        note: "已取消".into(),
+    };
+    let back = TransferRow::from_line(&row.to_line()).unwrap();
+    assert_eq!(back, row);
+    assert_eq!(back.state, TransferState::Canceled);
+    assert_ne!(back.state, TransferState::Failed);
+}

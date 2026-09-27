@@ -141,6 +141,32 @@ impl NodeLook {
         }
     }
 
+    /// 传输中**交替高亮**的一帧：`t` = 0 暗、1 亮（由 `transfer::pulse` 给）。
+    ///
+    /// 在「已连接」与「亮起来」之间插值：环从 0.5 到 1.0、辉光从 16/0.2 到 26/0.55。
+    /// 幅度拉这么大是为了**读得出来**——「在传」没有专属颜色，全靠这一亮一暗说。
+    pub fn device_pulse(t: f32) -> Self {
+        let base = Self::device_connected();
+        Self {
+            ring_alpha: base.ring_alpha + (1.0 - base.ring_alpha) * t,
+            glow_radius: base.glow_radius + (26.0 - base.glow_radius) * t,
+            glow_alpha: base.glow_alpha + (0.55 - base.glow_alpha) * t,
+            halo: true,
+            ..base
+        }
+    }
+
+    /// 本机盘在交替高亮里的一帧（与设备同款起伏，两边一起跳才读得出「这一对」）。
+    pub fn self_pulse(t: f32) -> Self {
+        let base = Self::self_node();
+        Self {
+            ring_alpha: base.ring_alpha + (1.0 - base.ring_alpha) * t,
+            glow_radius: base.glow_radius + (28.0 - base.glow_radius) * t,
+            glow_alpha: base.glow_alpha + (0.6 - base.glow_alpha) * t,
+            ..base
+        }
+    }
+
     /// 传输中（设计稿：环拉满、辉光 24px / 52%、光圈呼吸加快到 1.5s）。
     ///
     /// 颜色仍归设备类型——「在传」不是第五种颜色，它靠**亮度与节奏**说。

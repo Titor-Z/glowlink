@@ -1025,6 +1025,12 @@ impl SendWorker {
                 ));
                 Ok(())
             }
+            // 用户取消（桌面版的 ✕ 经 IPC 打进来）：明确结论，不是故障
+            Err(GlowError::Canceled(_)) => {
+                job.cancel();
+                state::append_log(&format!("已取消向 {peer_name} 发送：{}", path.display()));
+                Ok(())
+            }
             // 对方拒收：这是一条明确结论，不是错误（界面文案也不一样）
             Err(GlowError::Rejected(reason)) => {
                 job.reject(reason.clone());
@@ -1152,6 +1158,16 @@ impl IpcHost for DaemonShared {
 
     fn transfers(&self) -> Vec<TransferRow> {
         self.transfers.rows()
+    }
+
+    /// 取消一次传输（桌面版的 ✕）。
+    ///
+    /// 只**置标志**：真正的收尾由传输线程做（它才知道传到哪儿了）。
+    /// 编号不存在或已经结束就如实报错，不假装取消成功。
+    fn cancel(&self, token: &str) -> Result<String> {
+        self.transfers
+            .cancel(token)
+            .ok_or_else(|| GlowError::Missing(format!("没有正在进行的传输 #{token}")))
     }
 
     /// 把文件发给某台设备：握手**在这里等**（校验码要立刻能显示），传输丢给线程。

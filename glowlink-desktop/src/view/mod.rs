@@ -9,4 +9,3 @@ pub mod node;
 pub mod paircard;
 pub mod progress;
 pub mod titlebar;
-pub mod wire;

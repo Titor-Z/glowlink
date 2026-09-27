@@ -27,7 +27,7 @@ use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::DropState;
-use crate::view::{dropzone, node, paircard, progress, titlebar, wire};
+use crate::view::{dropzone, node, paircard, progress, titlebar};
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -41,9 +41,6 @@ const TICK_FAST: Duration = Duration::from_millis(16);
 /// 为什么要分档：实测「永远 16ms」在空闲态就吃掉 60% 的 CPU
 /// （玻璃+阴影整窗重绘每帧都跑）。壁纸级的小动作用不着 60fps。
 const TICK_SLOW: Duration = Duration::from_millis(50);
-
-/// 流动亮线走完一个周期要多久（秒）。慢一点更像「数据在流」，快了像闪烁。
-const FLOW_PERIOD_SECS: f32 = 1.2;
 
 /// 传输中呼吸光圈一圈多久（设计稿：加快到 1.5s）。
 const HALO_FAST_SECS: f32 = 1.5;
@@ -93,8 +90,8 @@ pub struct AppRoot {
     /// 进度条填充的**平滑值**（设计稿要求 0.12s 过渡：IPC 的进度是跳着来的，
     /// 直接画会像抽动）。这里用同一个弹簧原语做，不用另一套机制。
     progress: Spring,
-    /// 流动亮线的相位（0..1），与呼吸、品牌光一样由界面时钟推进。
-    flow: f32,
+    /// 交替高亮的相位（0..1）：本机亮一下 → 对端亮一下，由界面时钟推进。
+    pulse: f32,
     /// 最近一次算出的速度（字节/秒）：卡片与元信息行都用它。
     transfer_speed: f64,
     /// 正在被拖动的那台设备 ID（只用于压暗它自己）。
@@ -186,7 +183,7 @@ impl AppRoot {
             meter: SpeedMeter::default(),
             dismissed: Vec::new(),
             progress: Spring::new(0.0, ZETA_CRITICAL, PROGRESS_RESPONSE),
-            flow: 0.0,
+            pulse: 0.0,
             transfer_speed: 0.0,
             dragging: None,
             drag_at: None,
@@ -326,6 +323,21 @@ impl AppRoot {
         }
     }
 
+    /// 取消一次正在进行的传输（卡片右上角的 ✕）。
+    ///
+    /// 只**发出请求**：真正的收尾在守护进程的传输线程里做（它才知道传到哪儿了），
+    /// 结果经下一轮 `TRANSFERS` 回到界面——界面不自己改状态，否则会和守护进程对不上。
+    pub fn cancel_transfer(&mut self, token: &str) {
+        let Some(source) = self.transfers.clone() else {
+            log::info!("预览模式：不真的取消传输 #{token}");
+            return;
+        };
+        log::info!("请求取消传输 #{token}");
+        if let Err(e) = source.cancel(token) {
+            log::info!("取消失败：{e}");
+        }
+    }
+
     /// 用户主动关掉传输卡（设计稿：完成后不自动消失，由用户自己关）。
     pub fn dismiss_transfer(&mut self, token: &str) {
         if !self.dismissed.iter().any(|t| t == token) {
@@ -389,8 +401,8 @@ impl AppRoot {
         self.halo = (self.halo + dt / node::HALO_PERIOD_SECS).fract();
         self.brand_phase =
             (self.brand_phase + dt / titlebar::BRAND_PERIOD_SECS).fract();
-        // 流动亮线：只有真在传的那条线动。1.2s 走完一个「短段 + 空隙」周期
-        self.flow = (self.flow + dt / FLOW_PERIOD_SECS).fract();
+        // 交替高亮：只有真在传的时候跳（传完就停在静止态）
+        self.pulse = (self.pulse + dt / transfer::PULSE_PERIOD_SECS).fract();
         self.halo_fast = (self.halo_fast + dt / HALO_FAST_SECS).fract();
         self.flowing_peer = match self.transfer.as_ref() {
             Some(row) if row.state == TransferState::Running => Some(row.peer.clone()),
@@ -687,14 +699,17 @@ impl Render for AppRoot {
             |_, _, cx| cx.quit(),
         );
 
+        // 交替高亮：本机与对端各拿一半强度（对端由 `flowing_peer` 匹配）
+        let pulse = transfer::pulse(self.pulse);
         let devices: Vec<_> = self
             .devices
             .iter()
             .map(|device| {
                 let connected = self.is_connected(&device.id);
                 let being_dragged = self.dragging.as_deref() == Some(device.id.as_str());
-                // 「在传」是比「已连接」更强的状态：两端都拉满高亮、呼吸加快
+                // 「在传」是比「已连接」更强的状态：两端交替亮起、呼吸加快
                 let transferring = self.flowing_peer.as_deref() == Some(device.name.as_str());
+                let peer_pulse = if transferring { pulse.1 } else { 0.0 };
                 // 位置只有一个来源：运动系统的**当前**位置（渲染层不做任何判断）
                 let center =
                     self.motion.position(&device.id).unwrap_or_else(layout::self_center);
@@ -721,7 +736,7 @@ impl Render for AppRoot {
                         label: &device.name,
                         // 已连接：保留高亮（环拉满 + 辉光加强 + 常驻呼吸）
                         look: if transferring {
-                            node::NodeLook::device_transfer()
+                            node::NodeLook::device_pulse(peer_pulse)
                         } else if connected {
                             node::NodeLook::device_connected()
                         } else {
@@ -820,27 +835,6 @@ impl Render for AppRoot {
         let connected_any = !self.connections.is_empty();
         let self_scale = if connected_any { connect::CONNECTED_SCALE } else { 1.0 };
 
-        // 连线（画在节点之下）：每台已连接设备一条，颜色跟着那台设备
-        let segments: Vec<wire::Segment> = self
-            .connections
-            .iter()
-            .filter_map(|connection| {
-                let device = self.devices.iter().find(|d| d.id == connection.id)?;
-                Some(wire::Segment {
-                    end: connect::point_at(layout::self_center(), connection.angle),
-                    tone: theme::device_tone(device.kind),
-                    // 线上正在传数据吗（按对端显示名匹配：协议行里就是显示名）
-                    flowing: self.flowing_peer.as_deref() == Some(device.name.as_str()),
-                    // 方向：发送朝外、接收朝内
-                    inbound: self
-                        .transfer
-                        .as_ref()
-                        .map(|row| row.direction == crate::controller::TransferDirection::Receive)
-                        .unwrap_or(false),
-                })
-            })
-            .collect();
-
         div()
             .id("root")
             // 松手落在中心盘上就吸附、落在别处就回弹。
@@ -930,8 +924,6 @@ impl Render for AppRoot {
                     .flex_none()
                     .h(px(theme::GRAPH_H))
                     .w_full()
-                    // 连线在最底层（设计稿层级：连线 < 节点）
-                    .when(!segments.is_empty(), |el| el.child(wire::wires(segments, self.flow)))
                     // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
                     // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
@@ -942,7 +934,7 @@ impl Render for AppRoot {
                             .unwrap_or_else(layout::self_center);
                         let self_transferring = self.flowing_peer.is_some();
                         let look = if self_transferring {
-                            node::NodeLook::self_transfer()
+                            node::NodeLook::self_pulse(pulse.0)
                         } else if connected_any {
                             node::NodeLook::self_node_blended(1.0, theme::NODE_SELF)
                         } else {
