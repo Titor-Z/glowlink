@@ -19,7 +19,7 @@ use glowlink_core::patterns::secure::SessionSlot;
 
 use crate::keys::TrustFile;
 use crate::pending::{PendingOffer, PendingQueue};
-use crate::state::append_log;
+use glowlink_ipc::state::append_log;
 
 /// `glowlink list` 里每条待确认请求的「来源」提示（已信任也要带校验码）。
 pub fn pending_hint(fingerprint: &str, code: &str, trusted: bool) -> String {

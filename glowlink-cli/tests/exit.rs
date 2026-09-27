@@ -6,7 +6,7 @@
 use std::io::ErrorKind;
 
 use glowlink_cli::exit::{self, code_of};
-use glowlink_cli::ipc::{error_from_line, error_reply};
+use glowlink_ipc::codec::{error_from_line, error_reply};
 use glowlink_core::GlowError;
 
 #[test]

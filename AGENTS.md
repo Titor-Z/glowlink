@@ -10,6 +10,10 @@
 - 每次修复代码、改BUG等等，不要在代码外包裹，而是重写
 - 任何时候，都不要偷懒
 - 使用中文和用户交流
+- **视觉验收不自己截屏**：agent 没有 macOS 屏幕录制授权，`screencapture` 之类的自己截屏要么被静默
+  降级成只拿到壁纸、要么根本读不到内容，既白费劲又误导判断。mac 上由**用户截图**后提供
+  （放到桌面并告知文件名），agent 只负责看。代码层面的自截留 `Window::render_to_image()`
+  （导出自身 GPU 画面、不需系统授权），但它只覆盖窗口自身，系统级外观仍靠用户截图。
 - 测试文件全部拆分，每个测试文件都针对单个模块、单个文件进行编写，不要全部汇入一个文件
 - 一个问题如果重复3次没有解决，立即停止，告诉用户遇到的问题，并和用户讨论接下来的做法
 - 认知纠正模块，用来存放我们在开发中已经遇到过的问题都总结
@@ -20,11 +24,22 @@
 - 测试一源文件一份（`tests/<源文件名>.rs`），一个文件只测一个源文件，不合并。
 - **本地一律走单文件/单函数入口，禁止 `cargo test --workspace`**（它会编译并链接所有测试目标，
   在低配机器上很重；全量只留给发版 CI）。
-  - 类型检查：`cargo check --all-targets`（不链接，秒级）
+  - 类型检查：`cargo check --all-targets`（不链接，秒级）——**这条只对 core / ipc / cli 成立**；
+    `glowlink-desktop` 拖进 wgpu / metal / bindgen，首次编译**分钟级**，见下。
   - 单个文件：`./scripts/t.sh <测试文件名>`
   - 单个用例：`./scripts/t.sh <测试文件名> <名字子串>`；精确匹配加 `--exact <用例名>`；只列名加 `--list`
+  - **同名文件跨 crate 时必须加前缀**：`cli:` / `core:` / `ipc:` / `desktop:`
+    （`state` 两处都有，不加就报错，不猜）；
+    每个 crate 一个测试源文件对应一个源文件，公共替身放 `tests/common/mod.rs`（不是测试目标）
   - **涉及并发、时序、网络协议的改动：必须把那一个测试文件跑完**——
     `cargo check` 看的是类型，看不见运行时会死锁（本次已栽过）。
+  - **desktop 是例外，节流跑**：`cargo check -p glowlink-desktop` 会连带编译 GPUI 全套
+    （wgpu / metal / 字体栈，几百个 crate）。所以：
+    ① 改 desktop 之前先把一批改动写完，**不要每改一处跑一次**；
+    ② 编译放后台（`nohup … > /tmp/gl-check.log 2>&1 &`）并同时干别的事，**不阻塞等它**；
+    ③ `cargo check --all-targets` 这条「秒级」习惯不要带到 desktop 上；
+    ④ 跨目标（`--target x86_64-pc-windows-msvc`）**不要**在 desktop 上试——
+    它会重新编译整套依赖，代价是几十分钟，Windows 玻璃是否可用留给发版 CI 验。
 - CI 只在打 `v*` 标签与手动触发时运行：仓库私有，Actions 按量计费（Linux ×1 / Windows ×2 / macOS ×10）。
   日常提交不跑 CI；**不要为了「顺手验一下」推 tag**（一次发版约 15 分钟额度）。
 - 未经确认不推送远端（尤其额度见底时）；推送前先问。
@@ -62,7 +77,8 @@
   非终端（重定向/CI）按**每 10% 一档**输出整行文本，绝不用 `\r` 刷屏（日志要能 grep）。
 - 依赖政策（与「编码规范」的密码学例外并列）：核心协议层（GLWK 帧、发现、传输、加密）
   保持零依赖；**UI 层可以引入**（如 `ratatui` / `crossterm`），但只允许在独立命令
-  （如 `glowlink ui`）里启用，不得渗进核心库。
+  （如 `glowlink ui`）里启用，不得渗进核心库。桌面版同理：GPUI-CE / `rfd` / `tray-icon`
+  只允许在 `glowlink-desktop` crate 内启用，core / cli / ipc 一律保持零 UI 依赖。
 
 ## TAOLUN
 > 这里存放讨论记录
@@ -293,6 +309,133 @@
   已信任时补一句说明（本机无需核对 / 若对方要求核对请出示此码），免得用户以为还要再核一遍。
 - 落点：发送方 `session_banner`、接收方 `source_line`、待确认列表 `pending_hint`、
   守护进程日志，四处全都无条件带码；前三个抽成纯函数，测试钉住「撤掉码就变红」。
+
+### 2026-09-27 【Desktop 技术选型 - v1.0】GPUI-CE + 工程拆分 A 方案
+
+- 设计交付包：`/Users/titor/Downloads/glowlink-design`。产品界面只有一份
+  （`window-dark.html` / `window-light.html`：320×500 玻璃小窗，同一份 CSS 两套 token）；
+  `index.html` 是**设计图纸外壳**，不进产品；`DESIGN-HANDOFF.md` 里那套 360→1920
+  响应式矩阵**不适用**（桌面是固定尺寸窗口，不照抄 web 断点）。
+- 选型：**gpui-ce 0.2.x**（crates.io，Apache-2.0，lib 名 `gpui`）+ `gpui_ce_platform`
+  （macOS **必须**开 `font-kit` feature）。
+- 逐条核对过 gpui-ce 源码，设计要的核心能力都是内建：
+
+| 设计需求 | gpui-ce 证据 |
+|---|---|
+| 窗外玻璃 | `WindowBackgroundAppearance::{Transparent, Blurred, MicaBackdrop, MicaAltBackdrop}`（`platform.rs:2140`；macOS = NSVisualEffectView，Windows = 组合属性 / DWM） |
+| 卡片玻璃 | `backdrop_filter(vec![Filter::Blur(..)])`（`style.rs:294/399/785`） |
+| 新拟物浮雕 | `BoxShadow{..}.inset()` + `paint_inset_shadows`（`style.rs:360-392/820`） |
+| 图标 | `svg()`（`elements/svg.rs:20`；**必填 `text_color`**，源文件须 `currentColor`） |
+| 系统通知 | `show_system_notification` / `on_system_notification_response`（`app.rs:1543`；macOS 与 Windows **都有实现**） |
+| 数字不跳动 | `FontFeatures`（`text_system.rs:1093`）→ `tnum` |
+| 漂浮 / 呼吸 / 流动虚线 | `Animation::repeat()` + `with_animation` + `request_animation_frame`（`elements/animation.rs`） |
+| 拖拽文件 | `FileDropEvent` + `on_drop`（`window.rs:5122`） |
+| 视觉回归 | `Window::render_to_image()`（`window.rs:2435`）→ 导出自身 GPU 画面，**不需要屏幕录制授权** |
+
+- 不能 1:1 的部分（都小，但要知道）：**无 radial gradient**（辉光用叠同心圆 alpha 曲线）；
+  **无 `rotate`**（漂浮丢掉 CSS 的 ±1.2° 倾斜，为它自绘不值当）；玻璃是**系统材料不是数值**
+  （配不出正好 blur 40 / saturate 140%）；无 tray（外挂 `tray-icon`）；无文件对话框（`rfd`）；
+  **无圆角窗口 API**（改用标准窗口 + 隐藏标题栏，让系统给圆角与阴影，**不走无边框**）。
+- 未选 egui 的理由：固定画布 + 绝对坐标确实更适合 egui，但窗外玻璃要 raw handle hack、
+  inset 浮雕要 `Mesh` 手绘、**无 OpenType features → `tabular-nums` 做不到**，
+  而 CJK 9–11px（设计里满是）的字形质量明显弱于 GPUI 的文本栈。
+- 参考项目：`/Users/titor/orange-gui`（同框架、已跑通；其 AGENTS.md 的「认知修正」是实测知识库）。
+- **工程拆分（A 方案）**：`ipc.rs` 现在服务端与客户端混装、并依赖 CLI 的 `pending` / `state`
+  → 按「协议 vs 角色」切：新建 `glowlink-ipc`（只依赖 `glowlink-core`），
+  `glowlink-desktop` 只依赖 `glowlink-core` + `glowlink-ipc` + GPUI。
+  desktop **不引 tokio**（后台线程 + channel 回灌足够）。
+- **拆分已落地（v1.0）**：`glowlink-ipc` = `state`（整份，字节格式唯一来源）/ `row`（`DEVICES`、`PENDING` 的**数据行**，跨进程契约）/ `codec`（错误种类名与文本编解码）/ `client` / `server`（绑定、按行处理、连接循环骨架）。
+  CLI 侧只剩**守护进程自己的实现**（`IpcHost` 的落地：发现循环、待确认队列、传输）。
+  - `PendingOffer`（队列项）与 `PendingRow`（协议行）**刻意是两个类型**：内部结构变化不该默默改掉线上格式。
+  - 网络类 IO 的判定（`is_network_io`）收进 `codec`（唯一来源），CLI 的 `exit` 仅重导出：
+    两处各写一份会出现「种类叫 net、退出码却算通用」的分裂。
+  - 名字带 `state` 的测试文件因此两个 crate 都有 → `scripts/t.sh` 支持 `cli:` / `core:` / `ipc:` 前缀，同名不再猜。
+  - `glowlink-cli/src/{ipc,state}.rs` 已删除（不留重导出壳）：调用点直接引 `glowlink_ipc::…`。
+- **CI**：desktop 依赖链重（wgpu / metal），只在**发版 tag** 时编译，日常不进 CI。
+- 暂不做：CLI 侧不加 `pair` 子命令（配对能力留在 core / IPC，桌面先用起来）。
+
+### 2026-09-27 【配对流程 - v1.0】独立动作 + 定向输码（一侧显示、一侧输入）
+
+- 交互：**拖动远处节点到中心 84px 本机节点**发起配对 → 接收侧先问「是否允许配对」→
+  允许后才出 **6 格数字输入**；发起侧显示**码卡片**。成功即双方各写指纹入 `trusted.txt`。
+- **密码学零改动**：现在 `transcript = SHA-256(initiator.encode() ‖ responder.encode())`（角色顺序固定），
+  `code = HKDF(transcript)` 派生 6 位，**两端各自算出同一个码**。所以「一侧显示、一侧输入」
+  只是把「双方各比一次」换成「甲方出示、乙方本地比对 `输入 == 自己派生的码`」。
+- **安全性不降反升（MITM 论证，必须留档）**：中间人 M 把连接终结成两段时，I 与 R 派生的码**必然不同**；
+  R 要输的码只能来自 I 的屏幕（人类信道，攻击者注入不进去）或 M 自编——两者与 R 自己的码都不等 → 拒绝。
+  输入正确后 R 还会在会话密钥下再确认一次，冒名者算不出该密钥。相比旧流程，
+  这里多了一条**人类信道**的证明，且双方只动一次手。
+- **「无感」的边界**：拖动 = **发起，不是认证**。陌生设备首次**必须**走码；
+  **否决 TOFU**（首次自认信任）——那正是 Step 3 明文否决过的「伪造指纹骗过信任列表」。
+  已信任设备再拖才免码直接完成（这就是「无感」的实现点）。
+- 代价（真正的新成本在协议，不在 UI）：
+  - **无文件的配对会话**：现在握手只在 `transfer` 里触发（发文件前）。新增
+    `KIND_PAIR_REQUEST` / `KIND_PAIR_OK` / `KIND_PAIR_DENY`（只走 `SecureData` 内层，
+    **不做降级**：对端发明文当场拒绝）+ `controller/pairing.rs`
+    + IPC `PAIR` / `PAIRPENDING` / `PAIR_ACCEPT <编号> <6位码>` / `PAIR_REJECT <编号>`。
+  - **`Hello` 没有设备类型**：`Device { id, name, addr, last_seen }` 里没有 `kind`，
+    而设计稿要 4 种辉光色 + 4 个图标 → 必须给 `Hello` 末尾追加 `kind`
+    （取值：未知 / 手机 / 平板 / 台式机 / 笔记本；**读取按剩余长度容错**，旧节点读到新报文不得报错）。
+- 约束：错误码输入 **3 次作废**；超时走 `pending_timeout_secs`（默认 300s）；
+  信任只写指纹（16 位 hex，格式不符丢弃，沿用既有校验）。
+- 输入实现只吃数字键与退格：**不碰 `EntityInputHandler` / IME / UTF-16 换算**——
+  这是本案省下的最贵一块（GPUI 没有现成 `TextInput`）。
+
+### 2026-09-27 【Desktop 交互决策表 - v1.0】定案 + 待定
+
+| 项 | 定案 |
+|---|---|
+| 陌生设备首次 | **必须走码**；配对成功后 desktop 默认对已信任免确认 |
+| 配对失败态 | **文案 + 抖动**，不新增颜色（「辉光即语义、全窗无第五种彩色」是硬约束） |
+| 拖动命中区 | **中心 84px 本机节点本身**（不含外圈） |
+| 已信任节点标识 | **不特殊标记**——类型通道已被 4 色辉光占用，状态塞进去会污染语义（设计稿无此信息，**待定**） |
+| 解除配对 | v1 **不做**，只留 CLI `trust` 手改 |
+| `kind` 取值 | 未知 / 手机 / 平板 / 台式机 / 笔记本 |
+
+### 2026-09-27 【配对协议落地 - v1.0】kind 追加字段 + 配对会话 + 尝试上限
+
+- **`DeviceKind`（未知/手机/平板/台式机/笔记本）追加在 `Hello` 末尾**：写入方多写 1 字节，
+  读取方**按剩余长度判断**（`Reader::remaining()`）——老节点的报文到 `reply_port` 就结束，
+  解成「未知」而不是「报文损坏」，否则一次升级就把旧节点全挤出网络。
+  值不认识的同样归 `Unknown`：类型只是装饰，不能因为对端更新就让发现做不成。
+  两层编码分开：协议层 `as_u8`（只追加不改旧值），IPC 层 `as_token`（可读、`nc` 手调不心慌）。
+- 本机类型由 `DeviceIdentity.kind` 给出，`platform_default()` **只推断到「台式机」这一档**：
+  同一套 macOS 既可能是 MacBook 也可能是 Mac mini，不编造区分不了的事实；
+  手机/平板留给将来真在那些系统上编译的版本自己上报。
+- **`PairingSession`（`controller/pairing.rs`）**：构造即握手，所以调用方拿到会话时
+  就能显示校验码；之后分角色——发起方 `request()` + `wait()`，接收方 `recv_request()` +
+  `approve(用户输的码)`。
+  - 码的比对在 **core** 里做（`code_matches`），**常量时间**：码是认证材料，不能变成计时旁路。
+  - `approve` **先下判断再发结论**，不存在「先接受后校验」的中间态。
+  - `PairingOutcome.peer_fingerprint` 从**握手里的静态公钥**算出，不信网络上传来的字符串
+    （声称的指纹可以随便填）；对端名字不在其中——发起方本来就知道自己连的是哪台设备。
+  - `CodeAttempts` / `MAX_CODE_ATTEMPTS = 3` 放在 core：6 位码的暴力空间只有 100 万，
+    放开次数等于让人穷举；输对不扣次数。
+  - 三个配对帧（`PairRequest` / `PairOk` / `PairDeny`）**只出现在 `SecureData` 内层**，
+    明文配对请求由 `SecureTransport` 当场拒绝（有专门用例钉住）。
+- **测试证据**：`core/pairing.rs` 8 例（真实回环 TCP，0.03s——快说明不是靠超时“通过”）：
+  码符合同意 / 码不符被拒 / 显式拒绝带回原因 / 发起方记下的是**接收方**指纹 /
+  **信任由各侧本地决定**（本机信任对方 ≠ 对方信任本机，两侧分别断言）/ 3 次作废 / 输对不扣次数 /
+  **中间人转发码必失败**（I—M—R 两段真实连接：断言两段派生的码必然不同、且转发的码在接收方对不上）。
+- **真机验证**：两个守护进程（各自独立 `HOME`，同一发现端口）经 UDP 互相发现，
+  IPC `DEVICES` 行真实带上第五列：
+  `titor-z的Mac mini\ta21cfb23e10383e7\t127.0.0.1:63694\t52\tdesktop`——
+  即 `Hello.kind → DeviceBook → DeviceRow → IPC` 整条链跑通（顺带复现了顺延端仍能互通）。
+- **分流已接线（v1.0 完成）**：`detect()` 在握手后读第一帧，`PairRequest` → 配对、其余 → 传输；
+  `Preloaded` 适配器把已读到的那一帧「放回」给 `transfer`，**`transfer.rs` 一行未改**。
+  IPC 四条命令 `PAIR` / `PAIRINGS` / `PAIRPENDING` / `PAIR_ACCEPT <编号> <6位码>` / `PAIR_REJECT` 全部可用；
+  守护进程里配对状态住 `PairingHub` + `PairingQueue`（与待确认接收**分开的**一套槽位：
+  配对是双向等待、还要人输码，混进同一个队列会让「accept 到底是收文件还是收配对」没有答案）。
+- **`approve()` 的语义（真机验证后定案）**：码不符**不发任何帧、返回 false**，会话保持，用户可重输；
+  次数由 `PairingQueue::record_failure` 管（3 次用尽后调用方显式 `deny`）。
+  理由：一输错就断的话，对方得重新拖一次、重新认一个**新**的码（临时密钥每次都换），
+  隔着屏幕核对一次的代价变成两次。
+- **真机端到端（两个守护进程，同机不同 `HOME`）**：
+  A `PAIR` → `OK 001 518892`（码**立刻**返回，界面才能马上显示）；
+  B `PAIRPENDING` 看到 `waiting_user` 且 `remaining 3`；
+  B 先输错 → 仍然 `waiting_user 3`（会话未被废）；再输对 → A 侧转 `paired`、B 侧清空、两端 `trusted.txt` 各写**对方**指纹。
+- **同机双进程的设备名相同**（都是「titor-z的Mac mini」）——UI 上「拖哪台」不能只靠名字，
+  节点标签需要能补指纹短码。
 
 ## CHANGELOG
 > 这里存放项目更新历史记录
@@ -687,6 +830,25 @@
   全塞在命令行里，34 行里有 4 行是重复信息（怎么查单命令帮助、私钥位置、端口顺延），
   最宽 110 列在 80 列终端必折行。改成「命令 + 一句说明」，选项归单命令帮助后 28 行、最宽 78 列。
   自查口径：总览里**不能有**只在该命令帮助里出现的信息，也不能有上一行已经说过的话。
+
+- **GPUI-CE 的坑（自 orange-gui 实测迁移，本项目直接适用）**：
+  - **渲染期回读自己所属 entity → `abort()` 整进程**（`cannot read X while it is already being updated`），
+    且 panic 落在 Objective-C 回调边界内不能 unwind → 只能从 `~/Library/Logs/DiagnosticReports/*.ips`
+    与 `RUST_BACKTRACE=1` 的 stderr 看到。每步收尾跑
+    `grep -rn "cx.entity()\.read\|cx.entity()\.update" src/`；`cx.new()` 只能在非渲染期调。
+  - **`overflow_hidden` 裁不到圆角**（`ContentMask` 只有矩形 bounds）→ 带圆角的容器要用**内边距**避开圆角。
+  - **flex 缺 `min_w(0)` / `flex_shrink_0` 会静默崩布局**（无任何报错）：固定宽项要 `flex_shrink_0()`，
+    可压缩容器要 `min_w(0) + min_h(0) + overflow_hidden()`。
+  - **`svg()` 不继承父级 `text_color`**，漏写就静默不画；源文件硬编码色无法染色（先改 `currentColor`）。
+  - **`line-height` 默认 1.618**（黄金比），多行文本必须显式给行高。
+  - **executor 是裸 pollster、无 tokio reactor**：我们不用 tokio，但同一条坑的轻量版仍在——
+    IPC / 文件 IO / 对话框**不得在渲染或事件回调里阻塞**，一律后台线程 + channel 回灌 + `cx.notify()`。
+  - macOS **必须**开 `gpui_ce_platform` 的 `font-kit` feature，否则「窗口、布局、色块都正常，一个字都不显示」。
+  - 排查第一动作是 `RUST_LOG=info` 看 stderr——gpui 这类问题会把原因直接打日志，别先怀疑自己的样式代码。
+  - 本机 `screencapture` 未授权时**静默只返回壁纸** → 视觉验收靠 `render_to_image()` 自截 +
+    必要时请用户截图，不要指望系统截图。
+  - **按钮里图标的「墨迹」大小 ≠ 声明尺寸**：同一 `size()` 下不同图标因**图形占画布比例**不同
+    而看起来大小不一，改图标后必须实测渲染外接框（orange-gui 为此踩过两次）。
 
 ## 其他
 [why.md](./why.md) 存放的是项目的产品设计书，**冻结不改**；开发进展、决策、踩坑一律写在本文件（TAOLUN / CHANGELOG / 认知纠正）。

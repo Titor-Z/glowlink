@@ -19,7 +19,12 @@ pub use model::crypto::{
 };
 pub use model::device::{Device, DeviceBook, DeviceId};
 pub use model::error::{GlowError, Result};
-pub use model::packet::{Frame, Hello, Probe, CHUNK_SIZE, DISCOVERY_PORT, VERSION_STR};
+pub use controller::pairing::{
+    detect, CodeAttempts, Intent, PairingOutcome, PairingSession, Preloaded, MAX_CODE_ATTEMPTS,
+};
+pub use model::packet::{
+    DeviceKind, Frame, Hello, Probe, CHUNK_SIZE, DISCOVERY_PORT, VERSION_STR,
+};
 pub use model::ports::{candidate_ports, BindOutcome, DISCOVERY_PORT_SPAN};
 pub use model::probe::{
     bind_or_identify, compare_versions, decide_port, identify, PortDecision, PortOwner,

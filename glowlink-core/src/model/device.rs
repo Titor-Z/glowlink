@@ -4,7 +4,7 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use crate::model::packet::Hello;
+use crate::model::packet::{DeviceKind, Hello};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceId(String);
@@ -31,6 +31,8 @@ pub struct Device {
     pub name: String,
     pub addr: SocketAddr,
     pub last_seen: Instant,
+    /// 设备类型（界面用来选图标与辉光色）。
+    pub kind: DeviceKind,
 }
 
 impl Device {
@@ -75,6 +77,7 @@ impl DeviceBook {
                     name: hello.name.clone(),
                     addr,
                     last_seen: Instant::now(),
+                    kind: hello.kind,
                 });
                 self.devices.len() - 1
             }
@@ -83,6 +86,8 @@ impl DeviceBook {
         device.name = hello.name.clone();
         device.addr = addr;
         device.last_seen = Instant::now();
+        // 类型可能变（同一 ID 换了设备、或对端升级后开始上报）：每次都跟着刷新
+        device.kind = hello.kind;
         device
     }
 

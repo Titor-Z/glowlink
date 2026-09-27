@@ -12,9 +12,16 @@
 //! 5  被拒绝或超时（对方拒绝接收、待确认超时）
 //! ```
 
-use std::io::ErrorKind;
-
 use glowlink_core::GlowError;
+
+/// 网络类 IO 错误：连不上 / 连断了 / 超时 / 地址用不了。
+///
+/// 具体判定在 `glowlink_ipc::codec::is_network_io`（本模块只是重导出它），
+/// 这样「IPC 错误种类名」与「退出码」用的是同一套标准。
+///
+/// 不在此列的（文件不存在、权限不足、磁盘满）都算通用错误——它们跟网络无关，
+/// 混在一起会让脚本「重试三次」重试一个永远不会成功的操作。
+pub use glowlink_ipc::codec::is_network_io;
 
 pub const OK: i32 = 0;
 pub const FAILURE: i32 = 1;
@@ -41,25 +48,4 @@ pub fn code_of(error: &GlowError) -> i32 {
         // 对端（守护进程）回报的错误：种类已在 IPC 层还原，走到这里说明是它自己的问题
         | GlowError::Remote(_) => FAILURE,
     }
-}
-
-/// 网络类 IO 错误：连不上 / 连断了 / 超时 / 地址用不了。
-///
-/// 同一套标准也被 IPC 用来决定「错误种类名」，见 `ipc::error_kind`。
-///
-/// 不在此列的（文件不存在、权限不足、磁盘满）都算通用错误——它们跟网络无关，
-/// 混在一起会让脚本「重试三次」重试一个永远不会成功的操作。
-pub fn is_network_io(kind: ErrorKind) -> bool {
-    matches!(
-        kind,
-        ErrorKind::ConnectionRefused
-            | ErrorKind::ConnectionReset
-            | ErrorKind::ConnectionAborted
-            | ErrorKind::NotConnected
-            | ErrorKind::TimedOut
-            | ErrorKind::BrokenPipe
-            | ErrorKind::NetworkUnreachable
-            | ErrorKind::HostUnreachable
-            | ErrorKind::AddrNotAvailable
-    )
 }

@@ -15,10 +15,15 @@ use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_a
 use glowlink_cli::config;
 use glowlink_cli::daemon;
 use glowlink_cli::exit;
-use glowlink_cli::ipc::{self, IpcHost};
+use glowlink_ipc::client::IpcClient;
+use glowlink_ipc::codec;
+use glowlink_ipc::row::{DeviceRow, PairingRow, PendingRow};
+use glowlink_ipc::server::{self as ipc_server, IpcHost};
+use glowlink_ipc::state;
 use glowlink_cli::keys::{install_device_id, load_or_create_identity, TrustFile};
-use glowlink_cli::pending::{PendingOffer, PendingQueue};
-use glowlink_cli::state::{self, State};
+use glowlink_cli::pairing::PairingHub;
+use glowlink_cli::pending::PendingQueue;
+use glowlink_ipc::state::State;
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::view::tui::{self, Header, TuiAction};
 use glowlink_cli::view::daemon as daemon_view;
@@ -32,7 +37,8 @@ use glowlink_core::patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };
 use glowlink_core::{
-    Config, DeviceIdentity, DiscoveryController, GlowError, Result, TransferController,
+    detect, Config, DeviceIdentity, DiscoveryController, GlowError, Intent, PairingSession,
+    Preloaded, Result, TransferController,
 };
 
 fn main() {
@@ -143,11 +149,11 @@ fn print_notice(line: &str) {
 ///
 /// 查不到就返回 `None`：状态面板与交互界面都不该因为这一项而失败。
 fn daemon_pending(state: &state::State) -> Option<usize> {
-    ipc::IpcClient::connect(state)
+    IpcClient::connect(state)
         .ok()
         .and_then(|mut client| client.call_first("STATUS").ok())
         .and_then(|line| {
-            ipc::ok_payload(&line)
+            codec::ok_payload(&line)
                 .split(' ')
                 .nth(1)
                 .and_then(|n| n.parse::<usize>().ok())
@@ -235,7 +241,7 @@ fn spawn_snapshot_source(
 
 /// 从后台服务取一份完整快照（设备 + 待确认）；取不到返回 `None`（保留上一份）。
 fn daemon_snapshot(state: &State) -> Option<tui::Snapshot> {
-    let mut client = ipc::IpcClient::connect(state).ok()?;
+    let mut client = IpcClient::connect(state).ok()?;
     let devices = ipc_devices(&client.call("DEVICES").ok()?);
     let pending = client
         .call("PENDING")
@@ -244,14 +250,14 @@ fn daemon_snapshot(state: &State) -> Option<tui::Snapshot> {
             lines
                 .iter()
                 .skip(1)
-                .filter_map(|line| ipc::parse_pending_line(line))
-                .map(|(token, peer, name, size, fingerprint, code)| tui::PendingItem {
-                    token,
-                    peer,
-                    name,
-                    size,
-                    fingerprint,
-                    code,
+                .filter_map(|line| PendingRow::from_line(line))
+                .map(|row| tui::PendingItem {
+                    token: row.token,
+                    peer: row.peer,
+                    name: row.name,
+                    size: row.size,
+                    fingerprint: row.fingerprint,
+                    code: row.code,
                 })
                 .collect()
         })
@@ -291,13 +297,13 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
         let Some(state) = daemon_state.as_ref() else {
             return Err("需要后台服务才能接受/拒绝（先跑 glowlink on）".to_string());
         };
-        let mut client = ipc::IpcClient::connect(state).map_err(|e| e.to_string())?;
+        let mut client = IpcClient::connect(state).map_err(|e| e.to_string())?;
         let lines = client
             .call(&format!("{verb} {token}"))
             .map_err(|e| e.to_string())?;
         Ok(lines
             .first()
-            .map(|line| ipc::ok_payload(line).to_string())
+            .map(|line| codec::ok_payload(line).to_string())
             .unwrap_or_default())
     };
     match tui::run(snapshot, header, decisions_allowed, decide)? {
@@ -421,7 +427,7 @@ fn list_via_daemon(state: &State, timeout: Duration, watch: bool) -> Result<()> 
         state.receive_dir.display()
     ));
 
-    let mut client = ipc::IpcClient::connect(state)?;
+    let mut client = IpcClient::connect(state)?;
     if !watch {
         let devices = ipc_devices(&client.call("DEVICES")?);
         print_devices(&devices, timeout);
@@ -455,44 +461,44 @@ fn ipc_devices(lines: &[String]) -> Vec<glowlink_core::Device> {
     lines
         .iter()
         .skip(1)
-        .filter_map(|line| ipc::parse_device_line(line))
-        .map(|(name, id, addr, age_ms)| glowlink_core::Device {
-            id: glowlink_core::DeviceId::new(id),
-            name,
-            addr,
-            // 用“现在减去已存活时长”还原最近出现时刻，复用同一套表格渲染
-            last_seen: Instant::now() - Duration::from_millis(age_ms as u64),
-        })
+        .filter_map(|line| DeviceRow::from_line(line))
+        // 存活时长→最近出现时刻的换算在 DeviceRow 里，两处各写一份就会漂
+        .map(|row| row.to_device())
         .collect()
 }
 
 /// 有待确认的接收请求时逐条列出（守护进程不会自己弹窗）。
-fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
+fn print_pending(client: &mut IpcClient) -> Result<()> {
     let lines = client.call("PENDING")?;
     let count = lines
         .first()
-        .map(|line| ipc::ok_payload(line).parse::<usize>().unwrap_or(0))
+        .map(|line| codec::ok_payload(line).parse::<usize>().unwrap_or(0))
         .unwrap_or(0);
     if count == 0 {
         return Ok(());
     }
     println!();
     for line in lines.iter().skip(1) {
-        let Some((token, peer, name, size, fingerprint, code)) = ipc::parse_pending_line(line)
+        let Some(row) = PendingRow::from_line(line)
         else {
             continue;
         };
         let trust_hint =
-            daemon_view::pending_hint(&fingerprint, &code, daemon_trusts(&fingerprint));
+            daemon_view::pending_hint(&row.fingerprint, &row.code, daemon_trusts(&row.fingerprint));
         println!(
-            "[等待确认 {}] {peer} 想发来「{name}」（{}）",
-            style().strong(&format!("#{token}")),
-            human_size(size)
+            "[等待确认 {}] {peer} 想发来「{name}」（{size}）",
+            style().strong(&format!("#{}", row.token)),
+            peer = row.peer,
+            name = row.name,
+            size = human_size(row.size),
         );
         if !trust_hint.is_empty() {
             println!("             {trust_hint}");
         }
-        println!("             确认：glowlink accept {token} / glowlink reject {token}");
+        println!(
+            "             确认：glowlink accept {token} / glowlink reject {token}",
+            token = row.token
+        );
     }
     Ok(())
 }
@@ -728,8 +734,8 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
             let peer_key = peer_key.expect("非直连模式必有设备名");
             // 守护进程在跑就直接向它要地址：省一轮扫描，也不和它抢发现端口。
             if let Some(state) = daemon::running_state() {
-                let mut client = ipc::IpcClient::connect(&state)?;
-                let (name, id, addr) = ipc::parse_resolve(&client.call_first(&format!("RESOLVE {peer_key}"))?)?;
+                let mut client = IpcClient::connect(&state)?;
+                let (name, id, addr) = codec::parse_resolve(&client.call_first(&format!("RESOLVE {peer_key}"))?)?;
                 println!("目标：{}（{}）@ {}", name, truncate(&id, 8), addr);
                 addr
             } else {
@@ -823,7 +829,7 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
     // 残留状态文件先清掉，免得客户端读到不存在的 IPC 端口。
     state::remove_state()?;
 
-    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
+    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc_server::IPC_PORT);
     let mut child_args = vec![daemon::DAEMON_COMMAND.to_string()];
     if auto_accept {
         child_args.push("--yes".to_string());
@@ -880,7 +886,7 @@ fn cmd_off(_config: &Config, _args: &[String]) -> Result<()> {
         return Ok(());
     };
 
-    let stopping = match ipc::IpcClient::connect(&state) {
+    let stopping = match IpcClient::connect(&state) {
         Ok(mut client) => client.call("STOP").is_ok(),
         Err(_) => false,
     };
@@ -993,9 +999,9 @@ fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
         (None, true) => "ACCEPT".to_string(),
         (None, false) => "REJECT".to_string(),
     };
-    let mut client = ipc::IpcClient::connect(&state)?;
+    let mut client = IpcClient::connect(&state)?;
     let line = client.call_first(&command)?;
-    println!("{}", ipc::ok_payload(&line));
+    println!("{}", codec::ok_payload(&line));
     Ok(())
 }
 
@@ -1008,6 +1014,8 @@ struct DaemonShared {
     state: Mutex<State>,
     devices: Mutex<Vec<glowlink_core::Device>>,
     pending: Arc<PendingQueue>,
+    /// 配对：两个方向的槽位表 + 两条流程都住在这里。
+    pairing: Arc<PairingHub>,
     /// 是否对**已信任**设备免确认自动接收（`on --yes`）。
     auto_accept: bool,
     stop: AtomicBool,
@@ -1031,8 +1039,8 @@ impl IpcHost for DaemonShared {
             .cloned()
     }
 
-    fn pending(&self) -> Vec<(String, PendingOffer)> {
-        self.pending.list()
+    fn pending(&self) -> Vec<PendingRow> {
+        self.pending.rows()
     }
 
     fn decide(&self, token: Option<&str>, accept: bool) -> Result<String> {
@@ -1041,6 +1049,24 @@ impl IpcHost for DaemonShared {
 
     fn request_stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+    }
+
+    fn pair(&self, key: &str) -> Result<(String, String)> {
+        // 先按名称/ID 找到它——配对必须先知道连谁（发现层是唯一的地址来源）
+        let device = self.find(key).ok_or_else(|| GlowError::NotFound(key.to_string()))?;
+        self.pairing.start(&device)
+    }
+
+    fn pairings(&self) -> Vec<PairingRow> {
+        self.pairing.queue().outgoing_rows()
+    }
+
+    fn pair_pending(&self) -> Vec<PairingRow> {
+        self.pairing.queue().pending_rows()
+    }
+
+    fn pair_decide(&self, token: &str, code: Option<String>) -> Result<String> {
+        self.pairing.queue().decide(token, code)
     }
 }
 
@@ -1053,7 +1079,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         None => config.transfer_port,
     };
     let discovery_port = discovery_port(config, args)?;
-    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc::IPC_PORT);
+    let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc_server::IPC_PORT);
     let auto_accept = has_flag(args, "--yes");
     let dir = match flag_value(args, "--dir") {
         Some(value) => PathBuf::from(value),
@@ -1064,6 +1090,11 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     // 长期身份与信任列表：守护进程全程复用同一份
     let identity_key = load_or_create_identity()?;
     let trust = TrustFile::open_default()?;
+    let pairing = PairingHub::new(
+        Arc::clone(&identity_key),
+        Arc::clone(&trust),
+        Duration::from_secs(config.pending_timeout_secs),
+    );
 
     let factory = NativeTransportFactory;
     let listener = factory.listen(port)?;
@@ -1084,7 +1115,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         device_timeout(config),
         query_interval(config),
     );
-    let (ipc_listener, ipc_port) = ipc::bind_ipc(ipc_port)?;
+    let (ipc_listener, ipc_port) = ipc_server::bind_ipc(ipc_port)?;
 
     let state = State {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1116,6 +1147,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         state: Mutex::new(state),
         devices: Mutex::new(Vec::new()),
         pending: Arc::new(PendingQueue::new()),
+        pairing,
         auto_accept,
         stop: AtomicBool::new(false),
     });
@@ -1126,7 +1158,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         std::thread::spawn(move || {
             for stream in ipc_listener.incoming() {
                 match stream {
-                    Ok(stream) => ipc::serve_connection(shared.as_ref(), stream),
+                    Ok(stream) => ipc_server::serve_connection(shared.as_ref(), stream),
                     Err(e) => {
                         state::append_log(&format!("IPC 连接失败：{e}"));
                         continue;
@@ -1152,6 +1184,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         let identity_key = Arc::clone(&identity_key);
         let auto_accept = shared.auto_accept;
         let pending = Arc::clone(&shared.pending);
+        let pairing = Arc::clone(&shared.pairing);
         let config_pending_timeout = config.pending_timeout_secs;
         std::thread::spawn(move || loop {
             match listener.accept() {
@@ -1162,6 +1195,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                     let identity_key = Arc::clone(&identity_key);
                     let dir = dir.clone();
                     let pending = Arc::clone(&pending);
+                    let pairing = Arc::clone(&pairing);
                     std::thread::spawn(move || {
                         // 每个连接各自握手，会话信息（指纹 + 校验码）交给本连接的视图
                         let session: SessionSlot = session_slot();
@@ -1171,6 +1205,26 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                             Arc::clone(&trust) as Arc<dyn TrustList>,
                             Arc::clone(&session),
                         );
+                        // 配对与传输**共用同一个端口**：握手后的第一帧决定这次连接干什么
+                        let (intent, first) = match detect(&mut secure) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                state::append_log(&format!("握手失败：{e}"));
+                                return;
+                            }
+                        };
+                        if let Intent::Pair { name } = intent {
+                            match PairingSession::over(secure) {
+                                Ok(session) => {
+                                    if let Err(e) = pairing.handle_incoming(session, name) {
+                                        state::append_log(&format!("配对处理失败：{e}"));
+                                    }
+                                }
+                                Err(e) => state::append_log(&format!("配对会话建立失败：{e}")),
+                            }
+                            return;
+                        }
+                        // 传输：把已读到的那一帧放回去，transfer 那边看不出差别
                         let transfer = TransferController::new(chunk_size, ring_capacity);
                         let view = DaemonView::new(
                             pending,
@@ -1180,7 +1234,8 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                             auto_accept,
                         );
                         let label = peer.ip().to_string();
-                        match transfer.receive_file(&mut secure, &dir, &label, &view) {
+                        let mut stream = Preloaded::new(secure, first);
+                        match transfer.receive_file(&mut stream, &dir, &label, &view) {
                             Ok(path) => state::append_log(&format!("已接收：{}", path.display())),
                             Err(e) => state::append_log(&format!("接收失败：{e}")),
                         }

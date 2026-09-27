@@ -18,7 +18,7 @@ use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::patterns::secure::TrustList;
 use glowlink_core::Identity;
 
-use crate::state::state_dir;
+use glowlink_ipc::state::state_dir;
 
 /// 身份密钥文件名。
 const IDENTITY_FILE: &str = "identity.txt";

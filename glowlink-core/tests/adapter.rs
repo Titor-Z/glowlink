@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use glowlink_core::controller::discovery::{DiscoveryEvent, DiscoveryTransport};
 use glowlink_core::controller::transfer::{TransferController, TransferListener, TransferView};
 use glowlink_core::model::packet::{Frame, Hello, MAX_FRAME};
+use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::model::probe::{PortDecision, PortOwner};
 use glowlink_core::patterns::adapter::{
     reply_target, TcpListenerAdapter, TcpTransportAdapter, UdpDiscoveryAdapter,
@@ -39,7 +40,13 @@ fn free_udp_port() -> u16 {
 }
 
 fn hello() -> Hello {
-    Hello { id: "peer-1".into(), name: "书房 PC".into(), port: 4000, reply_port: 9267 }
+    Hello {
+        id: "peer-1".into(),
+        name: "书房 PC".into(),
+        port: 4000,
+        reply_port: 9267,
+        kind: DeviceKind::Desktop,
+    }
 }
 
 #[test]
@@ -96,12 +103,24 @@ fn receives_query_and_replies_unicast() {
     assert_eq!(from.ip().to_string(), "127.0.0.1");
 
     // 单播应答回到查询来源地址。
-    adapter.reply(&Hello { id: "self".into(), name: "本机".into(), port: 51234, reply_port: 9267 }, *from).unwrap();
+    adapter.reply(&Hello {
+            id: "self".into(),
+            name: "本机".into(),
+            port: 51234,
+            reply_port: 9267,
+            kind: DeviceKind::Laptop,
+        }, *from).unwrap();
     let mut buf = vec![0u8; 1024];
     let (len, _) = querier.recv_from(&mut buf).unwrap();
     assert_eq!(
         Frame::decode(&buf[..len]).unwrap(),
-        Frame::Hello(Hello { id: "self".into(), name: "本机".into(), port: 51234, reply_port: 9267 })
+        Frame::Hello(Hello {
+            id: "self".into(),
+            name: "本机".into(),
+            port: 51234,
+            reply_port: 9267,
+            kind: DeviceKind::Laptop,
+        })
     );
 }
 

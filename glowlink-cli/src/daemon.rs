@@ -1,14 +1,13 @@
 //! 守护进程的平台层：分离进程、终止、以及「守护进程是否在跑」的判定。
 //!
-//! 状态文件（`state.rs`）与 IPC 协议（`ipc.rs`）刻意分开，这里只放与
-//! 具体操作系统打交道的东西；Step 3 的加密要插在 IPC 身份验证处，
-//! 放在 `ipc.rs` 里即可，不必动本文件。
+//! IPC 协议与状态文件在 `glowlink-ipc` 里（CLI 与桌面版共用），
+//! 这里只放与具体操作系统打交道的东西。
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use crate::ipc::IpcClient;
-use crate::state::{open_log, read_state, State};
+use glowlink_ipc::client::IpcClient;
+use glowlink_ipc::state::{open_log, read_state, State};
 use glowlink_core::model::error::Result;
 
 /// 内部子命令名：由 `glowlink on` 拉起的守护进程本体，不面向用户。

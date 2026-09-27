@@ -42,6 +42,83 @@ const KIND_SECURE_PROOF: u8 = 11;
 /// 加密数据：载荷是内层帧的 AEAD 密文，接收方解密后再解析内层帧。
 const KIND_SECURE_DATA: u8 = 12;
 
+/// 配对请求（发起方 → 接收方）：只在 `SecureData` 内层出现。
+/// 三个配对帧都不参与「发现」，只有真的握完手才能发。
+const KIND_PAIR_REQUEST: u8 = 13;
+/// 配对同意：不带载荷——双方的指纹各自从握手里的静态公钥算，不经网络声称。
+const KIND_PAIR_OK: u8 = 14;
+/// 配对拒绝：带一句原因。
+const KIND_PAIR_DENY: u8 = 15;
+
+/// 设备类型：**只用于让界面把节点画成该有的样子**（图标 + 辉光色），
+/// 不参与任何安全判断——类型是对方自报的，冒充它没有任何收益。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DeviceKind {
+    /// 对方没报类型（老版本节点），或报了个我们不认识的值。
+    #[default]
+    Unknown,
+    Phone,
+    Tablet,
+    Desktop,
+    Laptop,
+}
+
+impl DeviceKind {
+    /// 线上编码：**只追加不改旧值**，否则旧节点会把新报文解成另一个类型。
+    pub fn as_u8(self) -> u8 {
+        match self {
+            DeviceKind::Unknown => 0,
+            DeviceKind::Phone => 1,
+            DeviceKind::Tablet => 2,
+            DeviceKind::Desktop => 3,
+            DeviceKind::Laptop => 4,
+        }
+    }
+
+    /// 不认识的取值一律当 [`DeviceKind::Unknown`]，**不报错**：
+    /// 类型只是装饰，不能因为对端是个更新的版本就连发现都做不成。
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => DeviceKind::Phone,
+            2 => DeviceKind::Tablet,
+            3 => DeviceKind::Desktop,
+            4 => DeviceKind::Laptop,
+            _ => DeviceKind::Unknown,
+        }
+    }
+
+    /// IPC 行里的名字（可读、手改不心慌；与 `as_u8` 各管一层，不互相转换）。
+    pub fn as_token(self) -> &'static str {
+        match self {
+            DeviceKind::Unknown => "unknown",
+            DeviceKind::Phone => "phone",
+            DeviceKind::Tablet => "tablet",
+            DeviceKind::Desktop => "desktop",
+            DeviceKind::Laptop => "laptop",
+        }
+    }
+
+    /// 不认识的名字同样归 `Unknown`（前向容错）。
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "phone" => DeviceKind::Phone,
+            "tablet" => DeviceKind::Tablet,
+            "desktop" => DeviceKind::Desktop,
+            "laptop" => DeviceKind::Laptop,
+            _ => DeviceKind::Unknown,
+        }
+    }
+
+    /// 本机自己的类型。
+    ///
+    /// 只能从系统推断到「桌面/笔记本」这一档——同一套 macOS 既可能是 MacBook
+    /// 也可能是 Mac mini，不编造区分不了的事实；手机/平板留给将来真在那些系统上
+    /// 编译的版本自己去报。
+    pub fn platform_default() -> Self {
+        DeviceKind::Desktop
+    }
+}
+
 /// 设备广播报文。
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]
@@ -52,6 +129,8 @@ pub struct Hello {
     pub port: u16,
     /// 该节点接收发现报文的 UDP 端口；为 0 表示它只发查询（降级模式）。
     pub reply_port: u16,
+    /// 设备类型（界面用）。**末尾追加的字段**：旧节点读到这就是报文结束。
+    pub kind: DeviceKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,6 +156,14 @@ pub enum Frame {
     SecureProof([u8; 32]),
     /// 加密数据帧：内层帧的密文。
     SecureData(Vec<u8>),
+    /// 配对请求（发起方 → 接收方）。**只在 `SecureData` 内层出现**：
+    /// 明文配对请求一律拒绝，否则等于给中间人一条不经加密的入口。
+    PairRequest { name: String },
+    /// 配对同意。不带指纹：双方的指纹都从握手里的静态公钥自己算出来，
+    /// 不经网络「声称」——声称的指纹可以随便填。
+    PairOk,
+    /// 配对拒绝：带一句原因（超时/用户拒绝/校验码不符）。
+    PairDeny { reason: String },
 }
 
 /// 端口自检握手载荷。
@@ -104,17 +191,11 @@ impl Frame {
         match self {
             Frame::Query(h) => {
                 w.u8(KIND_QUERY);
-                w.str(&h.id)?;
-                w.str(&h.name)?;
-                w.u16(h.port);
-                w.u16(h.reply_port);
+                w.hello(h)?;
             }
             Frame::Hello(h) => {
                 w.u8(KIND_HELLO);
-                w.str(&h.id)?;
-                w.str(&h.name)?;
-                w.u16(h.port);
-                w.u16(h.reply_port);
+                w.hello(h)?;
             }
             Frame::Offer { name, size } => {
                 w.u8(KIND_OFFER);
@@ -160,6 +241,15 @@ impl Frame {
                 w.u32(payload.len() as u32);
                 w.raw(payload);
             }
+            Frame::PairRequest { name } => {
+                w.u8(KIND_PAIR_REQUEST);
+                w.str(name)?;
+            }
+            Frame::PairOk => w.u8(KIND_PAIR_OK),
+            Frame::PairDeny { reason } => {
+                w.u8(KIND_PAIR_DENY);
+                w.str(reason)?;
+            }
         }
         Ok(w.buf)
     }
@@ -181,6 +271,13 @@ impl Frame {
                     name: r.str()?,
                     port: r.u16()?,
                     reply_port: r.u16()?,
+                    // 末尾追加字段：老节点的报文到这里就结束了，按「未知」处理——
+                    // 不能因为多要一个字节就把整条报文判成损坏
+                    kind: if r.remaining() >= 1 {
+                        DeviceKind::from_u8(r.u8()?)
+                    } else {
+                        DeviceKind::Unknown
+                    },
                 };
                 if kind == KIND_QUERY {
                     Frame::Query(hello)
@@ -232,6 +329,9 @@ impl Frame {
                 }
                 Frame::SecureData(r.raw(len)?.to_vec())
             }
+            KIND_PAIR_REQUEST => Frame::PairRequest { name: r.str()? },
+            KIND_PAIR_OK => Frame::PairOk,
+            KIND_PAIR_DENY => Frame::PairDeny { reason: r.str()? },
             other => return Err(GlowError::Protocol(format!("未知帧类型：{other}"))),
         };
         Ok(frame)
@@ -306,6 +406,17 @@ impl Writer {
         self.u16(p.reply_port);
         Ok(())
     }
+
+    /// 两种报文（Query / Hello）共用同一段字段，故共用同一套编解码。
+    fn hello(&mut self, h: &Hello) -> Result<()> {
+        self.str(&h.id)?;
+        self.str(&h.name)?;
+        self.u16(h.port);
+        self.u16(h.reply_port);
+        // 类型放最后：老节点读到这里已经收工，新节点读老报文时按剩余长度判断
+        self.u8(h.kind.as_u8());
+        Ok(())
+    }
 }
 
 struct Reader<'a> {
@@ -326,6 +437,11 @@ impl<'a> Reader<'a> {
         let slice = &self.buf[self.pos..end];
         self.pos = end;
         Ok(slice)
+    }
+
+    /// 还剩多少字节。用于「末尾追加字段」的前向兼容：老格式读到这里就是 0。
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
     }
 
     fn u8(&mut self) -> Result<u8> {

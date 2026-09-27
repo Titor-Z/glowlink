@@ -5,11 +5,15 @@
 #   ./scripts/t.sh <测试文件名> [过滤词…]
 #
 # 例：
-#   ./scripts/t.sh ipc                      跑 tests/ipc.rs 里的全部用例
+#   ./scripts/t.sh ipc                      跑 glowlink-ipc/tests/ipc.rs 里的全部用例
 #   ./scripts/t.sh ipc pending_returns      只跑名字含 pending_returns 的用例
 #   ./scripts/t.sh ipc --list               只列用例名，不执行
 #   ./scripts/t.sh ipc --exact ping_reports_version_pid_and_ports
 #   ./scripts/t.sh transfer                 自动识别属于哪个 crate
+#
+# 注意 desktop：它拖进 wgpu / metal，**首次编译是分钟级**（不是秒级），
+# 且 `cargo test -p glowlink-desktop` 会连带编译 GPUI 全套。改 desktop 代码时
+# 一次编译完再跑，别反复单文件跑。
 #
 # 为什么不用 `cargo test --workspace`：那会编译并链接**所有**测试目标，
 # 在低配机器上很重。这里只编译指定的那一个目标，之后直接执行二进制，
@@ -23,32 +27,44 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
-# 支持 `cli:xxx` / `core:xxx` 显式指定 crate：
-# `config`、`transfer` 这类名字两个 crate 里都有，故意不猜。
+# 支持 `cli:xxx` / `core:xxx` / `ipc:xxx` / `desktop:xxx` 显式指定 crate：
+# `config`、`transfer`、`state` 这类名字两个以上 crate 里都有，故意不猜。
 spec="$1"
 shift
 case "${spec}" in
   cli:*)  target="${spec#cli:}";  package=glowlink-cli ;;
   core:*) target="${spec#core:}"; package=glowlink-core ;;
+  ipc:*)  target="${spec#ipc:}";  package=glowlink-ipc ;;
+  desktop:*) target="${spec#desktop:}"; package=glowlink-desktop ;;
   *:*)
-    echo "未知的 crate 前缀：${spec%%:*}（只支持 cli: / core:）" >&2
+    echo "未知的 crate 前缀：${spec%%:*}（只支持 cli: / core: / ipc: / desktop:）" >&2
     exit 1
     ;;
   *)
     target="${spec}"
-    if [ -f "glowlink-cli/tests/${target}.rs" ] && [ -f "glowlink-core/tests/${target}.rs" ]; then
-      echo "「${target}」在 glowlink-cli 与 glowlink-core 里都有，请显式指定：" >&2
-      echo "  ./scripts/t.sh cli:${target}   或   ./scripts/t.sh core:${target}" >&2
+    # 按目录数一数这个名字中了几处：中两处就必须显式指定，不替用户猜
+    matches=()
+    for pkg in glowlink-cli glowlink-core glowlink-ipc glowlink-desktop; do
+      [ -f "${pkg}/tests/${target}.rs" ] && matches+=("${pkg}")
+    done
+    if [ ${#matches[@]} -gt 1 ]; then
+      echo "「${target}」在 ${matches[*]} 里都有，请显式指定：" >&2
+      for pkg in "${matches[@]}"; do
+        case "${pkg}" in
+          glowlink-cli) echo "  ./scripts/t.sh cli:${target}" >&2 ;;
+          glowlink-core) echo "  ./scripts/t.sh core:${target}" >&2 ;;
+          glowlink-ipc) echo "  ./scripts/t.sh ipc:${target}" >&2 ;;
+          glowlink-desktop) echo "  ./scripts/t.sh desktop:${target}" >&2 ;;
+        esac
+      done
       exit 1
     fi
-    if [ -f "glowlink-cli/tests/${target}.rs" ]; then
-      package=glowlink-cli
-    elif [ -f "glowlink-core/tests/${target}.rs" ]; then
-      package=glowlink-core
+    if [ ${#matches[@]} -eq 1 ]; then
+      package="${matches[0]}"
     else
-      echo "找不到测试文件：glowlink-cli/tests/${target}.rs 或 glowlink-core/tests/${target}.rs" >&2
+      echo "找不到测试文件：${target}.rs（在 cli / core / ipc / desktop 的 tests/ 里都没找到）" >&2
       echo "现有测试文件：" >&2
-      ls glowlink-cli/tests/*.rs glowlink-core/tests/*.rs 2>/dev/null \
+      ls glowlink-cli/tests/*.rs glowlink-core/tests/*.rs glowlink-ipc/tests/*.rs glowlink-desktop/tests/*.rs 2>/dev/null \
         | sed 's#.*/tests/##; s/\.rs$//; s/^/  /' >&2
       exit 1
     fi

@@ -3,7 +3,7 @@
 use std::env;
 use std::sync::{Mutex, MutexGuard};
 
-use glowlink_cli::state::{remove_state, state_path, write_state, State};
+use glowlink_ipc::state::{remove_state, state_path, write_state, State};
 
 /// 这些用例改的是**进程级**环境变量 `HOME`，而测试默认并行跑：
 /// 不串行化就会互相把 HOME 改到别的目录，写出「写 A 读 B」的假故障。
@@ -95,10 +95,10 @@ fn remove_state_is_ok_when_missing_and_then_effective() {
 #[test]
 fn paths_live_under_dot_glowlink() {
     let _guard = isolate_home("paths");
-    let dir = glowlink_cli::state::state_dir();
+    let dir = glowlink_ipc::state::state_dir();
     assert!(dir.ends_with(".glowlink"), "实际：{}", dir.display());
-    assert_eq!(glowlink_cli::state::state_path(), dir.join("state.json"));
-    assert_eq!(glowlink_cli::state::log_path(), dir.join("daemon.log"));
+    assert_eq!(glowlink_ipc::state::state_path(), dir.join("state.json"));
+    assert_eq!(glowlink_ipc::state::log_path(), dir.join("daemon.log"));
 }
 
 /// 重复消息必须被抑制，但**第一条一定要写下去**（信息不能丢）。
@@ -106,7 +106,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn repeated_log_lines_are_suppressed_after_the_first() {
-    use glowlink_cli::state::{RepeatFilter, LOG_MAX_BYTES};
+    use glowlink_ipc::state::{RepeatFilter, LOG_MAX_BYTES};
     let _ = LOG_MAX_BYTES;
     let mut filter = RepeatFilter::default();
     let start = Instant::now();

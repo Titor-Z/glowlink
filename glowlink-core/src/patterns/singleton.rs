@@ -4,15 +4,23 @@ use std::process::Command;
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::model::packet::DeviceKind;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceIdentity {
     pub id: String,
     pub name: String,
+    /// 本机设备类型（由平台推断，见 [`DeviceKind::platform_default`]）。
+    pub kind: DeviceKind,
 }
 
 impl DeviceIdentity {
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
-        DeviceIdentity { id: id.into(), name: name.into() }
+        DeviceIdentity {
+            id: id.into(),
+            name: name.into(),
+            kind: DeviceKind::platform_default(),
+        }
     }
 
     /// 全局唯一实例。

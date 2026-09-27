@@ -149,6 +149,7 @@ impl DiscoveryController {
             name: self.identity.name.clone(),
             port: self.port,
             reply_port: self.transport.local_port().unwrap_or(0),
+            kind: self.identity.kind,
         }
     }
 }

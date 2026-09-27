@@ -1,0 +1,38 @@
+[package]
+name = "glowlink-desktop"
+version.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "glowlink-desktop"
+path = "src/main.rs"
+
+[lib]
+name = "glowlink_desktop"
+path = "src/lib.rs"
+
+[dependencies]
+glowlink-core = { path = "../glowlink-core" }
+glowlink-ipc = { path = "../glowlink-ipc" }
+
+# —— UI 层：只允许出现在这个 crate 里 ——
+# macOS 必须开 font-kit，否则窗口、布局、色块都正常，但一个字都不显示
+gpui-ce = "0.2.2"
+gpui_ce_platform = { version = "0.1.0", features = ["font-kit"] }
+
+# GPUI 的问题（字体/渲染）会把原因直接打进日志，所以必须真装一个 logger：
+# 没有它 `RUST_LOG=info` 是空转，"先看 stderr" 这条排查规则就落不了地。
+env_logger = "0.11"
+
+# —— 自绘窗口控制：把 macOS 的系统红绿灯真正藏掉 ——
+# gpui-ce 的 `TitlebarOptions` 只能挪位置（`traffic_light_position`），没有 hidden 开关，
+# 所以只能自己调 AppKit。版本跟 `gpui_ce_macos` 对齐，避免 objc2 在两处各一份。
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSWindow",
+    "NSView",
+    "NSButton",
+    "NSControl",
+] }

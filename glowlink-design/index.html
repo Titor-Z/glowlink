@@ -1,0 +1,1815 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>萤光 GlowLink · 320×500 小窗设计图</title>
+    <link rel="stylesheet" href="css/glowlink.css" />
+    <style>
+      /* ============================================================
+         图纸外壳（Sheet chrome）
+         画板本体复用 css/glowlink.css 的 320×500 窗体样式，
+         保证「设计图」与 window-dark / window-light 交互原型像素一致。
+         ============================================================ */
+      :root {
+        --z: 1;
+        --sheet: #08090d;
+        --panel: #0e1017;
+        --line: rgba(255, 255, 255, 0.09);
+        --line-soft: rgba(255, 255, 255, 0.05);
+        --fg: rgba(255, 255, 255, 0.88);
+        --dim: rgba(255, 255, 255, 0.46);
+        --mute: rgba(255, 255, 255, 0.28);
+        --g-self: #7c8cff;
+        --g-phone: #00d2d3;
+        --g-tablet: #a29bfe;
+        --g-desktop: #fd79a8;
+        --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+      }
+      html,
+      body {
+        height: auto;
+      }
+      body {
+        background: var(--sheet);
+        color: var(--fg);
+        font-family: "SF Pro Text", -apple-system, BlinkMacSystemFont,
+          "PingFang SC", "Helvetica Neue", sans-serif;
+        font-size: 13px;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        overflow-x: hidden;
+      }
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background-image: radial-gradient(
+          rgba(255, 255, 255, 0.055) 1px,
+          transparent 1px
+        );
+        background-size: 24px 24px;
+        mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.5), transparent 70%);
+      }
+      main,
+      header {
+        position: relative;
+        z-index: 1;
+      }
+      .wrap {
+        width: min(1360px, 100% - 48px);
+        margin: 0 auto;
+      }
+      .mono {
+        font-family: var(--font-mono);
+        font-variant-numeric: tabular-nums;
+      }
+      .kicker {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--mute);
+      }
+
+      /* ---------- 页头 ---------- */
+      .head {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: rgba(8, 9, 13, 0.86);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border-bottom: 1px solid var(--line);
+      }
+      .head__in {
+        display: flex;
+        align-items: center;
+        gap: 20px;
+        padding: 14px 0;
+      }
+      .head__mark {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 0 0 auto;
+      }
+      .head__dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--g-self);
+        box-shadow: 0 0 8px var(--g-self);
+      }
+      .head__name {
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .head__sub {
+        font-size: 11px;
+        color: var(--dim);
+      }
+      .head__chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .chip {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        color: var(--dim);
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 3px 9px;
+        white-space: nowrap;
+      }
+      .chip b {
+        color: var(--fg);
+        font-weight: 500;
+      }
+      .head__tools {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: 0 0 auto;
+      }
+      /* 分区跳转：6 段图纸里 03 标注是复刻 Figma 时最先用到的，
+         给它一个视觉重音，其余保持同权。 */
+      .head__jump {
+        display: flex;
+        align-items: center;
+        gap: 2px;
+        margin-left: auto;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      .head__jump a {
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        letter-spacing: 0.02em;
+        color: var(--mute);
+        text-decoration: none;
+        padding: 4px 8px;
+        border-radius: 5px;
+        white-space: nowrap;
+        transition: color 0.15s, background 0.15s;
+      }
+      .head__jump a:hover {
+        color: var(--fg);
+        background: rgba(255, 255, 255, 0.06);
+      }
+      .head__jump a.is-key {
+        color: #cfd5ff;
+        background: rgba(124, 140, 255, 0.14);
+      }
+      .head__jump a.is-key:hover {
+        background: rgba(124, 140, 255, 0.22);
+      }
+      .seg {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        overflow: hidden;
+      }
+      .seg button {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        color: var(--dim);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        padding: 5px 11px;
+        cursor: pointer;
+      }
+      .seg button + button {
+        border-left: 1px solid var(--line);
+      }
+      .seg button[aria-pressed="true"] {
+        background: rgba(124, 140, 255, 0.16);
+        color: #cfd5ff;
+      }
+      .lnk {
+        font-size: 11px;
+        color: var(--dim);
+        text-decoration: none;
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 1px;
+        white-space: nowrap;
+      }
+      .lnk:hover {
+        color: var(--fg);
+        border-color: var(--g-self);
+      }
+
+      /* ---------- 区块 ---------- */
+      .band {
+        padding: 34px 0 6px;
+      }
+      .band__top {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding-bottom: 14px;
+        border-bottom: 1px solid var(--line);
+        margin-bottom: 22px;
+      }
+      .band__no {
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--g-self);
+      }
+      .band__h {
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+      }
+      .band__d {
+        font-size: 11.5px;
+        color: var(--dim);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 22px;
+      }
+
+      /* ---------- 画板 ---------- */
+      .ab {
+        margin: 0;
+        flex: 0 0 auto;
+      }
+      .ab__cap {
+        display: flex;
+        align-items: baseline;
+        gap: 7px;
+        margin-bottom: 9px;
+      }
+      .ab__no {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--mute);
+      }
+      .ab__zh {
+        font-size: 12.5px;
+        font-weight: 600;
+      }
+      .ab__en {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--mute);
+      }
+      .ab__note {
+        font-size: 11px;
+        color: var(--dim);
+        margin: 9px 0 0;
+        max-width: 320px;
+      }
+      .ab__slot {
+        position: relative;
+        width: calc(320px * var(--z));
+        height: calc(500px * var(--z));
+      }
+      .ab__stage {
+        position: relative;
+        width: 320px;
+        height: 500px;
+        transform: scale(var(--z));
+        transform-origin: 0 0;
+        border-radius: 20px;
+        overflow: hidden;
+      }
+      .ab__desk {
+        position: absolute;
+        inset: 0;
+        background: #0a0b10;
+      }
+      .ab__desk::after {
+        content: "";
+        position: absolute;
+        inset: -20%;
+        background: radial-gradient(
+            38% 30% at 24% 18%,
+            rgba(124, 140, 255, 0.16),
+            transparent 70%
+          ),
+          radial-gradient(
+            34% 26% at 78% 76%,
+            rgba(0, 210, 211, 0.11),
+            transparent 70%
+          );
+        filter: blur(6px);
+      }
+      .ab[data-theme="light"] .ab__desk {
+        background: #e8e9ed;
+      }
+      .ab[data-theme="light"] .ab__desk::after {
+        background: radial-gradient(
+            38% 30% at 24% 18%,
+            rgba(124, 140, 255, 0.2),
+            transparent 70%
+          ),
+          radial-gradient(
+            34% 26% at 78% 76%,
+            rgba(0, 210, 211, 0.14),
+            transparent 70%
+          );
+      }
+
+      /* ---------- 标注层 ---------- */
+      .anno {
+        display: flex;
+        align-items: flex-start;
+        gap: 0;
+      }
+      .anno__gutter {
+        position: relative;
+        margin-top: 16px;
+        width: 176px;
+        flex: 0 0 176px;
+        height: 500px;
+      }
+      .anno__gutter--r {
+        width: 186px;
+        flex-basis: 186px;
+      }
+      .tag {
+        position: absolute;
+        top: 0;
+        width: 158px;
+      }
+      .tag--r {
+        left: auto;
+        right: 0;
+        width: 168px;
+        text-align: left;
+      }
+      .tag__t {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        color: var(--fg);
+        display: block;
+      }
+      .tag__d {
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        line-height: 1.55;
+        color: var(--dim);
+        display: block;
+        margin-top: 2px;
+      }
+      .anno__lines {
+        position: absolute;
+        inset: 0;
+        width: 320px;
+        height: 500px;
+        pointer-events: none;
+        z-index: 6;
+      }
+      .anno__lines path {
+        fill: none;
+        stroke: rgba(255, 255, 255, 0.3);
+        stroke-width: 1;
+      }
+      .anno__lines circle {
+        fill: none;
+        stroke: rgba(255, 255, 255, 0.55);
+        stroke-width: 1;
+      }
+      .ruler {
+        position: absolute;
+        font-family: var(--font-mono);
+        font-size: 8px;
+        letter-spacing: 0.06em;
+        color: var(--mute);
+        pointer-events: none;
+      }
+      .ruler--x {
+        top: -15px;
+        left: 0;
+        width: 320px;
+        height: 12px;
+        background-image: repeating-linear-gradient(
+          90deg,
+          var(--line) 0 1px,
+          transparent 1px 10px
+        );
+        background-position: 0 100%;
+        background-size: 320px 6px;
+        background-repeat: no-repeat;
+      }
+      .ruler--y {
+        top: 0;
+        left: -16px;
+        width: 12px;
+        height: 500px;
+        background-image: repeating-linear-gradient(
+          180deg,
+          var(--line) 0 1px,
+          transparent 1px 10px
+        );
+        background-position: 100% 0;
+        background-size: 6px 500px;
+        background-repeat: no-repeat;
+      }
+      .ruler i {
+        position: absolute;
+        font-style: normal;
+      }
+      .ruler--x i {
+        bottom: 6px;
+      }
+      .ruler--y i {
+        right: 13px;
+      }
+      .anno__mid {
+        position: relative;
+        flex: 0 0 auto;
+        margin-top: 16px;
+      }
+
+      /* ---------- 节点分解 ---------- */
+      .ex {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 44px;
+      }
+      .ex__fig {
+        margin: 0;
+        padding: 20px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.028),
+            transparent
+          ),
+          var(--sheet);
+      }
+      .ex__cap {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--mute);
+        margin-bottom: 16px;
+      }
+      .ex__box {
+        position: relative;
+        width: 200px;
+        height: 190px;
+      }
+      .ex-node {
+        position: absolute;
+        left: 50%;
+        top: 78px;
+        transform: translate(-50%, -50%);
+        display: grid;
+        place-items: center;
+      }
+      .ex-node--self {
+        width: 84px;
+        height: 84px;
+      }
+      .ex-node--dev {
+        width: 52px;
+        height: 52px;
+      }
+      .ex-halo {
+        position: absolute;
+        inset: -8px;
+        border-radius: 50%;
+        border: 1px solid rgba(124, 140, 255, 0.2);
+        animation: ex-breathe 3s ease-in-out infinite;
+      }
+      .ex-ring {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 2px solid rgba(124, 140, 255, 0.5);
+        box-shadow: 0 0 24px rgba(124, 140, 255, 0.35);
+      }
+      .ex-node--dev .ex-ring {
+        border-width: 1.5px;
+        border-color: color-mix(in oklab, var(--tone) 50%, transparent);
+        box-shadow: 0 0 16px color-mix(in oklab, var(--tone) 20%, transparent);
+      }
+      .ex-disc {
+        position: absolute;
+        inset: 6px;
+        border-radius: 50%;
+        background: rgba(30, 32, 44, 0.6);
+        box-shadow: inset 2px 2px 6px rgba(255, 255, 255, 0.06),
+          inset -2px -2px 6px rgba(0, 0, 0, 0.3);
+        display: grid;
+        place-items: center;
+        color: #a0aaff;
+      }
+      .ex-node--dev .ex-disc {
+        inset: 4px;
+        background: rgba(28, 30, 40, 0.7);
+        color: var(--tone);
+      }
+      .ex-disc svg {
+        width: 22px;
+        height: 22px;
+      }
+      .ex-node--dev .ex-disc svg {
+        width: 18px;
+        height: 18px;
+      }
+      .ex-node--dev.ex-node--phone .ex-disc svg {
+        width: 21px;
+        height: 21px;
+      }
+      .ex-node--dev.ex-node--desktop .ex-disc svg {
+        width: 19px;
+        height: 19px;
+      }
+      @keyframes ex-breathe {
+        0%,
+        100% {
+          transform: scale(1);
+          opacity: 0.9;
+        }
+        50% {
+          transform: scale(1.15);
+          opacity: 0.25;
+        }
+      }
+      /* 分解图里的设备节点复用同一套失重漂浮，放慢一倍便于看清轨迹 */
+      .ex-node--dev {
+        animation: ex-drift 11s ease-in-out infinite;
+      }
+      @keyframes ex-drift {
+        0%,
+        100% {
+          transform: translate(-50%, -50%) translate(0, 0) rotate(0deg);
+        }
+        32% {
+          transform: translate(-50%, -50%) translate(3.5px, -4.5px) rotate(-1.2deg);
+        }
+        66% {
+          transform: translate(-50%, -50%) translate(-2.5px, 3px) rotate(0.9deg);
+        }
+      }
+      .dim {
+        position: absolute;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        color: var(--dim);
+      }
+      .dim--h {
+        height: 1px;
+        background: var(--line);
+      }
+      .dim--h::before,
+      .dim--h::after {
+        content: "";
+        position: absolute;
+        top: -4px;
+        width: 1px;
+        height: 9px;
+        background: var(--line);
+      }
+      .dim--h::before {
+        left: 0;
+      }
+      .dim--h::after {
+        right: 0;
+      }
+      .dim--h b {
+        position: absolute;
+        left: 50%;
+        top: -13px;
+        transform: translateX(-50%);
+        font-weight: 400;
+        color: var(--fg);
+        background: var(--sheet);
+        padding: 0 4px;
+        white-space: nowrap;
+      }
+      .dim--v {
+        width: 1px;
+        background: var(--line);
+      }
+      .dim--v::before,
+      .dim--v::after {
+        content: "";
+        position: absolute;
+        left: -4px;
+        width: 9px;
+        height: 1px;
+        background: var(--line);
+      }
+      .dim--v::before {
+        top: 0;
+      }
+      .dim--v::after {
+        bottom: 0;
+      }
+      .dim--v b {
+        position: absolute;
+        top: 50%;
+        left: 6px;
+        transform: translateY(-50%);
+        font-weight: 400;
+        color: var(--fg);
+        background: var(--sheet);
+        padding: 0 4px;
+        white-space: nowrap;
+      }
+      .ex__notes {
+        list-style: none;
+        margin: 18px 0 0;
+        padding: 0;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        line-height: 1.85;
+        color: var(--dim);
+      }
+      .ex__notes b {
+        color: var(--fg);
+        font-weight: 500;
+      }
+
+      /* ---------- 表 ---------- */
+      .tbl {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 11.5px;
+      }
+      .tbl th {
+        text-align: left;
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--mute);
+        font-weight: 400;
+        padding: 0 10px 8px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .tbl td {
+        padding: 7px 10px 7px 0;
+        border-bottom: 1px solid var(--line-soft);
+        color: var(--dim);
+        vertical-align: top;
+      }
+      .tbl td.k {
+        color: var(--fg);
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        white-space: nowrap;
+      }
+      .tbl td.v {
+        font-family: var(--font-mono);
+        font-size: 10.5px;
+        color: var(--fg);
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      /* 规格外修正标记：凡与 Figma 规格不一致处都必须显式标出 */
+      .tbl code {
+        font-family: var(--font-mono);
+        font-size: 0.94em;
+        color: var(--fg);
+        background: color-mix(in oklab, var(--line) 55%, transparent);
+        border-radius: 3px;
+        padding: 0 3px;
+      }
+      .fix {
+        font-family: var(--font-mono);
+        font-size: 9.5px;
+        font-weight: 500;
+        letter-spacing: 0.06em;
+        color: #ffc46b;
+        border: 1px solid rgba(255, 196, 107, 0.32);
+        border-radius: 4px;
+        padding: 1px 4px;
+        margin-right: 4px;
+        white-space: nowrap;
+      }
+      .sw {
+        display: inline-block;
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
+        border: 1px solid var(--line);
+        vertical-align: middle;
+        margin-right: 9px;
+      }
+      .cols {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr));
+        gap: 34px;
+      }
+      /* Token 表列多且数值不折行：窄屏时表内横向滚动，不撑破页面 */
+      .tbl {
+        min-width: 460px;
+      }
+      .tblwrap {
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+      }
+      .foot {
+        margin: 40px 0 60px;
+        padding-top: 16px;
+        border-top: 1px solid var(--line);
+        font-size: 11px;
+        color: var(--mute);
+        display: flex;
+        flex-wrap: wrap;
+        gap: 18px;
+      }
+
+      /* ---------- 浅色画板：作用域内的 token 覆盖 ---------- */
+      .ab[data-theme="light"] {
+        --win-bg: rgba(255, 255, 255, 0.6);
+        --win-border: rgba(0, 0, 0, 0.06);
+        --win-shadow: 0 20px 60px rgba(24, 26, 34, 0.24);
+        --icon-self: #5f6be8;
+        --halo: rgba(124, 140, 255, 0.28);
+        --ring-mix: 55%;
+        --disc-self: rgba(255, 255, 255, 0.72);
+        --disc: rgba(255, 255, 255, 0.82);
+        --disc-shadow: inset -2px -2px 6px rgba(255, 255, 255, 0.7),
+          inset 2px 2px 6px rgba(209, 213, 219, 0.7);
+        --self-glow: 0 0 24px rgba(124, 140, 255, 0.28);
+        --node-glow: 0 0 16px rgba(124, 140, 255, 0.22);
+        --text-primary: #1a1c22;
+        --text-secondary: rgba(26, 28, 34, 0.68);
+        --text-muted: rgba(26, 28, 34, 0.62);
+        --text-hint: rgba(26, 28, 34, 0.64);
+        --xfer-name: rgba(26, 28, 34, 0.85);
+        --drop-border: rgba(26, 28, 34, 0.14);
+        --drop-hover-bg: rgba(124, 140, 255, 0.12);
+        --card-bg: rgba(255, 255, 255, 0.78);
+        --card-shadow: 0 8px 28px rgba(24, 26, 34, 0.16);
+        --bar-bg: rgba(26, 28, 34, 0.08);
+        --fill-from: #00b9bd;
+        --fill-to: #6c78f5;
+        --pct: #00a8ad;
+        --hairline: rgba(26, 28, 34, 0.08);
+        --hover-bg: rgba(26, 28, 34, 0.05);
+        --iconbtn-hover: rgba(26, 28, 34, 0.07);
+      }
+      .ab .anno__lines path {
+        stroke: rgba(255, 255, 255, 0.26);
+      }
+      .ab[data-theme="light"] .anno__lines path {
+        stroke: rgba(0, 0, 0, 0.24);
+      }
+      .ab[data-theme="light"] .anno__lines circle {
+        stroke: rgba(0, 0, 0, 0.4);
+      }
+      .ab[data-theme="light"] .ruler {
+        background-image: repeating-linear-gradient(
+          90deg,
+          rgba(255, 255, 255, 0.3) 0 1px,
+          transparent 1px 10px
+        );
+      }
+      .ab[data-theme="light"] .ruler--y {
+        background-image: repeating-linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.3) 0 1px,
+          transparent 1px 10px
+        );
+      }
+
+      @media (max-width: 1180px) {
+        .head__chips {
+          display: none;
+        }
+      }
+      @media (max-width: 1040px) {
+        .head__jump {
+          display: none;
+        }
+        .head__tools {
+          margin-left: auto;
+        }
+      }
+      @media (max-width: 760px) {
+        .wrap {
+          width: calc(100% - 28px);
+        }
+        .anno__gutter {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="head">
+      <div class="wrap head__in">
+        <div class="head__mark">
+          <span class="head__dot"></span>
+          <div>
+            <div class="head__name">萤光 GlowLink</div>
+            <div class="head__sub">320 × 500 无边框小窗 · 节点图交互</div>
+          </div>
+        </div>
+        <div class="head__chips">
+          <span class="chip">画板 <b>320 × 500</b></span>
+          <span class="chip">圆角 <b>20</b></span>
+          <span class="chip">Background Blur <b>40</b></span>
+          <span class="chip">描边 <b>1px</b> 内侧</span>
+          <span class="chip">设备漂浮 <b>7s</b></span>
+          <span class="chip">连线<b>避开中心图标</b></span>
+          <span class="chip">投影 <b>0 20 60</b> 黑 50%</span>
+        </div>
+        <nav class="head__jump" aria-label="图纸分区">
+          <a href="#b1">01 深色</a>
+          <a href="#b2">02 浅色</a>
+          <a href="#b3" class="is-key">03 标注</a>
+          <a href="#b4">04 节点</a>
+          <a href="#b5">05 Token</a>
+          <a href="#b6">06 契约</a>
+        </nav>
+        <div class="head__tools">
+          <div class="seg" role="group" aria-label="缩放">
+            <button type="button" data-zoom="1" aria-pressed="true">1×</button>
+            <button type="button" data-zoom="2" aria-pressed="false">2×</button>
+          </div>
+          <a class="lnk" href="window-dark.html">交互原型 · 深色</a>
+          <a class="lnk" href="window-light.html">交互原型 · 浅色</a>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <!-- ============ 01 深色 ============ -->
+      <section class="band" id="b1">
+        <div class="band__top">
+          <span class="band__no">01</span>
+          <h2 class="band__h">深色主题</h2>
+          <p class="band__d">
+            window/bg #161820 @55% + Blur 40 · 四个状态互斥，元素不叠加
+          </p>
+        </div>
+        <div class="row" data-artboards="dark"></div>
+      </section>
+
+      <!-- ============ 02 浅色 ============ -->
+      <section class="band" id="b2">
+        <div class="band__top">
+          <span class="band__no">02</span>
+          <h2 class="band__h">浅色主题</h2>
+          <p class="band__d">
+            window/bg #FFFFFF @60% + Blur 40 · 浮雕阴影改为白 70% / #D1D5DB
+            70%，本机图标降到 #5F6BE8 保 3.2:1
+          </p>
+        </div>
+        <div class="row" data-artboards="light"></div>
+      </section>
+
+      <!-- ============ 03 标注 ============ -->
+      <section class="band" id="b3">
+        <div class="band__top">
+          <span class="band__no">03</span>
+          <h2 class="band__h">标注图 · Figma 复刻用</h2>
+          <p class="band__d">
+            引线终点即 320 × 500 画板内的实际坐标，可直接量取
+          </p>
+        </div>
+        <div class="row" data-annotated></div>
+      </section>
+
+      <!-- ============ 04 节点分解 ============ -->
+      <section class="band" id="b4">
+        <div class="band__top">
+          <span class="band__no">04</span>
+          <h2 class="band__h">节点构造</h2>
+          <p class="band__d">辉光靠 box-shadow 双向内阴影做新拟物浮雕，不用渐变</p>
+        </div>
+        <div class="ex">
+          <figure class="ex__fig">
+            <div class="ex__cap">本机中心 · 84 px</div>
+            <div class="ex__box">
+              <div class="ex-node ex-node--self">
+                <span class="ex-halo"></span>
+                <span class="ex-ring"></span>
+                <span class="ex-disc">
+                  <svg viewBox="0 0 28 28" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="5" y="6.5" width="18" height="12" rx="1.8" />
+                    <path d="M2.5 21.5h23" />
+                  </svg>
+                </span>
+              </div>
+              <span class="dim dim--h" style="left: 58px; top: 128px; width: 84px"><b>84</b></span>
+              <span class="dim dim--h" style="left: 64px; top: 32px; width: 72px"><b>72</b></span>
+              <span class="dim dim--v" style="top: 28px; left: 168px; height: 100px"><b>100 (inset −8)</b></span>
+            </div>
+            <ul class="ex__notes">
+              <li>外径 <b>84</b> · 环 <b>2px</b> rgba(124,140,255,.5)</li>
+              <li>内圆 <b>72</b>（inset <b>6</b>）· 底 rgba(30,32,44,.6)</li>
+              <li>内阴影 白 6% @ +2/+2 blur 6 · 黑 30% @ −2/−2</li>
+              <li>外发光 #7C8CFF blur <b>24</b> / <b>35%</b></li>
+              <li>呼吸光圈 inset <b>−8</b> · 1px · scale 1→1.15 / <b>3s</b></li>
+              <li>中心图标 <b>22</b> · #A0AAFF（浅色 #5F6BE8）</li>
+            </ul>
+          </figure>
+          <figure class="ex__fig">
+            <div class="ex__cap">设备节点 · 52 px</div>
+            <div class="ex__box">
+              <div class="ex-node ex-node--dev ex-node--phone" style="--tone: #00d2d3">
+                <span class="ex-ring"></span>
+                <span class="ex-disc">
+                  <svg viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="6" y="2.5" width="6" height="13" rx="1.6" />
+                    <path d="M8.4 13.1h1.2" />
+                  </svg>
+                </span>
+              </div>
+              <span class="dim dim--h" style="left: 74px; top: 112px; width: 52px"><b>52</b></span>
+              <span class="dim dim--h" style="left: 78px; top: 48px; width: 44px"><b>44</b></span>
+            </div>
+            <ul class="ex__notes">
+              <li>外径 <b>52</b> · 环 <b>1.5px</b> 辉光色 <b>50%</b></li>
+              <li>内圆 <b>44</b>（inset <b>4</b>）· 底 rgba(28,30,40,.7)</li>
+              <li>外发光 各设备色 blur <b>16</b> / <b>20%</b></li>
+              <li>中心图标 手机 <b>21</b> · 平板 <b>18</b> · 台式机 <b>19</b></li>
+              <li>设备标签 <b>10</b> 白 50%，节点下方 6</li>
+              <li>漂浮 ±4.5px / ±1.2°，7s 循环，各节点错相</li>
+              <li>手机 #00D2D3 · 平板 #A29BFE · 台式机 #FD79A8</li>
+              <li>辉光色只做设备类型语义，全窗无第五种彩色</li>
+            </ul>
+          </figure>
+        </div>
+      </section>
+
+      <!-- ============ 05 色彩 Token ============ -->
+      <section class="band" id="b5">
+        <div class="band__top">
+          <span class="band__no">05</span>
+          <h2 class="band__h">色彩 Token</h2>
+          <p class="band__d">Figma Variables 建议按此表建，直接填色值</p>
+        </div>
+        <div class="cols">
+          <div class="tblwrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Token</th>
+                <th>值</th>
+                <th>OKLch</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="sw" style="background: #0a0b10"></span></td>
+                <td class="k">bg/deep</td>
+                <td class="v">#0A0B10</td>
+                <td class="v">oklch(15.1% .011 275)</td>
+                <td>窗口外桌面底色</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: rgba(22,24,32,.9)"></span></td>
+                <td class="k">window/bg</td>
+                <td class="v">#161820 @55%</td>
+                <td class="v">oklch(21.7% .013 259)</td>
+                <td>玻璃窗底 + Background Blur 40</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #7c8cff"></span></td>
+                <td class="k">glow/self</td>
+                <td class="v">#7C8CFF</td>
+                <td class="v">oklch(69.8% .158 272)</td>
+                <td>本机辉光 / 品牌主色 / 品牌点</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #00d2d3"></span></td>
+                <td class="k">glow/phone</td>
+                <td class="v">#00D2D3</td>
+                <td class="v">oklch(78.2% .134 195)</td>
+                <td>手机节点辉光 / 进度起点 / 百分比</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #a29bfe"></span></td>
+                <td class="k">glow/tablet</td>
+                <td class="v">#A29BFE</td>
+                <td class="v">oklch(73.6% .141 285)</td>
+                <td>平板节点辉光</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #fd79a8"></span></td>
+                <td class="k">glow/desktop</td>
+                <td class="v">#FD79A8</td>
+                <td class="v">oklch(74.2% .168 359)</td>
+                <td>台式机节点辉光</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #a0aaff"></span></td>
+                <td class="k">icon/self</td>
+                <td class="v">#A0AAFF</td>
+                <td class="v">oklch(76.3% .122 278)</td>
+                <td>本机中心图标 22px</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: rgba(20,22,30,.95)"></span></td>
+                <td class="k">card/bg</td>
+                <td class="v">#14161E @70%</td>
+                <td class="v">—</td>
+                <td>文件传输卡 + Blur 20</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: linear-gradient(90deg,#00d2d3,#7c8cff)"></span></td>
+                <td class="k">bar/fill</td>
+                <td class="v">#00D2D3 → #7C8CFF</td>
+                <td class="v">—</td>
+                <td>进度条填充，全窗唯一渐变</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #fff; opacity: .5"></span></td>
+                <td class="k">text/primary</td>
+                <td class="v">#FFFFFF @90%</td>
+                <td class="v">—</td>
+                <td>产品名、文件名</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #fff; opacity: .5"></span></td>
+                <td class="k">text/secondary</td>
+                <td class="v">#FFFFFF @50%</td>
+                <td class="v">—</td>
+                <td>设备标签</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #fff; opacity: .35"></span></td>
+                <td class="k">text/muted</td>
+                <td class="v">#FFFFFF @35%</td>
+                <td class="v">—</td>
+                <td>拖拽提示、占位</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+          <div class="tblwrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th></th>
+                <th>Token</th>
+                <th>值</th>
+                <th>OKLch</th>
+                <th>用途</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><span class="sw" style="background: #e8e9ed"></span></td>
+                <td class="k">bg/light</td>
+                <td class="v">#E8E9ED</td>
+                <td class="v">oklch(93.4% .006 281)</td>
+                <td>窗口外桌面底色</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #fff"></span></td>
+                <td class="k">window/bg</td>
+                <td class="v">#FFFFFF @60%</td>
+                <td class="v">—</td>
+                <td>玻璃窗底 + Background Blur 40</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #000; opacity: .12"></span></td>
+                <td class="k">window/border</td>
+                <td class="v">#000000 @6%</td>
+                <td class="v">—</td>
+                <td>1px 窗描边</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #5f6be8"></span></td>
+                <td class="k">icon/self</td>
+                <td class="v">#5F6BE8</td>
+                <td class="v">oklch(56.6% .153 276)</td>
+                <td><b class="fix">修正</b>：#A0AAFF 白底仅 2.2:1</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: linear-gradient(135deg,#008a8c 46%,#5f52c8 47%,#c0346b 48%,#5f6be8 49%)"></span></td>
+                <td class="k">tone-ink</td>
+                <td class="v" style="white-space: normal">#008A8C / #5F52C8<br />#C0346B / #5F6BE8</td>
+                <td class="v">—</td>
+                <td><b class="fix">修正</b>：图标墨色，辉光原色白底仅 1.86–2.94:1</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #1a1c22"></span></td>
+                <td class="k">text/primary</td>
+                <td class="v">#1A1C22</td>
+                <td class="v">oklch(22.7% .012 271)</td>
+                <td>产品名、文件名</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #1a1c22; opacity: .68"></span></td>
+                <td class="k">text/secondary</td>
+                <td class="v">#1A1C22 @68%</td>
+                <td class="v">—</td>
+                <td>设备标签 · <b class="fix">修正</b>：规格 50% = 3.24:1，68% = 5.42:1</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #1a1c22; opacity: .62"></span></td>
+                <td class="k">text/muted</td>
+                <td class="v">#1A1C22 @62%</td>
+                <td class="v">—</td>
+                <td>拖拽提示 · <b class="fix">修正</b>：规格 35% = 2.16:1，62% = 4.66:1</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: linear-gradient(135deg,#fff 46%,#d1d5db 47%)"></span></td>
+                <td class="k">disc-shadow</td>
+                <td class="v">#FFF 70% / #D1D5DB 70%</td>
+                <td class="v">—</td>
+                <td>浮雕：白 @ −2/−2，暗 @ +2/+2</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: linear-gradient(90deg,#00b9bd,#6c78f5)"></span></td>
+                <td class="k">bar/fill</td>
+                <td class="v">#00B9BD → #6C78F5</td>
+                <td class="v">—</td>
+                <td>浅色底上加深一档保对比</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #00a8ad"></span></td>
+                <td class="k">pct</td>
+                <td class="v">#00A8AD</td>
+                <td class="v">oklch(63.7% .104 195)</td>
+                <td>传输百分比</td>
+              </tr>
+              <tr>
+                <td><span class="sw" style="background: #7c8cff"></span></td>
+                <td class="k">glow/*</td>
+                <td class="v">四色不变</td>
+                <td class="v">—</td>
+                <td>辉光不随主题切换，靠浮雕维持立体</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 06 规格表 ============ -->
+      <section class="band" id="b6">
+        <div class="band__top">
+          <span class="band__no">06</span>
+          <h2 class="band__h">布局契约与状态</h2>
+          <p class="band__d">数值锁死，任何内容不得撑破 320 × 500 这个盒子</p>
+        </div>
+        <div class="cols">
+          <div class="tblwrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>区域</th>
+                <th>坐标 / 尺寸</th>
+                <th>规格</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="k">窗描边</td>
+                <td class="v">inset 0</td>
+                <td>1px <b class="fix">内侧</b>描边，不占布局：内容盒精确 320 × 500</td>
+              </tr>
+              <tr>
+                <td class="k">设备漂浮</td>
+                <td class="v">±4.5 px / ±1.2°</td>
+                <td><b class="fix">新增</b>：设备节点 7s 失重浮动，错相 0 / −2.3 / −4.7s。<code>left/top</code> 契约坐标不变，位移走独立 <code>translate/rotate</code> 属性叠加在上层</td>
+              </tr>
+              <tr>
+                <td class="k">连线裁切</td>
+                <td class="v">自机 46 / 设备 31</td>
+                <td><b class="fix">新增</b>：从两端按弧长裁掉一段（外缘 + 4 / + 5），不再横穿本机图标；连线 z-index 在节点之下</td>
+              </tr>
+              <tr>
+                <td class="k">图标尺寸</td>
+                <td class="v">22 / 21 · 18 · 19</td>
+                <td><b class="fix">修正</b>：中心 28→22（28 会撑满 72 内圆），手机 18→21，平板 18，台式机 18→19</td>
+              </tr>
+              <tr>
+                <td class="k">标题栏</td>
+                <td class="v">y 0 – 44</td>
+                <td>高 44 · 左右边距 16 · 产品名 14/600 · 品牌点 8px + blur 8 · 图标钮 22×22</td>
+              </tr>
+              <tr>
+                <td class="k">节点图</td>
+                <td class="v">y 44 – 440</td>
+                <td>高 396 · 本机中心 (160, 240) 84px</td>
+              </tr>
+              <tr>
+                <td class="k">手机节点</td>
+                <td class="v">(66, 86)</td>
+                <td>52px · #00D2D3</td>
+              </tr>
+              <tr>
+                <td class="k">平板节点</td>
+                <td class="v">(254, 86)</td>
+                <td>52px · #A29BFE</td>
+              </tr>
+              <tr>
+                <td class="k">台式机节点</td>
+                <td class="v">(160, 364)</td>
+                <td>52px · #FD79A8</td>
+              </tr>
+              <tr>
+                <td class="k">拖拽区</td>
+                <td class="v">y 440 – 484</td>
+                <td>高 44 · 左右边距 16 · 底边距 16 · 12 圆角 · 1.5px dashed 白 15%</td>
+              </tr>
+              <tr>
+                <td class="k">传输卡</td>
+                <td class="v">右 12 · 底 70</td>
+                <td>宽 200 · 12 圆角 · Blur 20 · 进度条 4px</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+          <div class="tblwrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>构成</th>
+                <th>不出现</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="k">Discover 发现态</td>
+                <td>本机中心 + 2~N 设备节点</td>
+                <td>连线、传输卡、spinner</td>
+              </tr>
+              <tr>
+                <td class="k">Empty 空态</td>
+                <td>本机中心 + spinner + 正在搜索附近设备…</td>
+                <td>设备节点、连线、传输卡</td>
+              </tr>
+              <tr>
+                <td class="k">Transfer 传输态</td>
+                <td>流动虚线连线 + 右下传输卡 + 目标节点高亮</td>
+                <td>spinner、其他设备连线</td>
+              </tr>
+              <tr>
+                <td class="k">Privacy 隐私面板</td>
+                <td>点标题栏锁图标浮出，覆盖层</td>
+                <td>应用内接收确认弹窗（走系统通知）</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+          <div class="tblwrap">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>文字</th>
+                <th>字号 / 字重</th>
+                <th>颜色</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="k">产品名</td>
+                <td class="v">14 / 600</td>
+                <td>text/primary</td>
+              </tr>
+              <tr>
+                <td class="k">设备标签</td>
+                <td class="v">10</td>
+                <td>text/secondary</td>
+              </tr>
+              <tr>
+                <td class="k">文件名</td>
+                <td class="v">11</td>
+                <td>白 85%</td>
+              </tr>
+              <tr>
+                <td class="k">传输百分比</td>
+                <td class="v">11 / 600</td>
+                <td>glow/phone（浅色 #00A8AD）</td>
+              </tr>
+              <tr>
+                <td class="k">卡片元信息</td>
+                <td class="v">9</td>
+                <td>白 40%</td>
+              </tr>
+              <tr>
+                <td class="k">拖拽提示</td>
+                <td class="v">11</td>
+                <td>text/muted</td>
+              </tr>
+              <tr>
+                <td class="k">搜索提示</td>
+                <td class="v">11</td>
+                <td>text/hint</td>
+              </tr>
+            </tbody>
+          </table>
+          </div>
+        </div>
+
+        <div class="foot">
+          <span>字体：SF Pro / PingFang SC，数值一律 tabular-nums</span>
+          <span>视觉系统：brand-spec.md</span>
+          <span>交互原型：window-dark.html · window-light.html</span>
+          <span>标注：JS 画板 1:1 复用 css/glowlink.css，改一处即改两处</span>
+        </div>
+      </section>
+    </main>
+
+    <style>
+      /* ---------- 导出模式（?solo=…） ----------
+         把图纸外壳整层剥掉，只留一块画板铺满视口。
+         截图尺寸 = 320×500 × z，配合 --force-device-scale-factor 出高清 PNG。 */
+      #solo-mount {
+        display: none;
+      }
+      body.is-solo {
+        margin: 0;
+        overflow: hidden;
+      }
+      body.is-solo .head,
+      body.is-solo .band {
+        display: none;
+      }
+      body.is-solo #solo-mount {
+        display: block;
+        line-height: 0;
+      }
+      body.is-solo .ab__cap,
+      body.is-solo .ab__note {
+        display: none;
+      }
+      body.is-solo .ab {
+        display: block;
+      }
+      /* 静帧：把动画钉在同一个相位，保证每次导出的像素完全一致。
+         保留 --drift-delay 的错相，三台设备不会挤在同一个漂移位置。 */
+      body.is-solo *,
+      body.is-solo *::before,
+      body.is-solo *::after {
+        animation-play-state: paused !important;
+        animation-delay: calc(var(--drift-delay, 0s) - 1.4s) !important;
+      }
+      @media print {
+        body.is-solo {
+          overflow: visible;
+        }
+        body.is-solo #solo-mount {
+          page-break-after: always;
+          break-after: page;
+        }
+      }
+    </style>
+
+    <script>
+      (function () {
+        var svgAttrs =
+          'fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"';
+        var icons = {
+          self:
+            '<svg class="node__icon" viewBox="0 0 28 28" ' +
+            svgAttrs +
+            ' stroke-width="1.9"><rect x="5" y="6.5" width="18" height="12" rx="1.8"/><path d="M2.5 21.5h23"/></svg>',
+          phone:
+            '<svg class="node__icon" viewBox="0 0 18 18" ' +
+            svgAttrs +
+            ' stroke-width="1.4"><rect x="6" y="2.5" width="6" height="13" rx="1.6"/><path d="M8.4 13.1h1.2"/></svg>',
+          tablet:
+            '<svg class="node__icon" viewBox="0 0 18 18" ' +
+            svgAttrs +
+            ' stroke-width="1.4"><rect x="3.6" y="2.5" width="10.8" height="13" rx="1.6"/><path d="M7.9 13.1h2.2"/></svg>',
+          desktop:
+            '<svg class="node__icon" viewBox="0 0 18 18" ' +
+            svgAttrs +
+            ' stroke-width="1.4"><rect x="2.5" y="3.4" width="13" height="8.6" rx="1.5"/><path d="M6.4 15.4h5.2M9 12v3.4"/></svg>'
+        };
+
+        function deviceNode(kind, tone, label, cls) {
+          return (
+            '<div class="node node--' +
+            kind +
+            (cls ? ' ' + cls : '') +
+            '" data-device="' +
+            kind +
+            '" style="--tone:' +
+            tone +
+            '"><span class="node__halo"></span><span class="node__ring"></span><span class="node__disc">' +
+            icons[kind] +
+            '</span><span class="node__label">' +
+            label +
+            '</span></div>'
+          );
+        }
+
+        function windowHTML(state) {
+          var isEmpty = state === 'empty';
+          var isTransfer = state === 'transfer';
+          var isPrivacy = state === 'privacy';
+
+          var wires = isTransfer
+            ? '<svg class="graph__wires" viewBox="0 0 320 396" aria-hidden="true">' +
+              '<path class="wire wire--base" style="--wire-color:#00d2d3" d="M131.5 159.9 Q104.4 121.6 79.1 70.1"/>' +
+              '<path class="wire wire--flow" style="--wire-color:#00d2d3" d="M131.5 159.9 Q104.4 121.6 79.1 70.1"/>' +
+              '</svg>'
+            : '';
+
+          var devices = isEmpty
+            ? ''
+            : deviceNode('phone', '#00d2d3', 'Pixel 9', isTransfer ? 'is-target' : '') +
+              deviceNode('tablet', '#a29bfe', 'iPad mini') +
+              deviceNode('desktop', '#fd79a8', '桌面主机');
+
+          var xfer = isTransfer
+            ? '<div class="xfer"><div class="xfer__row"><span class="xfer__name">设计稿-v3.fig</span>' +
+              '<span class="xfer__pct">62%</span></div><div class="xfer__bar"><i style="width:62%"></i></div>' +
+              '<p class="xfer__meta">2.4 MB / 3.9 MB · 预计剩 4 秒</p></div>'
+            : '';
+
+          var privacy = isPrivacy
+            ? '<div class="privacy"><p class="privacy__title">隐私承诺</p>' +
+              '<p class="privacy__row">无云端 · 无中转</p>' +
+              '<p class="privacy__row">无注册 · 无账号</p>' +
+              '<p class="privacy__row">无遥测 · 无日志</p>' +
+              '<p class="privacy__foot">可自行抓包验证：仅 UDP 广播 8888 与 TCP 点对点数据。</p></div>'
+            : '';
+
+          return (
+            '<div class="glow__window">' +
+            '<header class="titlebar"><span class="brand-dot"></span>' +
+            '<h1 class="titlebar__name">萤光 GlowLink</h1>' +
+            '<div class="titlebar__actions">' +
+            '<span class="iconbtn"' + (isPrivacy ? ' aria-expanded="true"' : '') +
+            '><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<rect x="3.4" y="6" width="7.2" height="6" rx="1.6"/><path d="M4.9 6V4.6a2.1 2.1 0 0 1 4.2 0V6"/></svg></span>' +
+            '<span class="iconbtn"><svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" aria-hidden="true">' +
+            '<path d="M3 10.5h8"/></svg></span></div></header>' +
+            '<section class="graph">' +
+            wires +
+            '<div class="node node--self' + (isTransfer ? ' is-source' : '') + '">' +
+            '<span class="node__halo"></span><span class="node__ring"></span>' +
+            '<span class="node__disc">' +
+            icons.self +
+            '</span><span class="node__label">这台 MacBook</span></div>' +
+            devices +
+            '<p class="empty-note"><span class="spinner"></span><span>正在搜索附近设备…</span></p>' +
+            '</section>' +
+            '<div class="dropzone"><span>拖拽文件到这里</span></div>' +
+            xfer +
+            privacy +
+            '</div>'
+          );
+        }
+
+        var STATES = [
+          {
+            key: 'empty',
+            no: '01',
+            zh: '空态',
+            en: 'Empty',
+            note: '刚打开只有本机中心 + spinner，等第一台设备广播。'
+          },
+          {
+            key: 'discover',
+            no: '02',
+            zh: '发现态',
+            en: 'Discover',
+            note: '本机为中心，2~N 台设备环绕，无连线。点节点即选中。'
+          },
+          {
+            key: 'transfer',
+            no: '03',
+            zh: '传输态',
+            en: 'Transfer',
+            note: '只连目标设备：流动虚线 + 右下传输卡，其余节点保持安静。'
+          },
+          {
+            key: 'privacy',
+            no: '04',
+            zh: '隐私面板',
+            en: 'Privacy',
+            note: '点标题栏锁图标浮出，是闭源产品的信任补偿入口。'
+          }
+        ];
+
+        function artboard(theme, state) {
+          return (
+            '<figure class="ab" data-theme="' +
+            theme +
+            '"><figcaption class="ab__cap"><span class="ab__no">' +
+            state.no +
+            '</span><span class="ab__zh">' +
+            state.zh +
+            '</span><span class="ab__en">' +
+            state.en +
+            '</span></figcaption><div class="ab__slot"><div class="ab__stage">' +
+            '<div class="ab__desk"></div><div class="glow is-' +
+            state.key +
+            '">' +
+            windowHTML(state.key) +
+            '</div></div></div><p class="ab__note">' +
+            state.note +
+            '</p></figure>'
+          );
+        }
+
+        var darkRow = document.querySelector('[data-artboards="dark"]');
+        var lightRow = document.querySelector('[data-artboards="light"]');
+        var annoRow = document.querySelector('[data-annotated]');
+
+        if (darkRow) {
+          darkRow.innerHTML = STATES.map(function (s) {
+            return artboard('dark', s);
+          }).join('');
+        }
+        if (lightRow) {
+          lightRow.innerHTML = STATES.map(function (s) {
+            return artboard('light', s);
+          }).join('');
+        }
+
+        var ANNOS = {
+          transfer: [
+            {
+              s: 'l',
+              ly: 22,
+              ay: 22,
+              ax: 30,
+              t: '标题栏 44',
+              d: '产品名 14/600 · 品牌点 8px #7C8CFF + blur 8 · 图标钮 22×22 / 图标 14'
+            },
+            {
+              s: 'l',
+              ly: 174,
+              ay: 174,
+              ax: 112,
+              t: '流动虚线',
+              d: '1.5px dash 5 9 · 1s 循环 · 底线 1px / 22% 作衬 · 两端裁在本机环外 4、设备环外 5，压在节点之下'
+            },
+            {
+              s: 'l',
+              ly: 244,
+              ay: 240,
+              ax: 118,
+              t: '本机中心 84',
+              d: '窗口坐标 (160, 240) · 环 2px rgba(124,140,255,.5) · 内圆 72 inset 6 · 辉光 blur 24 / 35%'
+            },
+            {
+              s: 'l',
+              ly: 462,
+              ay: 462,
+              ax: 74,
+              t: '拖拽区 44',
+              d: '12 圆角 · 1.5px dashed 白 15% · 左右边距 16 · 底边距 16 · 文字 11 白 35%'
+            },
+            {
+              s: 'r',
+              ly: 40,
+              ay: 86,
+              ax: 92,
+              t: '手机 52',
+              d: '(66, 86) · 环 1.5px #00D2D3 50% · 内圆 44 inset 4 · 辉光 blur 16 / 20% · 图标 21 · 标签 10 白 50%'
+            },
+            {
+              s: 'r',
+              ly: 140,
+              ay: 86,
+              ax: 228,
+              t: '平板 52',
+              d: '(254, 86) · 辉光 #A29BFE · 图标 18 · 未选中时无连线'
+            },
+            {
+              s: 'r',
+              ly: 300,
+              ay: 364,
+              ax: 186,
+              t: '台式机 52',
+              d: '(160, 364) · 辉光 #FD79A8 · 图标 19 · 距节点图区底边 50'
+            },
+            {
+              s: 'r',
+              ly: 402,
+              ay: 396,
+              ax: 306,
+              t: '传输卡 200',
+              d: '右 12 · 底 70 · 12 圆角 · rgba(20,22,30,.7)+blur 20 · 条 4px #00D2D3→#7C8CFF'
+            }
+          ],
+          discover: [
+            {
+              s: 'l',
+              ly: 22,
+              ay: 22,
+              ax: 30,
+              t: '标题栏 44',
+              d: '产品名 14/600 · 品牌点 8px + blur 8 · 图标钮 22×22'
+            },
+            {
+              s: 'l',
+              ly: 300,
+              ay: 292,
+              ax: 108,
+              t: '呼吸光圈',
+              d: 'inset −8 · 1px rgba(124,140,255,.2) · scale 1→1.15 / 3s'
+            },
+            {
+              s: 'l',
+              ly: 244,
+              ay: 240,
+              ax: 118,
+              t: '本机中心 84',
+              d: '(160, 240) · 环 2px · 内圆 72 inset 6 · 双向内阴影 2/6 · 图标 22 #A0AAFF'
+            },
+            {
+              s: 'l',
+              ly: 462,
+              ay: 462,
+              ax: 74,
+              t: '拖拽区 44',
+              d: '12 圆角 · dashed 1.5px 白 15% · 边距 16'
+            },
+            {
+              s: 'r',
+              ly: 40,
+              ay: 86,
+              ax: 92,
+              t: '手机 52',
+              d: '(66, 86) · #00D2D3 · 内圆 44 · 辉光 blur 16 / 20%'
+            },
+            {
+              s: 'r',
+              ly: 140,
+              ay: 86,
+              ax: 228,
+              t: '平板 52',
+              d: '(254, 86) · #A29BFE'
+            },
+            {
+              s: 'r',
+              ly: 300,
+              ay: 364,
+              ax: 186,
+              t: '台式机 52',
+              d: '(160, 364) · #FD79A8'
+            }
+          ]
+        };
+
+        function annotated(theme, stateKey) {
+          var st = STATES.filter(function (s) {
+            return s.key === stateKey;
+          })[0];
+          var list = ANNOS[stateKey];
+          var left = list.filter(function (a) {
+            return a.s === 'l';
+          });
+          var right = list.filter(function (a) {
+            return a.s === 'r';
+          });
+
+          function tags(arr, side) {
+            return arr
+              .map(function (a) {
+                return (
+                  '<div class="tag' +
+                  (side === 'r' ? ' tag--r' : '') +
+                  '" style="top:' +
+                  a.ly +
+                  'px;transform:translateY(-50%)"><span class="tag__t">' +
+                  a.t +
+                  '</span><span class="tag__d">' +
+                  a.d +
+                  '</span></div>'
+                );
+              })
+              .join('');
+          }
+
+          function lines() {
+            return list
+              .map(function (a) {
+                var edge = a.s === 'l' ? 0 : 320;
+                var elbow = a.s === 'l' ? 9 : 311;
+                var d =
+                  a.ay === a.ly
+                    ? 'M' + edge + ' ' + a.ly + ' H' + a.ax
+                    : 'M' + edge + ' ' + a.ly + ' H' + elbow + ' L' + a.ax + ' ' + a.ay;
+                return (
+                  '<path d="' +
+                  d +
+                  '"/><circle cx="' +
+                  a.ax +
+                  '" cy="' +
+                  a.ay +
+                  '" r="2.5"/>'
+                );
+              })
+              .join('');
+          }
+
+          function rulerX() {
+            var out = '';
+            [0, 100, 200, 300].forEach(function (v) {
+              out += '<i style="left:' + (v + 2) + 'px">' + v + '</i>';
+            });
+            return '<div class="ruler ruler--x">' + out + '</div>';
+          }
+          function rulerY() {
+            var out = '';
+            [0, 100, 200, 300, 400].forEach(function (v) {
+              out += '<i style="top:' + (v - 5) + 'px">' + v + '</i>';
+            });
+            return '<div class="ruler ruler--y">' + out + '</div>';
+          }
+
+          return (
+            '<figure class="ab" data-theme="' +
+            theme +
+            '"><figcaption class="ab__cap"><span class="ab__no">' +
+            st.no +
+            '</span><span class="ab__zh">' +
+            st.zh +
+            ' · 标注</span><span class="ab__en">' +
+            st.en +
+            ' / Annotated</span></figcaption>' +
+            '<div class="anno"><div class="anno__gutter">' +
+            tags(left, 'l') +
+            '</div><div class="anno__mid">' +
+            rulerX() +
+            rulerY() +
+            '<div class="ab__slot"><div class="ab__stage"><div class="ab__desk"></div>' +
+            '<div class="glow is-' +
+            stateKey +
+            '">' +
+            windowHTML(stateKey) +
+            '</div><svg class="anno__lines" viewBox="0 0 320 500">' +
+            lines() +
+            '</svg></div></div></div><div class="anno__gutter anno__gutter--r">' +
+            tags(right, 'r') +
+            '</div></div><p class="ab__note">' +
+            st.note +
+            '</p></figure>'
+          );
+        }
+
+        if (annoRow) {
+          annoRow.innerHTML = annotated('dark', 'transfer') + annotated('light', 'discover');
+        }
+
+        /* ---------- 导出模式：?solo=<theme>:<state>&z=<n> ----------
+           把单个画板从图纸里抽出来，铺满视口，供 headless 截图 / 打印成
+           高保真 PNG。只在带 query 时生效，正常浏览图纸不受影响。 */
+        (function soloExport() {
+          var q = new URLSearchParams(location.search);
+          var solo = q.get('solo');
+          if (!solo) return;
+
+          var KEY = { empty: 0, discover: 1, transfer: 2, privacy: 3 };
+          var parts = solo.split(':');
+          var theme = parts[0] === 'light' ? 'light' : 'dark';
+          var pick = parts[1];
+          var fig = null;
+
+          if (pick === 'anno') {
+            var annos = document.querySelectorAll('[data-annotated] .ab');
+            fig = annos[theme === 'light' ? 1 : 0] || null;
+          } else {
+            var row = document.querySelector('[data-artboards="' + theme + '"]');
+            var all = row ? row.querySelectorAll('.ab') : [];
+            fig = all[KEY[pick]] || null;
+          }
+          if (!fig) return;
+
+          var z = parseFloat(q.get('z')) || 3;
+          document.documentElement.style.setProperty('--z', String(z));
+
+          var mount = document.createElement('div');
+          mount.id = 'solo-mount';
+          mount.appendChild(fig);
+          document.body.appendChild(mount);
+          document.body.classList.add('is-solo');
+          document.documentElement.setAttribute('data-theme', theme);
+          document.body.style.background = theme === 'light' ? '#e8e9ed' : '#0a0b10';
+        })();
+
+        var segs = document.querySelectorAll('.seg button');
+        Array.prototype.forEach.call(segs, function (b) {
+          b.addEventListener('click', function () {
+            Array.prototype.forEach.call(segs, function (o) {
+              o.setAttribute('aria-pressed', String(o === b));
+            });
+            document.documentElement.style.setProperty('--z', b.getAttribute('data-zoom'));
+          });
+        });
+      })();
+    </script>
+  </body>
+</html>

@@ -1,5 +1,6 @@
 use glowlink_core::model::ports::DISCOVERY_PORT_SPAN;
 use glowlink_core::model::probe::{decide_port, PortOwner};
+use glowlink_core::model::packet::DeviceKind;
 
 /// 找出一个在当前机器上确实“绑不上也无人应答”的端口（内核残留绑定）。
 ///
@@ -67,6 +68,7 @@ fn decision_keeps_announced_port_separate_from_actual() {
             name: "t".into(),
             port: 1,
             reply_port: 0,
+            kind: DeviceKind::Unknown,
         })
         .expect("顺延后的节点仍应能发出查询");
     drop(holder);

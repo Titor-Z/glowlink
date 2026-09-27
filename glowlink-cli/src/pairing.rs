@@ -1,0 +1,366 @@
+//! 配对：槽位表 + 两条流程（本机发起、对端发起）。
+//!
+//! 为什么与待确认接收（`pending.rs`）分开：配对的等待是**双向**的——
+//! 本机发起时要等对方拍板，对端发起时要等本机用户拍板；而且用户还要输入 6 位码。
+//! 两套语义混进一个队列，会让「accept 到底是收文件还是收配对」变得没有答案。
+//!
+//! 状态放在守护进程里，界面只是它的前端：配对会话必须由持有 TCP 连接与密钥的
+//! 那一方保持着，界面退出不能把配对带走。
+
+use std::collections::VecDeque;
+use std::net::TcpStream;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+use glowlink_core::model::crypto::identity::Identity;
+use glowlink_core::model::error::{GlowError, Result};
+use glowlink_core::patterns::adapter::TcpTransportAdapter;
+use glowlink_core::patterns::secure::{session_slot, TrustList};
+use glowlink_core::{Device, DeviceIdentity, PairingSession, MAX_CODE_ATTEMPTS};
+use glowlink_ipc::row::{PairingRow, PairingState};
+use glowlink_ipc::state::append_log;
+
+use crate::keys::TrustFile;
+
+/// 建立连接的等待时长（本机网络，超过说明对端没在听）。
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 已结束的配对槽位保留多久：界面要能看见成败，但不能无限堆积。
+const OUTGOING_TTL: Duration = Duration::from_secs(60);
+
+/// 用户对一个待决定配对请求的答复。
+enum Decision {
+    /// 允许，并带上用户敲进来的 6 位码。
+    Allow(String),
+    Deny,
+}
+
+/// 等待的结果。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// 用户允许并给出了码（**还没校验**，由调用方交给会话比对）。
+    Allow(String),
+    /// 用户拒绝。
+    Deny,
+    /// 等超时了（没人管的时候宁可什么都不收）。
+    Timeout,
+}
+
+struct IncomingSlot {
+    token: String,
+    peer: String,
+    code: String,
+    attempts: u8,
+    inbox: VecDeque<Decision>,
+}
+
+struct OutgoingSlot {
+    token: String,
+    peer: String,
+    code: String,
+    state: PairingState,
+    finished_at: Option<Instant>,
+}
+
+#[derive(Default)]
+struct Inner {
+    /// 单调递增的取号器：编号只用于让人念出来，不与槽位下标绑定。
+    issued: u64,
+    incoming: Vec<IncomingSlot>,
+    outgoing: Vec<OutgoingSlot>,
+}
+
+/// 配对槽位表（两个方向共用一个取号器，编号在界面上不会撞）。
+#[derive(Default)]
+pub struct PairingQueue {
+    inner: Mutex<Inner>,
+    ready: Condvar,
+}
+
+impl PairingQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 取一个新编号（三位数，与待确认接收同一套习惯，便于人念）。
+    fn next_token(inner: &mut Inner) -> String {
+        inner.issued += 1;
+        format!("{:03}", inner.issued)
+    }
+
+    /// 对端发起：登记一个等待决定的请求，返回编号。
+    pub fn register(&self, peer: String, code: String) -> String {
+        let mut inner = self.lock();
+        let token = Self::next_token(&mut inner);
+        inner.incoming.push(IncomingSlot {
+            token: token.clone(),
+            peer,
+            code,
+            attempts: MAX_CODE_ATTEMPTS,
+            inbox: VecDeque::new(),
+        });
+        token
+    }
+
+    /// 等用户对某个请求的答复（一次尝试）。
+    pub fn wait_decision(&self, token: &str, timeout: Duration) -> Verdict {
+        let deadline = Instant::now() + timeout;
+        let mut inner = self.lock();
+        loop {
+            let Some(slot) = inner.incoming.iter_mut().find(|s| s.token == token) else {
+                // 槽位被摘掉（用户已落决定、界面已处理）⇒ 当作拒绝
+                return Verdict::Deny;
+            };
+            if let Some(decision) = slot.inbox.pop_front() {
+                return match decision {
+                    Decision::Allow(code) => Verdict::Allow(code),
+                    Decision::Deny => Verdict::Deny,
+                };
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Verdict::Timeout;
+            }
+            let (guard, _) = self
+                .ready
+                .wait_timeout(inner, deadline - now)
+                .unwrap_or_else(|e| e.into_inner());
+            inner = guard;
+        }
+    }
+
+    /// 记一次「码不符」，返回还能不能再试。
+    pub fn record_failure(&self, token: &str) -> bool {
+        let mut inner = self.lock();
+        let Some(slot) = inner.incoming.iter_mut().find(|s| s.token == token) else {
+            return false;
+        };
+        slot.attempts = slot.attempts.saturating_sub(1);
+        slot.attempts > 0
+    }
+
+    /// 摘掉一个请求槽位（成功、拒绝、超时都走这里）。
+    pub fn remove(&self, token: &str) {
+        self.lock().incoming.retain(|s| s.token != token);
+    }
+
+    /// 本机发起：开一个槽位（结果由后台线程回填），返回编号。
+    pub fn open_outgoing(&self, peer: String, code: String) -> String {
+        let mut inner = self.lock();
+        let token = Self::next_token(&mut inner);
+        inner.outgoing.push(OutgoingSlot {
+            token: token.clone(),
+            peer,
+            code,
+            state: PairingState::WaitingPeer,
+            finished_at: None,
+        });
+        token
+    }
+
+    /// 回填本机发起的配对结果。
+    pub fn finish_outgoing(&self, token: &str, state: PairingState) {
+        let mut inner = self.lock();
+        if let Some(slot) = inner.outgoing.iter_mut().find(|s| s.token == token) {
+            slot.state = state;
+            slot.finished_at = Some(Instant::now());
+        }
+    }
+
+    /// 本机发起的配对槽位（含刚结束的，供界面显示成败）。
+    pub fn outgoing_rows(&self) -> Vec<PairingRow> {
+        let mut inner = self.lock();
+        let now = Instant::now();
+        inner.outgoing.retain(|s| match s.finished_at {
+            Some(at) => now.duration_since(at) < OUTGOING_TTL,
+            None => true,
+        });
+        inner
+            .outgoing
+            .iter()
+            .map(|s| PairingRow {
+                token: s.token.clone(),
+                peer: s.peer.clone(),
+                code: s.code.clone(),
+                state: s.state,
+                remaining: 0,
+            })
+            .collect()
+    }
+
+    /// 对端发起、还没落决定的请求。
+    pub fn pending_rows(&self) -> Vec<PairingRow> {
+        self.lock()
+            .incoming
+            .iter()
+            .map(|s| PairingRow {
+                token: s.token.clone(),
+                peer: s.peer.clone(),
+                code: s.code.clone(),
+                state: PairingState::WaitingUser,
+                remaining: s.attempts,
+            })
+            .collect()
+    }
+
+    /// 落定用户决定：`code` 为 `Some` 表示允许并提交用户输入的码。
+    pub fn decide(&self, token: &str, code: Option<String>) -> Result<String> {
+        let mut inner = self.lock();
+        let Some(slot) = inner.incoming.iter_mut().find(|s| s.token == token) else {
+            return Err(GlowError::Missing(format!(
+                "没有编号为 {token} 的配对请求（可能已结束）"
+            )));
+        };
+        slot.inbox
+            .push_back(match code {
+                Some(code) => Decision::Allow(code),
+                None => Decision::Deny,
+            });
+        drop(inner);
+        self.ready.notify_all();
+        Ok(token.to_string())
+    }
+}
+
+/// 配对的两条流程。持有身份与信任列表——配对成功就是往信任列表里写一笔。
+pub struct PairingHub {
+    queue: Arc<PairingQueue>,
+    identity: Arc<Identity>,
+    trust: Arc<TrustFile>,
+    /// 一次配对最多等多久（沿用 `pending_timeout_secs`）。
+    wait: Duration,
+}
+
+impl PairingHub {
+    pub fn new(identity: Arc<Identity>, trust: Arc<TrustFile>, wait: Duration) -> Arc<Self> {
+        Arc::new(PairingHub {
+            queue: Arc::new(PairingQueue::new()),
+            identity,
+            trust,
+            wait,
+        })
+    }
+
+    pub fn queue(&self) -> &Arc<PairingQueue> {
+        &self.queue
+    }
+
+    /// 本机发起配对：连上、握手、登记槽位后立刻返回 `(编号, 校验码)`。
+    ///
+    /// **立刻返回码**是有意的：界面要第一时间把它显示给人核对，
+    /// 等配对结束再回就晚了（那时人已经忘了该核对什么）。
+    /// 等待对方输入的过程在后台线程里进行。
+    pub fn start(self: &Arc<Self>, device: &Device) -> Result<(String, String)> {
+        let stream = TcpStream::connect_timeout(&device.addr, CONNECT_TIMEOUT)?;
+        // 给读操作设上限：对端不回答时不能让这个线程无限期挂着
+        stream.set_read_timeout(Some(self.wait))?;
+        let transport = TcpTransportAdapter::from_stream(stream)?;
+        let mut session = PairingSession::initiate(
+            Box::new(transport),
+            Arc::clone(&self.identity),
+            Arc::clone(&self.trust) as Arc<dyn TrustList>,
+            session_slot(),
+        )?;
+
+        let code = session.code()?;
+        let token = self.queue.open_outgoing(device.name.clone(), code.clone());
+        // 自报的是**显示名**（来自本机身份单例），不是密钥身份
+        session.request(&DeviceIdentity::global().name)?;
+
+        let hub = Arc::clone(self);
+        let peer_name = device.name.clone();
+        let wait_token = token.clone();
+        std::thread::spawn(move || {
+            let state = match session.wait() {
+                Ok(outcome) => {
+                    // 指纹来自握手里的静态公钥（不是对方声称的字符串）
+                    match hub.trust.trust(&outcome.peer_fingerprint, &peer_name) {
+                        Ok(()) => {
+                            append_log(&format!(
+                                "已与「{peer_name}」配对（指纹 {}，校验码 {}）",
+                                outcome.peer_fingerprint, outcome.code
+                            ));
+                            PairingState::Paired
+                        }
+                        Err(e) => {
+                            append_log(&format!("配对成功但写入信任列表失败：{e}"));
+                            PairingState::Failed
+                        }
+                    }
+                }
+                Err(GlowError::Rejected(reason)) => {
+                    append_log(&format!("与「{peer_name}」配对被拒绝：{reason}"));
+                    PairingState::Denied
+                }
+                Err(e) => {
+                    append_log(&format!("与「{peer_name}」配对失败：{e}"));
+                    PairingState::Failed
+                }
+            };
+            hub.queue.finish_outgoing(&wait_token, state);
+        });
+
+        Ok((token, code))
+    }
+
+    /// 对端发起配对：登记请求、等用户决定、按结果回帧；同意则写入信任列表。
+    ///
+    /// 返回是否配对成功。
+    pub fn handle_incoming(&self, mut session: PairingSession, peer_name: String) -> Result<bool> {
+        let code = session.code()?;
+        let token = self.queue.register(peer_name.clone(), code.clone());
+        append_log(&format!(
+            "配对请求 #{token} 来自「{peer_name}」；本机校验码 {code}"
+        ));
+
+        let deadline = Instant::now() + self.wait;
+        let mut accepted = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.queue.wait_decision(&token, remaining) {
+                Verdict::Allow(typed) => {
+                    if session.approve(&typed)? {
+                        accepted = true;
+                        break;
+                    }
+                    // 码不符：不发拒绝帧，会话保持，让用户再输一次
+                    append_log(&format!("配对 #{token}：校验码不符"));
+                    if !self.queue.record_failure(&token) {
+                        append_log(&format!("配对 #{token}：校验码错误次数用尽，已终止"));
+                        session.deny("校验码不符")?;
+                        break;
+                    }
+                }
+                Verdict::Deny => {
+                    session.deny("用户拒绝")?;
+                    break;
+                }
+                Verdict::Timeout => {
+                    session.deny("等待确认超时")?;
+                    append_log(&format!("配对 #{token}：等待确认超时，已自动拒绝"));
+                    break;
+                }
+            }
+        }
+        self.queue.remove(&token);
+
+        if accepted {
+            let peer = session.peer()?;
+            self.trust.trust(&peer.peer_fingerprint, &peer_name)?;
+            append_log(&format!(
+                "已与「{peer_name}」配对（指纹 {}，校验码 {}）",
+                peer.peer_fingerprint, peer.code
+            ));
+        }
+        Ok(accepted)
+    }
+}
+
+/// 对端发来配对、但本端是前台 `serve` 模式（没有常驻队列可问人）时的统一答复。
+pub fn refuse_in_serve_mode(session: &mut PairingSession) -> Result<()> {
+    session.deny("对端未开启配对（请先运行 glowlink on）")
+}

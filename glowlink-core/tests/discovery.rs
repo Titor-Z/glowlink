@@ -8,6 +8,7 @@ use glowlink_core::controller::discovery::{
 };
 use glowlink_core::model::error::Result;
 use glowlink_core::model::packet::Hello;
+use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::model::ports::DISCOVERY_PORT_SPAN;
 use glowlink_core::model::probe::{PortDecision, PortOwner};
 use glowlink_core::patterns::adapter::UdpDiscoveryAdapter;
@@ -83,7 +84,13 @@ impl DiscoveryTransport for FakeTransport {
 }
 
 fn hello(id: &str, name: &str, port: u16) -> Hello {
-    Hello { id: id.into(), name: name.into(), port, reply_port: 9267 }
+    Hello {
+        id: id.into(),
+        name: name.into(),
+        port,
+        reply_port: 9267,
+        kind: DeviceKind::Desktop,
+    }
 }
 
 fn controller(peer: Arc<FakePeer>, id: &str, query_every: Duration) -> DiscoveryController {

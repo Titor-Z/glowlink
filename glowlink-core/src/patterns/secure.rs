@@ -226,7 +226,7 @@ impl TransferTransport for SecureTransport {
 }
 
 /// 帧类型名（错误信息里说清楚收到的是什么，别只说「格式错误」）。
-fn frame_name(frame: &Frame) -> &'static str {
+pub(crate) fn frame_name(frame: &Frame) -> &'static str {
     match frame {
         Frame::Query(_) => "Query",
         Frame::Hello(_) => "Hello",
@@ -240,5 +240,8 @@ fn frame_name(frame: &Frame) -> &'static str {
         Frame::SecureHello(_) => "SecureHello",
         Frame::SecureProof(_) => "SecureProof",
         Frame::SecureData(_) => "SecureData",
+        Frame::PairRequest { .. } => "PairRequest",
+        Frame::PairOk => "PairOk",
+        Frame::PairDeny { .. } => "PairDeny",
     }
 }

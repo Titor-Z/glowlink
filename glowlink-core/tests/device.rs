@@ -4,9 +4,31 @@ use std::time::Duration;
 
 use glowlink_core::model::device::DeviceBook;
 use glowlink_core::model::packet::Hello;
+use glowlink_core::model::packet::DeviceKind;
 
 fn hello(id: &str, name: &str, port: u16) -> Hello {
-    Hello { id: id.into(), name: name.into(), port, reply_port: 9267 }
+    Hello {
+        id: id.into(),
+        name: name.into(),
+        port,
+        reply_port: 9267,
+        kind: DeviceKind::Desktop,
+    }
+}
+
+#[test]
+fn kind_is_refreshed_on_every_observation() {
+    // 同一 ID 换了设备、或对端升级后开始上报类型：每次广播都要跟着刷新，
+    // 否则界面会一直拿第一次看到的值画图标。
+    let mut book = DeviceBook::new(Duration::from_secs(30));
+    book.observe(&hello("peer-1", "甲机", 4000), "10.0.0.1".parse().unwrap());
+    assert_eq!(book.find("peer-1").unwrap().kind, DeviceKind::Desktop);
+
+    let mut upgraded = hello("peer-1", "甲机", 4000);
+    upgraded.kind = DeviceKind::Unknown;
+    book.observe(&upgraded, "10.0.0.1".parse().unwrap());
+    assert_eq!(book.find("peer-1").unwrap().kind, DeviceKind::Unknown);
+    assert_eq!(book.len(), 1, "刷新类型不该多出一台设备");
 }
 
 fn ip(last: u8) -> IpAddr {

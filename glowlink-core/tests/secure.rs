@@ -201,6 +201,28 @@ fn trusted_fingerprint_is_flagged_for_auto_accept() {
 }
 
 #[test]
+fn plaintext_pair_request_is_refused_no_downgrade() {
+    // 配对同样不允许降级：对端直接发明文 PairRequest，必须当场拒绝。
+    // 允许降级等于给中间人一条「不经加密也能配对」的入口。
+    let (ours, _theirs, (to_us, to_them)) = linked();
+    let identity = Arc::new(Identity::generate());
+    let mut secure =
+        SecureTransport::responder(Box::new(ours), identity, Arc::new(NoTrust), session_slot());
+
+    to_us.push(Frame::PairRequest { name: "冒名者".into() });
+    let error = secure.send_frame(&Frame::PairOk).expect_err("明文配对请求必须被拒");
+    let text = error.to_string();
+    assert!(text.contains("明文"), "应指出收到的是明文帧，实际：{text}");
+
+    let sent = to_them.pop(Duration::from_millis(200)).expect("应发出握手 hello");
+    assert!(
+        matches!(sent, Frame::SecureHello(_)),
+        "握手阶段只允许发明文 SecureHello，实际发了 {sent:?}"
+    );
+    assert!(to_them.pop(Duration::from_millis(50)).is_err(), "不应额外泄露配对应答");
+}
+
+#[test]
 fn plaintext_offer_is_refused_no_downgrade() {
     // 对端完全不参与加密：收到我方 hello 后直接回一个明文 Offer。
     // 我方必须明确报「期望加密握手」而不是「那就算了，用明文吧」。

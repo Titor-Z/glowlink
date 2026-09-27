@@ -11,6 +11,7 @@ use glowlink_cli::view::tui::{
     apply_key, parse_path_input, AppState, Focus, PendingItem, Snapshot, TuiAction,
 };
 use glowlink_core::model::device::{Device, DeviceId};
+use glowlink_core::model::packet::DeviceKind;
 
 fn device(id: &str, name: &str, port: u16) -> Device {
     Device {
@@ -18,6 +19,7 @@ fn device(id: &str, name: &str, port: u16) -> Device {
         name: name.to_string(),
         addr: format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
         last_seen: Instant::now(),
+        kind: DeviceKind::Desktop,
     }
 }
 

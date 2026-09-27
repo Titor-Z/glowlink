@@ -10,6 +10,7 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use glowlink_core::model::error::{GlowError, Result};
+use glowlink_ipc::PendingRow;
 
 /// 一个待确认的接收请求。
 ///
@@ -24,6 +25,23 @@ pub struct PendingOffer {
     pub fingerprint: String,
     /// 6 位校验码（两端相同，供人工比对）。
     pub code: String,
+}
+
+impl PendingOffer {
+    /// 转成 IPC 的 `PENDING` 数据行。
+    ///
+    /// 内部结构（队列项）与线上格式（`PendingRow`）分开：
+    /// 这样以后给队列项加字段不会默默改掉协议。
+    pub fn to_row(&self, token: &str) -> PendingRow {
+        PendingRow {
+            token: token.to_string(),
+            peer: self.peer.clone(),
+            name: self.name.clone(),
+            size: self.size,
+            fingerprint: self.fingerprint.clone(),
+            code: self.code.clone(),
+        }
+    }
 }
 
 /// 队列里的一个槽位：`token` 给用户手敲，`decision` 由 IPC 线程写入。
@@ -107,6 +125,16 @@ impl PendingQueue {
             .iter()
             .filter(|w| w.decision.is_none())
             .map(|w| (w.token.clone(), w.offer.clone()))
+            .collect()
+    }
+
+    /// 同 [`Self::list`]，但直接给出 IPC 的数据行（给 `IpcHost` 用）。
+    pub fn rows(&self) -> Vec<PendingRow> {
+        self.lock()
+            .waiting
+            .iter()
+            .filter(|w| w.decision.is_none())
+            .map(|w| w.offer.to_row(&w.token))
             .collect()
     }
 

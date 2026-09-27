@@ -1,0 +1,7 @@
+[package]
+name = "glowlink-ipc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glowlink-core = { path = "../glowlink-core" }
