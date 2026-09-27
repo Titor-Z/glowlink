@@ -8,7 +8,8 @@ use gpui::App;
 use std::sync::Arc;
 
 use glowlink_desktop::controller::{
-    DeviceSource, IpcSource, PairingSource, PreviewSource, PreviewTransfer, TransferSource,
+    DeviceSource, IpcSource, PairingSource, PreviewPairing, PreviewSource, PreviewTransfer,
+    TransferSource,
 };
 
 fn main() {
@@ -33,14 +34,24 @@ fn main() {
         Option<Arc<dyn TransferSource>>,
     ) = if preview {
         log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
-        // 预览默认**不带**传输卡（那是真实传输态）；想单独看卡片用 GLOWLINK_PREVIEW=xfer
-        let preview_transfer: Option<Arc<dyn TransferSource>> =
-            match std::env::var("GLOWLINK_PREVIEW").unwrap_or_default().as_str() {
-                "xfer" => Some(Arc::new(PreviewTransfer::halfway())),
-                "xfer-done" => Some(Arc::new(PreviewTransfer::finished_receive())),
-                _ => None,
-            };
-        (Arc::new(PreviewSource::discovered()), None, None, preview_transfer)
+        // 预览默认**不带**卡片（卡片是真实状态）；想单独看排版用
+        // `xfer` / `xfer-done` / `pair`（三张卡各自单独看，免得互相挡）
+        let variant = std::env::var("GLOWLINK_PREVIEW").unwrap_or_default();
+        let preview_transfer: Option<Arc<dyn TransferSource>> = match variant.as_str() {
+            "xfer" => Some(Arc::new(PreviewTransfer::halfway())),
+            "xfer-done" => Some(Arc::new(PreviewTransfer::finished_receive())),
+            _ => None,
+        };
+        let preview_pairing: Option<Arc<dyn PairingSource>> = match variant.as_str() {
+            "pair" => Some(Arc::new(PreviewPairing::default())),
+            _ => None,
+        };
+        (
+            Arc::new(PreviewSource::discovered()),
+            None,
+            preview_pairing,
+            preview_transfer,
+        )
     } else {
         if !ipc.running() {
             log::info!("服务没在跑，正在拉起守护进程…");
