@@ -169,12 +169,15 @@ fn dist2(a: Point, b: Point) -> f32 {
     dx * dx + dy * dy
 }
 
-/// 某个点是否落在中心盘的命中区里（拖动配对用）。
+/// 某个点是否落在吸附判定区里（把设备拖到本机上就算）。
 ///
-/// 命中区就是**中心盘本身**（84px），不含呼吸光圈：光圈是视觉层，
-/// 把它算进命中会让「看着没放上去」也生效，手感变糊。
-pub fn hits_center(point: Point) -> bool {
-    let radius = theme::CENTER_HIT / 2.0;
+/// 半径取 `SNAP_RADIUS`（50px，任务书 v1.0），比中心盘半径 42 略宽松：
+/// 盘缘再往外一点也算吸附，手不必抖到极致。
+///
+/// **判定只在松手那一刻做**：拖动过程中只做视觉高亮。
+/// 拖动中实时判定会出现「吸附近似触发」的抖动——坐标与动画帧不同步，看着像卡了一下。
+pub fn snaps_to_center(point: Point) -> bool {
+    let radius = crate::model::drag::SNAP_RADIUS;
     dist2(point, self_center()) <= radius * radius
 }
 

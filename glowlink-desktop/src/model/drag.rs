@@ -10,6 +10,11 @@ use glowlink_ipc::row::PairingState;
 pub const GHOST_SCALE: f32 = 1.08;
 /// 抓起的瞬间从这里长到 [`GHOST_SCALE`]：一步到位会显得很硬。
 pub const GHOST_SCALE_MIN: f32 = 1.0;
+/// 吸附判定半径（圆心距）。任务书 v1.0：**小于 50px 才算吸附成功**。
+///
+/// 比设计稿那句「中心 84px 的盘本身」（盘半径 42）略宽松 8px：
+/// 盘缘再往外一点也算，手上不抖就好。
+pub const SNAP_RADIUS: f32 = 50.0;
 /// 松手没落到中心盘时，飞回原位的时长。
 pub const RETURN_MS: u64 = 280;
 /// 节点淡出/淡入的时长（拖动开始时原件淡出、松手后淡入）。

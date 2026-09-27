@@ -146,7 +146,7 @@ impl AppRoot {
     ///
     /// 派生值：由 `drag_at` 现算，不另存一个会跟它不一致的布尔量。
     fn over_center(&self) -> bool {
-        self.drag_at.map(layout::hits_center).unwrap_or(false)
+        self.drag_at.map(layout::snaps_to_center).unwrap_or(false)
     }
 
     /// 把一台设备拖到了本机盘上：发起配对。
@@ -345,6 +345,9 @@ impl Render for AppRoot {
                     |this, event: &DragMoveEvent<DeviceDrag>, _window, cx| {
                         let point = window_point(event.bounds.origin, event.event.position);
                         let dragging = Some(event.drag(cx).id.clone());
+                        // 再次按住 = 打断回弹：否则那份「飞回原位」的一次性动画
+                        // 还在每帧摆位置，跟拖动抢同一个坐标
+                        this.returning = None;
                         let changed = this.dragging != dragging || this.drag_at != Some(point);
                         if changed {
                             this.dragging = dragging;
@@ -497,22 +500,23 @@ impl Render for AppRoot {
                                 },
                             ))
                     })
-                    // 中心盘的落点区：84px 的盘本身（不含呼吸光圈）。
-                    // 设计稿那句「落在中心 84px 内才生效」就是它。
+                    // 落点区：**得装下 r=50 的吸附圆**（84px 的方框装不下它的四角），
+                    // 否则边缘上「明明该吸附」的位置会因为落点区没盖住而收不到松手事件。
+                    // 真正的判定在下面用圆算一次（方框只负责「别漏事件」）。
                     .child(
                         div()
                             .id("center-hit")
                             .absolute()
-                            .left(px(self_rect.x - theme::CENTER_HIT / 2.0))
-                            .top(px(self_rect.y - theme::CENTER_HIT / 2.0))
-                            .w(px(theme::CENTER_HIT))
-                            .h(px(theme::CENTER_HIT))
-                            .rounded(px(theme::CENTER_HIT / 2.0))
+                            .left(px(self_rect.x - crate::model::drag::SNAP_RADIUS))
+                            .top(px(self_rect.y - crate::model::drag::SNAP_RADIUS))
+                            .w(px(crate::model::drag::SNAP_RADIUS * 2.0))
+                            .h(px(crate::model::drag::SNAP_RADIUS * 2.0))
+                            .rounded(px(crate::model::drag::SNAP_RADIUS))
                             .on_drop(cx.listener(
                                 |this, drag: &DeviceDrag, _window, cx| {
                                     // 命中区是圆，而落点区是方：这里再用圆判定一次
                                     let inside =
-                                        this.drag_at.map(layout::hits_center).unwrap_or(false);
+                                        this.drag_at.map(layout::snaps_to_center).unwrap_or(false);
                                     if inside {
                                         // 命中：位置本来就没动过，淡入回原位即可
                                         this.dragging = None;

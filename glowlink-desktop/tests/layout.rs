@@ -4,7 +4,7 @@
 //! 只能靠肉眼发现。所以几何全部抽成纯函数，在这里钉死。
 
 use glowlink_desktop::model::layout::{
-    self, hits_center, place_devices, self_center, snap_to_device, NodeSize, Point, Rect,
+    self, place_devices, self_center, snap_to_device, snaps_to_center, NodeSize, Point, Rect,
     CENTER_CLEAR, MIN_DIST,
 };
 use glowlink_desktop::theme;
@@ -136,14 +136,14 @@ fn device_label_sits_below_the_disc() {
 }
 
 #[test]
-fn center_hit_is_the_disc_itself() {
-    // 命中区 = 中心盘本身（84px），不含 8px 的呼吸光圈：
-    // 把光圈算进命中会让「看着没放上去」也生效，手感变糊。
-    assert!(hits_center(Point { x: 160.0, y: 240.0 }), "正中心当然算命中");
-    assert!(hits_center(Point { x: 160.0 + 41.0, y: 240.0 }), "盘内边缘算命中");
-    assert!(!hits_center(Point { x: 160.0 + 43.0, y: 240.0 }), "盘外就落空");
-    // 光圈区域（42..50）必须明确落空
-    assert!(!hits_center(Point { x: 160.0 + 46.0, y: 240.0 }), "光圈不算命中区");
+fn snapping_zone_is_fifty_pixels_from_the_center() {
+    // 任务书 v1.0：圆心距 < 50px 才算吸附成功（设计稿的「84px 盘」是直径，
+    // 换算成半径 42——多给的这 8px 是给手抖留的）
+    assert!(snaps_to_center(Point { x: 160.0, y: 240.0 }), "正中心当然算");
+    assert!(snaps_to_center(Point { x: 160.0 + 49.0, y: 240.0 }), "49px 内算吸附");
+    assert!(snaps_to_center(Point { x: 160.0 + 42.0, y: 240.0 }), "盘缘仍算吸附");
+    assert!(!snaps_to_center(Point { x: 160.0 + 51.0, y: 240.0 }), "51px 就落空");
+    assert!(!snaps_to_center(Point { x: 160.0 + 46.0, y: 240.0 + 46.0 }), "斜向 65px 更落空");
 }
 
 #[test]
