@@ -17,6 +17,41 @@ const BAR_WIDTH: usize = 24;
 /// 进度刷新间隔：太密会刷屏，太疏会显得卡住。
 const REFRESH: Duration = Duration::from_millis(100);
 
+/// 发送方握手成功后要打印的一行会话信息。
+///
+/// 校验码**任何情况下都要打印**：本机信任对方，不代表对方也信任本机——
+/// 对方可能正因为「不认识本机」而要求核对，藏起来人就无从对照了。
+pub fn session_banner(target: &str, fingerprint: &str, code: &str, trusted: bool) -> String {
+    let trust_note = if trusted {
+        "（已信任）"
+    } else {
+        ""
+    };
+    let code_note = if trusted {
+        "（本机已信任对方，若对方要求核对请出示此码）"
+    } else {
+        ""
+    };
+    format!(
+        "已与 {target} 建立加密连接：对端指纹 {fingerprint}{trust_note}\n\
+         本次会话校验码 **{code}** ← 请与接收方屏幕上显示的核对{code_note}"
+    )
+}
+
+/// 接收方展示的「来源」行：指纹与校验码。
+///
+/// 同样**已信任也要显示校验码**（对称的核对需求）。
+pub fn source_line(fingerprint: &str, code: &str, trusted: bool) -> String {
+    if trusted {
+        format!(
+            "  已信任设备（指纹 {fingerprint}）    校验码 **{code}**\
+             （本机无需核对；若发送方要求核对请出示此码）"
+        )
+    } else {
+        format!("  设备指纹 {fingerprint}    校验码 **{code}**（请与发送方屏幕核对）")
+    }
+}
+
 pub struct CliView {
     /// 是否对**已信任**设备免确认自动接收。
     auto_accept: bool,
@@ -85,14 +120,12 @@ impl TransferView for CliView {
         let untrusted = match &info {
             Some(info) if !info.trusted => {
                 // 用户要把这两个跟发送方屏幕上显示的核对一遍
-                println!(
-                    "  设备指纹 {}    校验码 **{}**（请与发送方屏幕核对）",
-                    info.peer_fingerprint, info.code
-                );
+                println!("{}", source_line(&info.peer_fingerprint, &info.code, false));
                 true
             }
-            Some(_) => {
-                println!("  已信任设备（指纹 {}）", info.as_ref().unwrap().peer_fingerprint);
+            Some(info) => {
+                // 已信任也要把码显示出来：发送方可能正要求核对（本机信任对方 ≠ 对方信任本机）
+                println!("{}", source_line(&info.peer_fingerprint, &info.code, true));
                 false
             }
             None => {

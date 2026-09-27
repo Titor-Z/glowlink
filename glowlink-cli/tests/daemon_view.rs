@@ -286,3 +286,14 @@ fn progress_is_a_noop_on_daemon() {
     // 守护进程没有终端，进度只写日志会淹掉有用信息；这里只要求不 panic
     view.progress("对端", 512, 1024);
 }
+
+/// 已信任设备走人工确认时，日志里也必须留着校验码。
+///
+/// 「本机信任对方」不等于「对方信任本机」：发送方那边可能正要求核对，
+/// 而日志是事后唯一能查到「这次到底跟谁核对过」的地方。
+#[test]
+fn trusted_pending_still_logs_the_code() {
+    use glowlink_cli::view::daemon::pending_hint;
+    let hint = pending_hint("abcdef0123456789", CODE, true);
+    assert!(hint.contains(CODE), "已信任也要留码：{hint}");
+}

@@ -21,6 +21,22 @@ use crate::keys::TrustFile;
 use crate::pending::{PendingOffer, PendingQueue};
 use crate::state::append_log;
 
+/// `glowlink list` 里每条待确认请求的「来源」提示（已信任也要带校验码）。
+pub fn pending_hint(fingerprint: &str, code: &str, trusted: bool) -> String {
+    if fingerprint.is_empty() {
+        return String::new();
+    }
+    if trusted {
+        // 已信任不等于不用核对：发送方那边可能正准备核对，码必须看得见。
+        // 同时说清「已信任为什么还问」：免确认由 --yes 控制。
+        format!(
+            "设备指纹 {fingerprint}（已信任；免确认请用 glowlink on --yes）  校验码 **{code}**"
+        )
+    } else {
+        format!("设备指纹 {fingerprint}  校验码 **{code}**（请与发送方屏幕核对）")
+    }
+}
+
 pub struct DaemonView {
     queue: Arc<PendingQueue>,
     timeout: Duration,
@@ -73,7 +89,8 @@ impl TransferView for DaemonView {
             code: code.clone(),
         };
         let hint = if trusted {
-            "已信任设备，等待确认".to_string()
+            // 日志也要留码：事后排查「这次传输到底跟谁核对过」只有它可查
+            format!("已信任设备，校验码 {code}")
         } else {
             format!("未配对设备，校验码 {code}（请与发送方核对）")
         };

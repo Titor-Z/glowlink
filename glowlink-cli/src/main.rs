@@ -20,6 +20,7 @@ use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::view::tui::{self, Header, TuiAction};
+use glowlink_cli::view::daemon as daemon_view;
 use glowlink_cli::view::{panel, style};
 use glowlink_cli::DaemonView;
 use glowlink_cli::CliView;
@@ -185,37 +186,35 @@ fn cmd_panel() -> Result<()> {
     Ok(())
 }
 
-/// 设备表的来源间隔：界面每 200ms 重绘，这里 300ms 取一次就够。
+/// 设备表与待确认表的来源间隔：界面每 200ms 重绘，这里 300ms 取一次就够。
 const DEVICE_POLL: Duration = Duration::from_millis(300);
 
-/// 起一个后台线程持续产出设备表，界面只读快照。
+/// 起一个后台线程持续产出界面快照（设备表 + 待确认表），界面只读快照。
 ///
-/// 后台服务在跑时**必须走它的 IPC 表**：发现端口同一时刻只能有一个主人，
-/// 界面再去绑一次只会降级成临时端口、看不到主动找上门的设备。
+/// 后台服务在跑时**必须走它的 IPC**：发现端口同一时刻只能有一个主人，
+/// 界面再去绑一次只会降级成临时端口、看不到主动找上门的设备；
+/// 待确认请求也只在后台服务里（界面只是它的前端）。
 /// 查表失败时保留上一份结果，别让列表闪空。
-fn spawn_device_source(
+fn spawn_snapshot_source(
     config: &Config,
     discovery_port: u16,
     span: u16,
-) -> Result<Arc<Mutex<Vec<glowlink_core::Device>>>> {
-    let snapshot: Arc<Mutex<Vec<glowlink_core::Device>>> = Arc::new(Mutex::new(Vec::new()));
+) -> Result<Arc<Mutex<tui::Snapshot>>> {
+    let snapshot: Arc<Mutex<tui::Snapshot>> = Arc::new(Mutex::new(tui::Snapshot::default()));
 
     if let Some(state) = daemon::running_state() {
         let sink = Arc::clone(&snapshot);
         std::thread::spawn(move || loop {
-            let devices = ipc::IpcClient::connect(&state)
-                .ok()
-                .and_then(|mut client| client.call("DEVICES").ok())
-                .map(|lines| ipc_devices(&lines));
-            if let Some(devices) = devices {
-                *sink.lock().unwrap_or_else(|e| e.into_inner()) = devices;
+            if let Some(fresh) = daemon_snapshot(&state) {
+                *sink.lock().unwrap_or_else(|e| e.into_inner()) = fresh;
             }
             std::thread::sleep(DEVICE_POLL);
         });
         return Ok(snapshot);
     }
 
-    // 没有后台服务：自己起一个发现线程（UDP 收包会阻塞，不能放在界面线程里）
+    // 没有后台服务：自己起一个发现线程（UDP 收包会阻塞，不能放在界面线程里）；
+    // 此时没有待确认请求可显示——接受/拒绝必须有后台服务来执行。
     let snapshot_for_thread = Arc::clone(&snapshot);
     let identity = DeviceIdentity::global().clone();
     let transport = NativeTransportFactory.create(discovery_port, span)?;
@@ -231,9 +230,36 @@ fn spawn_device_source(
             std::thread::sleep(Duration::from_millis(500));
             continue;
         }
-        *snapshot_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = discovery.devices();
+        let mut fresh = snapshot_for_thread.lock().unwrap_or_else(|e| e.into_inner());
+        fresh.devices = discovery.devices();
     });
     Ok(snapshot)
+}
+
+/// 从后台服务取一份完整快照（设备 + 待确认）；取不到返回 `None`（保留上一份）。
+fn daemon_snapshot(state: &State) -> Option<tui::Snapshot> {
+    let mut client = ipc::IpcClient::connect(state).ok()?;
+    let devices = ipc_devices(&client.call("DEVICES").ok()?);
+    let pending = client
+        .call("PENDING")
+        .ok()
+        .map(|lines| {
+            lines
+                .iter()
+                .skip(1)
+                .filter_map(|line| ipc::parse_pending_line(line))
+                .map(|(token, peer, name, size, fingerprint, code)| tui::PendingItem {
+                    token,
+                    peer,
+                    name,
+                    size,
+                    fingerprint,
+                    code,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(tui::Snapshot { devices, pending })
 }
 
 /// 交互式设备列表：选中设备后输入文件路径，回车即发送。
@@ -250,11 +276,10 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
     }
     let discovery_port = discovery_port(config, args)?;
     let span = discovery_port_span(config, args)?;
-    let snapshot = spawn_device_source(config, discovery_port, span)?;
-    let daemon = daemon::running_state().map(|state| {
-        let pending = daemon_pending(&state).unwrap_or(0);
-        (state.pid, pending)
-    });
+    let snapshot = spawn_snapshot_source(config, discovery_port, span)?;
+    // 接受/拒绝只能由后台服务执行：它才是持有套接字与待确认队列的那一方
+    let daemon_state = daemon::running_state();
+    let daemon = daemon_state.as_ref().map(|state| state.pid);
 
     let identity = DeviceIdentity::global();
     let header = Header {
@@ -264,8 +289,24 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
         daemon,
     };
 
-    match tui::run(snapshot, header)? {
+    let decisions_allowed = daemon_state.is_some();
+    let decide = |verb: &str, token: &str| -> std::result::Result<String, String> {
+        let Some(state) = daemon_state.as_ref() else {
+            return Err("需要后台服务才能接受/拒绝（先跑 glowlink on）".to_string());
+        };
+        let mut client = ipc::IpcClient::connect(state).map_err(|e| e.to_string())?;
+        let lines = client
+            .call(&format!("{verb} {token}"))
+            .map_err(|e| e.to_string())?;
+        Ok(lines
+            .first()
+            .map(|line| ipc::ok_payload(line).to_string())
+            .unwrap_or_default())
+    };
+    match tui::run(snapshot, header, decisions_allowed, decide)? {
         TuiAction::Quit => Ok(()),
+        // 接受/拒绝在界面内完成，不会走到这里；走到说明逻辑有变，按退出处理
+        TuiAction::Accept { .. } | TuiAction::Reject { .. } => Ok(()),
         TuiAction::Send { addr, name, path } => {
             println!("发送到「{name}」（{addr}）：{}", path.display());
             // 地址已经有了，直接直连发送，不再重新搜索一遍
@@ -423,14 +464,8 @@ fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
         else {
             continue;
         };
-        let trust_hint = if fingerprint.is_empty() {
-            String::new()
-        } else if daemon_trusts(&fingerprint) {
-            // 说清楚「已信任」为什么还要问：免确认由 --yes 控制
-            format!("设备指纹 {fingerprint}（已信任；免确认请用 glowlink on --yes）")
-        } else {
-            format!("设备指纹 {fingerprint}  校验码 **{code}**（请与发送方屏幕核对）")
-        };
+        let trust_hint =
+            daemon_view::pending_hint(&fingerprint, &code, daemon_trusts(&fingerprint));
         println!(
             "[等待确认 {}] {peer} 想发来「{name}」（{}）",
             style().strong(&format!("#{token}")),
@@ -724,14 +759,14 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
         secure.handshake()?;
         if let Some(info) = secure.session_info() {
             println!(
-                "已与 {} 建立加密连接：对端指纹 {}{}",
-                target,
-                info.peer_fingerprint,
-                if info.trusted { "（已信任）" } else { "" }
+                "{}",
+                glowlink_cli::view::cli::session_banner(
+                    &target.to_string(),
+                    &info.peer_fingerprint,
+                    &info.code,
+                    info.trusted,
+                )
             );
-            if !info.trusted {
-                println!("校验码 **{}** ← 请与接收方屏幕上显示的核对", info.code);
-            }
         }
         let view = CliView::new(true);
         let sent = transfer.send_file(&mut secure, file, &view)?;
