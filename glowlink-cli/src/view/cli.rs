@@ -64,11 +64,14 @@ pub struct CliView {
 }
 
 struct Progress {
-    /// 上一次绘制时的进度，用于计算瞬时速率。
+    /// 上一次绘制时的进度，用于识别「新的一轮传输」。
     last_done: u64,
     last_draw: Instant,
-    started: Instant,
     drawn: bool,
+    /// 滑动窗口测速。
+    meter: SpeedMeter,
+    /// 非终端下已经打过的百分比档（每 10% 一行，日志不至于刷屏又能看出进度）。
+    bucket: u32,
 }
 
 impl CliView {
@@ -172,8 +175,9 @@ impl TransferView for CliView {
             *state = Some(Progress {
                 last_done: 0,
                 last_draw: now,
-                started: now,
                 drawn: false,
+                meter: SpeedMeter::new(now),
+                bucket: 0,
             });
             state.as_mut().expect("刚写入")
         } else {
@@ -186,21 +190,10 @@ impl TransferView for CliView {
             return;
         }
 
-        let elapsed = now.duration_since(progress.started).as_secs_f64();
-        let speed = if elapsed > 0.0 { done as f64 / elapsed } else { 0.0 };
-        let eta = if finished {
-            0
-        } else if speed > 0.0 {
-            ((total.saturating_sub(done) as f64 / speed).ceil()) as u64
-        } else {
-            0
-        };
-        let eta_text = if finished {
-            "0s".to_string()
-        } else if speed > 0.0 {
-            human_duration(eta)
-        } else {
-            "--".to_string()
+        let speed = progress.meter.observe(done, now);
+        let eta_text = match eta_seconds(done, total, speed) {
+            Some(seconds) => human_duration(seconds),
+            None => "--".to_string(),
         };
 
         let line = format!(
@@ -219,10 +212,15 @@ impl TransferView for CliView {
             // 终端：原地刷新。用 \x1b[K 清掉上一次的残留字符。
             print!("\r{line}\x1b[K");
             progress.drawn = true;
-        } else if finished || !progress.drawn {
-            // 非终端（重定向 / CI / 后台）：只输出整行文本，避免日志里塞满 \r
-            println!("{line}");
-            progress.drawn = true;
+        } else {
+            // 非终端（重定向 / CI / 后台）：整行输出，避免日志里塞满 \r；
+            // 频率压到「每跨一个 10% 档 + 第一次 + 完成」——既能看出进度，又不刷屏。
+            let bucket = percent(done, total) / 10;
+            if finished || !progress.drawn || bucket > progress.bucket {
+                println!("{line}");
+                progress.drawn = true;
+                progress.bucket = bucket;
+            }
         }
         progress.last_done = done;
         progress.last_draw = now;
@@ -280,8 +278,85 @@ pub fn human_size(bytes: u64) -> String {
 }
 
 /// 速率：固定 MB/s 单位，便于不同量级之间直接比较。
+/// 测速窗口：每秒重算一次。
+///
+/// 用「窗口内的增量」而不是「全程平均」：传到一半掉速（对方磁盘慢、Wi-Fi 抖动）时，
+/// 全程平均会长时间停在旧的高值上，ETA 也就跟着骗人。
+pub const SPEED_WINDOW: Duration = Duration::from_secs(1);
+
+/// 速度采样器（纯状态 + 纯算术，可单测）。
+pub struct SpeedMeter {
+    started: Instant,
+    /// 上一次窗口采样的进度与时刻。
+    sampled_done: u64,
+    sampled_at: Instant,
+    /// 最近一次窗口测得的速率。
+    measured: f64,
+    /// 是否已经完成过至少一次窗口采样。
+    ///
+    /// 有它才能区分「还没测过（退回全程平均）」与「测出来就是 0（卡住了）」——
+    /// 少了这个标记，卡住的传输会被全程平均悄悄粉饰成一个好看的旧速度。
+    sampled: bool,
+}
+
+impl SpeedMeter {
+    pub fn new(now: Instant) -> Self {
+        SpeedMeter { started: now, sampled_done: 0, sampled_at: now, measured: 0.0, sampled: false }
+    }
+
+    /// 记录一次进度，返回当前速率（字节/秒）。
+    ///
+    /// 窗口未满时退回全程平均（否则传输刚开始那几秒会显示 0，看着像卡住）；
+    /// 窗口满了就以窗口为准，**包括掉到 0 的情况**——那正是要如实报出来的。
+    pub fn observe(&mut self, done: u64, now: Instant) -> f64 {
+        let window = now.duration_since(self.sampled_at).as_secs_f64();
+        if window >= SPEED_WINDOW.as_secs_f64() {
+            let delta = done.saturating_sub(self.sampled_done) as f64;
+            self.measured = delta / window;
+            self.sampled_done = done;
+            self.sampled_at = now;
+            self.sampled = true;
+        }
+        if self.sampled {
+            self.measured
+        } else {
+            let elapsed = now.duration_since(self.started).as_secs_f64();
+            if elapsed > 0.0 {
+                done as f64 / elapsed
+            } else {
+                0.0
+            }
+        }
+    }
+}
+
+/// 剩余秒数；无法估算时 `None`。
+pub fn eta_seconds(done: u64, total: u64, speed: f64) -> Option<u64> {
+    // 总量未知（例如 0 字节文件）时不给估计：说「剩 0 秒」是假话
+    if total == 0 {
+        return None;
+    }
+    if done >= total {
+        return Some(0);
+    }
+    if speed <= 0.0 {
+        return None;
+    }
+    Some(((total - done) as f64 / speed).ceil() as u64)
+}
+
+/// 速度：小数值不硬套 MB/s，否则「0.0 MB/s」看着像卡死。
 pub fn human_speed(bytes_per_sec: f64) -> String {
-    format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    if bytes_per_sec < 1024.0 * 1024.0 {
+        format!("{:.1} KB/s", bytes_per_sec / 1024.0)
+    } else {
+        format!("{:.1} MB/s", bytes_per_sec / (1024.0 * 1024.0))
+    }
+}
+
+/// 多文件发送时给每个文件加个序号；只有一个文件时不加（省得啰嗦）。
+pub fn file_index_label(index: usize, total: usize, name: &str) -> Option<String> {
+    (total > 1).then(|| format!("[{}/{}] {name}", index + 1, total))
 }
 
 /// 格式化剩余时间（秒）。

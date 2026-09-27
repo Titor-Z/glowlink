@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use glowlink_cli::keys::TrustFile;
+use glowlink_cli::view::cli::{eta_seconds, file_index_label, SpeedMeter, SPEED_WINDOW};
 use glowlink_cli::CliView;
 use glowlink_core::controller::transfer::TransferView;
 use glowlink_core::patterns::secure::{session_slot, SessionInfo, SessionSlot};
@@ -86,4 +87,84 @@ fn progress_is_throttled_but_always_prints_completion() {
         "进度回调耗时异常：{:?}",
         started.elapsed()
     );
+}
+
+/// 第一个窗口还没满时，退回全程平均（否则传输刚开始那几秒显示 0，看着像卡住）。
+#[test]
+fn speed_meter_falls_back_to_the_average_before_the_first_window() {
+    let t0 = Instant::now();
+    let mut meter = SpeedMeter::new(t0);
+    let early = meter.observe(1024 * 1024, t0 + Duration::from_millis(100));
+    assert_eq!(early, (1024 * 1024) as f64 / 0.1, "窗口未满就用全程平均");
+}
+
+/// 窗口满了之后以窗口为准：中途掉速要立刻反映出来，而不是继续报全程平均。
+#[test]
+fn speed_meter_reports_the_window_not_the_average() {
+    let t0 = Instant::now();
+    let mut meter = SpeedMeter::new(t0);
+
+    // 第一个窗口（0 → 1.001s）搬了 1 MiB
+    let first = meter.observe(1024 * 1024, t0 + SPEED_WINDOW + Duration::from_millis(1));
+    let expected = (1024.0 * 1024.0) / (SPEED_WINDOW.as_secs_f64() + 0.001);
+    assert!(
+        (first - expected).abs() < expected * 0.05,
+        "窗口速率应当约 {expected}，实际 {first}"
+    );
+
+    // 第二个窗口只搬了 50 KiB：掉速必须报出来，而全程平均此刻仍有约 0.5 MiB/s
+    let slow_done = 1024 * 1024 + 50 * 1024;
+    let slower = meter.observe(slow_done, t0 + SPEED_WINDOW * 2 + Duration::from_millis(2));
+    let average_now = slow_done as f64 / (SPEED_WINDOW * 2).as_secs_f64();
+    assert!(
+        slower < average_now / 5.0,
+        "窗口速率 {slower} 明显低于全程平均 {average_now}，必须按窗口报"
+    );
+}
+
+/// 窗口内完全没有进展时，速度要如实归零（而不是继续报旧值）。
+#[test]
+fn speed_meter_drops_to_zero_when_stalled() {
+    let t0 = Instant::now();
+    let mut meter = SpeedMeter::new(t0);
+    let fast = meter.observe(1024 * 1024, t0 + SPEED_WINDOW + Duration::from_millis(1));
+    assert!(fast > 0.0);
+
+    // 又过了一个窗口，进度一点没动
+    let stalled = meter.observe(1024 * 1024, t0 + SPEED_WINDOW * 2 + Duration::from_millis(2));
+    assert_eq!(stalled, 0.0, "卡住就该报 0，别让用户以为还在传");
+    // 恢复传输后又能报出速度
+    let resumed =
+        meter.observe(1024 * 1024 + 512 * 1024, t0 + SPEED_WINDOW * 3 + Duration::from_millis(3));
+    assert!(resumed > 0.0, "恢复后应当重新测出速度，实际 {resumed}");
+}
+
+#[test]
+fn eta_seconds_handles_the_edges() {
+    // 没有速度（刚起步或卡住）就不给估计，而不是瞎猜一个
+    assert_eq!(eta_seconds(0, 1000, 0.0), None);
+    // 总量未知（total=0）时也不给：说「剩 0 秒」是假话
+    assert_eq!(eta_seconds(0, 0, 1024.0), None);
+    // 传完了剩 0
+    assert_eq!(eta_seconds(1000, 1000, 1024.0), Some(0));
+    // 正常估算并向不利方向取整（宁可说 3 秒，别说 2 秒）
+    assert_eq!(eta_seconds(0, 2048, 1024.0), Some(2));
+    assert_eq!(eta_seconds(1024, 4096, 1024.0), Some(3));
+}
+
+#[test]
+fn speed_unit_switches_below_one_megabyte() {
+    // 小文件不能显示「0.0 MB/s」，那看着像卡死
+    assert_eq!(glowlink_cli::view::cli::human_speed(512.0 * 1024.0), "512.0 KB/s");
+    assert_eq!(glowlink_cli::view::cli::human_speed(0.0), "0.0 KB/s");
+    assert_eq!(glowlink_cli::view::cli::human_speed(1024.0 * 1024.0), "1.0 MB/s");
+    // 千兆网线量级，避免出现 "0.1 GB/s" 这种不好比较的单位
+    assert_eq!(glowlink_cli::view::cli::human_speed(112.0 * 1024.0 * 1024.0), "112.0 MB/s");
+}
+
+#[test]
+fn multi_file_sends_get_an_index_only_when_there_are_several() {
+    assert_eq!(file_index_label(0, 1, "a.bin"), None, "单个文件不加序号");
+    assert_eq!(file_index_label(0, 3, "a.bin").unwrap(), "[1/3] a.bin");
+    assert_eq!(file_index_label(2, 3, "c.bin").unwrap(), "[3/3] c.bin");
 }

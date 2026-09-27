@@ -769,7 +769,16 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
     let identity_key = load_or_create_identity()?;
     let trust = TrustFile::open_default()?;
     println!("本机设备指纹 {}", identity_key.fingerprint());
-    for file in &files {
+    let total_files = files.len();
+    for (index, file) in files.iter().enumerate() {
+        // 多文件时给出序号，用户才知道还要等几个（单文件不加，省得啰嗦）
+        if let Some(label) = glowlink_cli::view::cli::file_index_label(
+            index,
+            total_files,
+            &file.display().to_string(),
+        ) {
+            println!("{label}");
+        }
         let stream = factory.connect(target, connect_timeout)?;
         let session: SessionSlot = session_slot();
         let mut secure = SecureTransport::initiator(
