@@ -90,6 +90,15 @@ impl IpcSource {
         let outgoing = Arc::clone(&source.outgoing);
         let service = Arc::clone(&source.service);
         let version = Arc::clone(&source.version);
+
+        // 启动前**先同步抓一次**：否则在首轮轮询完成前 `running()` 一直是 false，
+        // 桌面版会把「已在跑的守护进程」当成没跑，白拉起一次（日志也跟着骗人）。
+        // 这一次抓取只等一个 IPC 往返（毫秒级，且此时还没开窗口）。
+        match fetch() {
+            Ok(first) => *source.shared.lock().unwrap_or_else(|e| e.into_inner()) = first,
+            Err(e) => fail(&shared, &version, e.to_string()),
+        }
+
         // 独立线程而不是 gpui 的 executor：executor 是裸 pollster，
         // 阻塞在里面会把其他后台任务一起拖住（认知纠正里记过）。
         thread::spawn(move || loop {

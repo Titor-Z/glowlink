@@ -37,40 +37,129 @@ pub fn self_center() -> Point {
     Point { x: theme::SELF_CENTER.0, y: theme::SELF_CENTER.1 }
 }
 
-/// 设备节点的**槽位**：设计稿只画了三台（手机/平板/台式机），
-/// 多出来的设备按顺序占用第一个空槽；超过三个就叠在最后一个槽上并计数。
-/// 这样「发现 5 台设备」不会把画面撑破——窗口是锁死 320×500 的。
-pub const SLOTS: [(f32, f32); 3] = [
-    theme::PHONE_CENTER,
-    theme::TABLET_CENTER,
-    theme::DESKTOP_CENTER,
-];
-
-/// 第 `index` 台设备的圆心。
+/// 设备节点的散布规则：**位置不固定**，每台设备在自己的一条环带上占一个位置。
 ///
-/// 越界不回绕：宁可让第 4 台和最后一台重叠（配合界面上的「+N」提示），
-/// 也不要让它跑到窗口外面去——看不见的设备比重叠更难理解。
-pub fn device_center(index: usize) -> Point {
-    let (x, y) = match SLOTS.get(index) {
-        Some(slot) => *slot,
-        None => SLOTS[SLOTS.len() - 1],
-    };
-    Point { x, y }
+/// 要的是「神经元」那种感觉：一圈漂着的亮点，而不是按模板摆好的三格。
+/// 但随机必须是有纪律的，三条约束不能丢：
+/// 1. **稳定**：位置由设备 ID 派生，不随帧、不随列表顺序变（每帧乱跳就不是呼吸，是瘫搐）；
+/// 2. **不重叠**：两圆心距离至少 `MIN_DIST`，靠排斥迭代推开；
+/// 3. **不出图区**：盘与标签都留在节点图内。
+
+/// 与中心盘的**净空**：本机盘半径 42 + 设备盘半径 26 + 间隙 24。
+pub const CENTER_CLEAR: f32 = 92.0;
+/// 两圆心最小距离 = 盘直径 + 间隙（52 + 8）。
+pub const MIN_DIST: f32 = 60.0;
+/// 种子点最远的生成半径（最终还要受窗口边界约束）。
+const SPAWN_MAX: f32 = 200.0;
+/// 设备盘圆心允许的范围（已留出半径 26 + 2px 余量；下边多留是给设备名）。
+const BOUND_X: (f32, f32) = (30.0, 290.0);
+const BOUND_Y: (f32, f32) = (56.0, 396.0);
+/// 排斥迭代次数：几百次对十几枚节点仍是瞬时（只在设备集合变化时算一次），
+/// 但必须**定死次数**才可复现（不做「收敛了才停」，那会让不同设备数跑出不同精度）。
+const RELAX_STEPS: usize = 400;
+
+/// 一次布局的结果（与输入顺序一一对应）。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Placement {
+    pub centers: Vec<Point>,
+    /// 漂浮相位（0..1）：与位置同源派生，同样与顺序无关。
+    pub phases: Vec<f32>,
 }
 
-/// 漂浮动画里相邻槽位的相位差（一圈的百分比）。
+/// 给一组设备 ID 算位置。
 ///
-/// 设计稿是三个硬编延迟（`0s / -2.3s / -4.7s`，周期 7s），换算成相位就是
-/// `0 / 0.329 / 0.671`——步长 ≈ 0.335。写成乘法而不是查表：
-/// 第 4 台以后（叠在最后一槽上的那几台）也能接着错开，不会跟前面同拍。
-const FLOAT_PHASE_STEP: f32 = 0.335;
+/// **与输入顺序无关**（内部先按 ID 排序再算，最后映回原顺序）：
+/// 发现层返回设备表的顺序可能变（谁先应答），顺序一变位置就整体挪一下，看起来像全体抽搐。
+pub fn place_devices(ids: &[&str]) -> Placement {
+    let mut sorted: Vec<&str> = ids.to_vec();
+    sorted.sort_unstable();
 
-/// 第 `index` 台设备的漂浮相位（0..1，单位是「一圈的几成」）。
+    let mut points: Vec<Point> = sorted.iter().map(|id| seeded_point(id)).collect();
+    relax(&mut points);
+
+    // 映回调用者的顺序
+    let mut centers = vec![Point { x: 0.0, y: 0.0 }; ids.len()];
+    let mut phases = vec![0.0; ids.len()];
+    for (index, id) in ids.iter().enumerate() {
+        let slot = sorted.binary_search(id).expect("id 来自同一份列表");
+        centers[index] = points[slot];
+        phases[index] = seeded_phase(id);
+    }
+    Placement { centers, phases }
+}
+
+/// ID → 一个看起来随机的落点（在中心盘净空之外、窗口之内）。
+fn seeded_point(id: &str) -> Point {
+    let seed = fnv1a(id);
+    let angle = (mix(seed) as f64 / u64::MAX as f64) as f32 * std::f32::consts::TAU;
+    // 半径从净空一直散到远处：**不是一个固定半径的环**，而是一圈里疏密不匀的散点，
+    // 这才是「神经元」而不是「行星轨道」（半径一样会让画面看得出模板）。
+    let ratio = (mix(seed ^ 0x51ed_2701_9b4d_2c0f) as f64 / u64::MAX as f64) as f32;
+    let radius = CENTER_CLEAR + ratio * (SPAWN_MAX - CENTER_CLEAR);
+    let center = self_center();
+    Point { x: center.x + radius * angle.cos(), y: center.y + radius * angle.sin() }
+}
+
+/// ID → 漂浮相位（与位置同源：同一台设备的「轨迹」保持一致，重启也不变）。
+fn seeded_phase(id: &str) -> f32 {
+    (mix(fnv1a(id) ^ 0x9e37_79b9_7f4a_7c15) as u32 as f32) / u32::MAX as f32
+}
+
+/// 排斥迭代：两两推开 + 卡回净空与边界。
 ///
-/// **错相**是设计稿的硬要求（「所有运动都是缓慢、连续、错相的」）：
-/// 同拍的话三个节点会像被同一根线扯着，顿时变成机械舞。
-pub fn float_phase(index: usize) -> f32 {
-    (index as f32 * FLOAT_PHASE_STEP) % 1.0
+/// 纯几何、无随机数：同一输入永远得到同一输出（测试才能钉住）。
+fn relax(points: &mut [Point]) {
+    let center = self_center();
+    for _ in 0..RELAX_STEPS {
+        for i in 0..points.len() {
+            for j in (i + 1)..points.len() {
+                let (a, b) = (points[i], points[j]);
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let d = (dx * dx + dy * dy).sqrt();
+                if d >= MIN_DIST {
+                    continue;
+                }
+                // 完全重合时给一个确定的方向，否则除零就飞了
+                let (nx, ny) = if d < 0.001 { (1.0, 0.0) } else { (dx / d, dy / d) };
+                let push = (MIN_DIST - d) / 2.0;
+                points[i] = Point { x: a.x - nx * push, y: a.y - ny * push };
+                points[j] = Point { x: b.x + nx * push, y: b.y + ny * push };
+            }
+        }
+        for point in points.iter_mut() {
+            let (dx, dy) = (point.x - center.x, point.y - center.y);
+            let d = (dx * dx + dy * dy).sqrt();
+            // 太靠近中心盘会压住本机
+            if d < CENTER_CLEAR {
+                let (nx, ny) = if d < 0.001 { (1.0, 0.0) } else { (dx / d, dy / d) };
+                *point = Point { x: center.x + nx * CENTER_CLEAR, y: center.y + ny * CENTER_CLEAR };
+            }
+            // 最外一圈靠边界夹住（窗口只有 320×500，没有“再往外”的余地）
+            point.x = point.x.clamp(BOUND_X.0, BOUND_X.1);
+            point.y = point.y.clamp(BOUND_Y.0, BOUND_Y.1);
+        }
+    }
+}
+
+/// splitmix64 的收尾混合。
+///
+/// 直接用 FNV 的高位当坐标会撞车（实测两台设备的相位一模一样，因为短字符串
+/// 只有末位不同时高位相关性很强）。先把位搅匀再用，三个用途之间再用不同常数错开。
+fn mix(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// FNV-1a：不引依赖的稳定散列（`DefaultHasher` 不保证跳版本后不变）。
+fn fnv1a(text: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// 两点距离的平方（比较远近时不必开方）。
@@ -91,12 +180,12 @@ pub fn hits_center(point: Point) -> bool {
 
 /// 拖动时该吸附到哪台设备（就近吸附，超过半径就松手回弹）。
 ///
-/// `radius` 由调用方给（界面用盘直径），返回被吸附的下标；
-/// 都不在范围内返回 `None` ⇒ 回弹到原位。
-pub fn snap_to_device(point: Point, devices: usize, radius: f32) -> Option<usize> {
+/// `centers` 是当前布局（由 [`place_devices`] 算得），`radius` 由调用方给
+/// （界面用盘直径），返回被吸附的下标；都不在范围内返回 `None` ⇒ 回弹到原位。
+pub fn snap_to_device(point: Point, centers: &[Point], radius: f32) -> Option<usize> {
     let mut best: Option<(usize, f32)> = None;
-    for index in 0..devices {
-        let d = dist2(point, device_center(index));
+    for (index, center) in centers.iter().enumerate() {
+        let d = dist2(point, *center);
         if d <= radius * radius && best.map(|(_, bd)| d < bd).unwrap_or(true) {
             best = Some((index, d));
         }

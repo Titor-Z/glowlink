@@ -339,11 +339,11 @@ pub const WINDOW_MARGIN: f32 = 24.0;
 /// 拖动到中心时的命中区 = 中心盘本身。
 pub const CENTER_HIT: f32 = 84.0;
 
-/// 节点圆心（**全窗坐标**）。
+/// 本机中心盘的圆心（**全窗坐标**）。
+///
+/// 设备节点**没有**固定坐标：它们在以本机为心的环带里按设备 ID 散布
+/// （见 `model/layout::place_devices`）——设计稿那三个槽位已废弃。
 pub const SELF_CENTER: (f32, f32) = (160.0, 240.0);
-pub const PHONE_CENTER: (f32, f32) = (66.0, 86.0);
-pub const TABLET_CENTER: (f32, f32) = (254.0, 86.0);
-pub const DESKTOP_CENTER: (f32, f32) = (160.0, 364.0);
 /// 空态提示的纵坐标。
 pub const EMPTY_NOTE_Y: f32 = 312.0;
 

@@ -36,6 +36,12 @@ pub struct AppRoot {
     service_on: bool,
     /// 当前显示的设备（快照）。
     devices: Vec<DeviceView>,
+    /// 设备在环带上的位置（与 `devices` 同序）。
+    ///
+    /// 只在**设备集合变化**时重算：每帧重算会让所有节点跟着抖，那就不叫漂浮了。
+    placement: layout::Placement,
+    /// 上次布局用的设备 ID，用来判断「集合是否真变了」。
+    placed_ids: Vec<String>,
 }
 
 impl AppRoot {
@@ -54,7 +60,23 @@ impl AppRoot {
         );
         let mut state = UiState::new();
         state.observe_devices(devices.len());
-        AppRoot { device_name: device_name.into(), state, source, service, service_on, devices }
+        let (placement, placed_ids) = Self::layout_for(&devices);
+        AppRoot {
+            device_name: device_name.into(),
+            state,
+            source,
+            service,
+            service_on,
+            devices,
+            placement,
+            placed_ids,
+        }
+    }
+
+    /// 给一批设备算位置（纯几何，见 `layout::place_devices`）。
+    fn layout_for(devices: &[DeviceView]) -> (layout::Placement, Vec<String>) {
+        let ids: Vec<&str> = devices.iter().map(|d| d.id.as_str()).collect();
+        (layout::place_devices(&ids), devices.iter().map(|d| d.id.clone()).collect())
     }
 
     /// 拉一次快照；**真变了才返回 `true`**（调用方据此决定要不要重绘）。
@@ -72,6 +94,11 @@ impl AppRoot {
             log::info!("设备表更新：{} 台", fresh.len());
             self.devices = fresh;
             self.state.observe_devices(self.devices.len());
+            // 位置只在集合变了才算：同一批设备换序（谁先应答不一定）不该挪位置
+            let ids: Vec<String> = self.devices.iter().map(|d| d.id.clone()).collect();
+            if ids != self.placed_ids {
+                (self.placement, self.placed_ids) = Self::layout_for(&self.devices);
+            }
         }
         if service_on != self.service_on {
             log::info!("服务开关：{}", if service_on { "开" } else { "关" });
@@ -149,7 +176,13 @@ impl Render for AppRoot {
             .iter()
             .enumerate()
             .map(|(index, device)| {
-                let rect = layout::Rect::from_center(layout::device_center(index), NodeSize::Device);
+                let center = self
+                    .placement
+                    .centers
+                    .get(index)
+                    .copied()
+                    .unwrap_or_else(layout::self_center);
+                let rect = layout::Rect::from_center(center, NodeSize::Device);
                 node::node(
                     &t,
                     node::NodeSpec {
@@ -158,7 +191,7 @@ impl Render for AppRoot {
                         label: &device.name,
                         look: node::NodeLook::device_default(),
                         interactive: true,
-                        float_phase: layout::float_phase(index),
+                        float_phase: self.placement.phases.get(index).copied().unwrap_or(0.0),
                     },
                 )
             })
