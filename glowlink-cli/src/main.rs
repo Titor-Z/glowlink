@@ -19,6 +19,7 @@ use glowlink_cli::keys::{load_or_create_identity, TrustFile};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
+use glowlink_cli::view::tui::{self, Header, TuiAction};
 use glowlink_cli::view::{panel, style};
 use glowlink_cli::DaemonView;
 use glowlink_cli::CliView;
@@ -90,12 +91,19 @@ fn run() -> Result<()> {
         Some("on") => cmd_on(&config, &args[1..]),
         Some("off") => cmd_off(&config, &args[1..]),
         Some("trust") => cmd_trust(&args[1..]),
+        Some("ui") => cmd_ui(&config, &args[1..]),
         Some("accept") => cmd_decide(true, &args[1..]),
         Some("reject") => cmd_decide(false, &args[1..]),
         Some("send") => cmd_send(&config, &args[1..]),
         Some("config") => cmd_config(&config),
-        // `glowlink` 回车给「第一屏」：状态 + 最常用的几件事
-        None => cmd_panel(),
+        // 敲 `glowlink` 回车：终端里进交互界面，管道/重定向里给纯文本面板
+        None => {
+            if io::stdout().is_terminal() {
+                cmd_ui(&config, &[])
+            } else {
+                cmd_panel()
+            }
+        }
         Some("help") | Some("--help") | Some("-h") => {
             println!("{}", panel::help_text(VERSION, config.discovery_port));
             Ok(())
@@ -126,22 +134,28 @@ fn print_notice(line: &str) {
 }
 
 /// 敲 `glowlink` 回车：只回答「现在什么状态 + 最常做的事」。
+/// 问后台服务「现在有几个待确认的传输」。
+///
+/// 查不到就返回 `None`：状态面板与交互界面都不该因为这一项而失败。
+fn daemon_pending(state: &state::State) -> Option<usize> {
+    ipc::IpcClient::connect(state)
+        .ok()
+        .and_then(|mut client| client.call_first("STATUS").ok())
+        .and_then(|line| {
+            ipc::ok_payload(&line)
+                .split(' ')
+                .nth(1)
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+}
+
 fn cmd_panel() -> Result<()> {
     let identity = DeviceIdentity::global();
     // 先绑定到局部变量：面板要借用 receive_dir，临时值活不到打印那一刻
     let running = daemon::running_state();
     let daemon_status = match running.as_ref() {
         Some(state) => {
-            // 待确认数取不到也不该让面板失败：查不到就不显示这一项
-            let pending = ipc::IpcClient::connect(&state)
-                .ok()
-                .and_then(|mut client| client.call_first("STATUS").ok())
-                .and_then(|line| {
-                    ipc::ok_payload(&line)
-                        .split(' ')
-                        .nth(1)
-                        .and_then(|n| n.parse::<usize>().ok())
-                });
+            let pending = daemon_pending(state);
             Some(panel::DaemonStatus {
                 pid: state.pid,
                 receive_dir: &state.receive_dir,
@@ -164,6 +178,100 @@ fn cmd_panel() -> Result<()> {
     }
     println!("{}", lines.collect::<Vec<_>>().join("\n"));
     Ok(())
+}
+
+/// 设备表的来源间隔：界面每 200ms 重绘，这里 300ms 取一次就够。
+const DEVICE_POLL: Duration = Duration::from_millis(300);
+
+/// 起一个后台线程持续产出设备表，界面只读快照。
+///
+/// 后台服务在跑时**必须走它的 IPC 表**：发现端口同一时刻只能有一个主人，
+/// 界面再去绑一次只会降级成临时端口、看不到主动找上门的设备。
+/// 查表失败时保留上一份结果，别让列表闪空。
+fn spawn_device_source(
+    config: &Config,
+    discovery_port: u16,
+) -> Result<Arc<Mutex<Vec<glowlink_core::Device>>>> {
+    let snapshot: Arc<Mutex<Vec<glowlink_core::Device>>> = Arc::new(Mutex::new(Vec::new()));
+
+    if let Some(state) = daemon::running_state() {
+        let sink = Arc::clone(&snapshot);
+        std::thread::spawn(move || loop {
+            let devices = ipc::IpcClient::connect(&state)
+                .ok()
+                .and_then(|mut client| client.call("DEVICES").ok())
+                .map(|lines| ipc_devices(&lines));
+            if let Some(devices) = devices {
+                *sink.lock().unwrap_or_else(|e| e.into_inner()) = devices;
+            }
+            std::thread::sleep(DEVICE_POLL);
+        });
+        return Ok(snapshot);
+    }
+
+    // 没有后台服务：自己起一个发现线程（UDP 收包会阻塞，不能放在界面线程里）
+    let snapshot_for_thread = Arc::clone(&snapshot);
+    let identity = DeviceIdentity::global().clone();
+    let transport = NativeTransportFactory.create(discovery_port)?;
+    let mut discovery = DiscoveryController::new(
+        transport,
+        identity,
+        0,
+        device_timeout(config),
+        query_interval(config),
+    );
+    std::thread::spawn(move || loop {
+        if discovery.tick().is_err() {
+            std::thread::sleep(Duration::from_millis(500));
+            continue;
+        }
+        *snapshot_for_thread.lock().unwrap_or_else(|e| e.into_inner()) = discovery.devices();
+    });
+    Ok(snapshot)
+}
+
+/// 交互式设备列表：选中设备后输入文件路径，回车即发送。
+///
+/// 界面只负责「选谁来收、发哪个文件」，真正的传输仍然走原来的发送流程
+/// （退出界面、恢复终端之后再传），所以不会有两套进度渲染。
+fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
+    if !io::stdout().is_terminal() {
+        return Err(GlowError::Usage(
+            "glowlink ui: 需要终端环境\n\n\
+             提示：脚本里请用 glowlink list（一次性列表）。"
+                .into(),
+        ));
+    }
+    let discovery_port = discovery_port(config, args)?;
+    let snapshot = spawn_device_source(config, discovery_port)?;
+    let daemon = daemon::running_state().map(|state| {
+        let pending = daemon_pending(&state).unwrap_or(0);
+        (state.pid, pending)
+    });
+
+    let identity = DeviceIdentity::global();
+    let header = Header {
+        version: VERSION.to_string(),
+        local_name: identity.name.clone(),
+        local_id: truncate(&identity.id, 8),
+        daemon,
+    };
+
+    match tui::run(snapshot, header)? {
+        TuiAction::Quit => Ok(()),
+        TuiAction::Send { addr, name, path } => {
+            println!("发送到「{name}」（{addr}）：{}", path.display());
+            // 地址已经有了，直接直连发送，不再重新搜索一遍
+            cmd_send(
+                config,
+                &[
+                    "--peer".to_string(),
+                    addr.to_string(),
+                    path.to_string_lossy().to_string(),
+                ],
+            )
+        }
+    }
 }
 
 fn cmd_config(config: &Config) -> Result<()> {
@@ -1010,7 +1118,11 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                 let snapshot = discovery.devices();
                 *shared.devices.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
             }
-            Err(e) => state::append_log(&format!("发现循环出错：{e}")),
+            Err(e) => {
+                // 兜底退让：错误分支若不睡，任何持续性错误都会变成忙等（CPU 空转 + 写爆日志）
+                state::append_log(&format!("发现循环出错：{e}"));
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
     }
     state::append_log("主循环退出");

@@ -83,6 +83,7 @@ pub fn help_text(version: &str, discovery_port: u16) -> String {
          \x20     确认或拒绝待接收的传输（有多个待确认时须给编号）。\n\
          \n\
          临时操作（不需要后台服务）：\n\
+         \x20 ui                               交互式设备列表（默认命令，仅终端）\n\
          \x20 list [--watch] [--timeout 秒] [--discovery-port 端口]\n\
          \x20     扫描附近设备；--watch 原地刷新。后台服务在跑时结果直接来自它。\n\
          \x20 send <设备名|设备ID> <文件>…\n\

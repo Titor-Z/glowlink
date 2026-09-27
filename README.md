@@ -16,8 +16,10 @@
 # 前台常驻：交互式，直接在终端里按 y 确认（Ctrl-C 退出）
 ./glowlink serve --dir ./received
 
-# 扫描局域网内的设备（守护进程在跑时结果来自守护进程）
-./glowlink list
+# 看设备 / 发文件（终端里直接跑 ./glowlink 就是交互式界面）
+./glowlink                 # 交互式设备列表：方向键选设备 → 回车输入文件路径（可把文件拖进终端）
+./glowlink ui              # 同上，显式写法
+./glowlink list            # 一次性列表（守护进程在跑时结果来自它）
 
 # 发送：按设备名或 ID 发送（可多个文件）
 ./glowlink send 客厅的Mac 照片.jpg 报告.pdf

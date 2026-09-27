@@ -12,4 +12,6 @@ name = "glowlink"
 path = "src/main.rs"
 
 [dependencies]
+crossterm = "0.29.0"
 glowlink-core = { path = "../glowlink-core" }
+ratatui = "0.30.2"

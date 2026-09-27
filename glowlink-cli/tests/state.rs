@@ -100,3 +100,34 @@ fn paths_live_under_dot_glowlink() {
     assert_eq!(glowlink_cli::state::state_path(), dir.join("state.json"));
     assert_eq!(glowlink_cli::state::log_path(), dir.join("daemon.log"));
 }
+
+/// 重复消息必须被抑制，但**第一条一定要写下去**（信息不能丢）。
+use std::time::{Duration, Instant};
+
+#[test]
+fn repeated_log_lines_are_suppressed_after_the_first() {
+    use glowlink_cli::state::{RepeatFilter, LOG_MAX_BYTES};
+    let _ = LOG_MAX_BYTES;
+    let mut filter = RepeatFilter::default();
+    let start = Instant::now();
+    let line = "发现循环出错：IO 错误：Network is unreachable (os error 51)";
+
+    // 第一条原样写出
+    assert_eq!(filter.admit(line, start).as_deref(), Some(line));
+    // 紧接着的重复被抑制（这就是曾经一秒 1.5 万行、把日志写到 180MB 的场景）
+    for i in 1..10_000 {
+        let now = start + Duration::from_millis(i);
+        assert!(filter.admit(line, now).is_none(), "重复消息不该写盘");
+    }
+
+    // 一分钟到了给一行汇总，说明刚才压掉了多少条
+    let later = start + Duration::from_secs(61);
+    let summary = filter.admit(line, later).expect("应当补一行汇总");
+    assert!(summary.contains("已重复"), "汇总行要说明重复情况：{summary}");
+    assert!(summary.starts_with(line), "汇总行本身也要看得出是什么消息");
+
+    // 换了消息就立刻写（只有**连续相同**的才抑制）
+    assert_eq!(filter.admit("换了一条", later).as_deref(), Some("换了一条"));
+    // 再换回原来的消息，也算新消息
+    assert_eq!(filter.admit(line, later).as_deref(), Some(line));
+}

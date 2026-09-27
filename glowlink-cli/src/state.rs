@@ -6,8 +6,9 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glowlink_core::model::error::{GlowError, Result};
 
@@ -46,18 +47,79 @@ pub fn log_path() -> PathBuf {
 }
 
 /// 追加一行守护进程日志；写失败时静默——日志本身不该拖垮主流程。
+/// 单条日志的最大字节数：超过就滚一份 `daemon.log.1`，避免日志把磁盘写满。
+pub const LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 同一条消息连刷时，每隔这么久补一行「重复 N 次」的汇总。
+const REPEAT_SUMMARY: Duration = Duration::from_secs(60);
+
+/// 重复消息过滤器。
+///
+/// 网络中断这类环境问题一秒能产生上万条**完全相同**的日志：全写下来既没用
+/// （信息量为零）又会写爆磁盘。这里只保留「第一条」与「每分钟一次的汇总」。
+#[derive(Default)]
+pub struct RepeatFilter {
+    last: Option<(String, u64, Instant)>,
+}
+
+impl RepeatFilter {
+    /// 返回应当写盘的内容：`None` 表示这条被抑制。
+    pub fn admit(&mut self, line: &str, now: Instant) -> Option<String> {
+        match &mut self.last {
+            Some((prev, count, since)) if prev == line => {
+                *count += 1;
+                if now.duration_since(*since) >= REPEAT_SUMMARY {
+                    let text = format!("{line}（同类消息已重复 {count} 次）");
+                    *since = now;
+                    *count = 0;
+                    Some(text)
+                } else {
+                    None
+                }
+            }
+            _ => {
+                self.last = Some((line.to_string(), 0, now));
+                Some(line.to_string())
+            }
+        }
+    }
+}
+
 pub fn append_log(line: &str) {
     let path = log_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    // 进程内共用一个过滤器：日志是单例资源，用锁保证「第一条一定写下去」
+    static FILTER: Mutex<Option<RepeatFilter>> = Mutex::new(None);
+    let to_write = {
+        let mut guard = FILTER.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .get_or_insert_with(RepeatFilter::default)
+            .admit(line, Instant::now())
+    };
+    // 被抑制（同一条消息的后续重复）时直接返回，不碰磁盘
+    let Some(to_write) = to_write else {
+        return;
+    };
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let _ = writeln!(file, "[{stamp}] {line}");
+        let _ = writeln!(file, "[{stamp}] {to_write}");
     }
+}
+
+/// 日志超过上限就滚一份：旧内容改名为 `.1`（只留一代），新日志从空开始。
+fn rotate_log(path: &Path) {
+    let too_big = fs::metadata(path).map(|m| m.len() > LOG_MAX_BYTES).unwrap_or(false);
+    if !too_big {
+        return;
+    }
+    let old = path.with_extension("log.1");
+    let _ = fs::remove_file(&old);
+    let _ = fs::rename(path, &old);
 }
 
 /// 打开日志文件，用于守护进程子进程的 stdout/stderr 重定向。
@@ -66,6 +128,7 @@ pub fn open_log() -> Result<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    rotate_log(&path);
     Ok(OpenOptions::new().create(true).append(true).open(path)?)
 }
 

@@ -81,9 +81,16 @@ impl DiscoveryTransport for UdpDiscoveryAdapter {
         let bytes = Frame::Query(hello.clone()).encode()?;
         // 广播到“对外宣告的端口”：局域网内其它节点监听的都是那个端口，
         // 即使我们自己因为冲突换了端口，别人也要能按约定端口收到查询。
-        self.send_to(&bytes, (Ipv4Addr::BROADCAST, self.announced_port))?;
+        //
+        // 广播发不出去**不算协议失败**：网卡关着、没有路由、机器刚唤醒都会
+        // 报 ENETUNREACH。这类环境问题不能中断这一轮——否则收包也不做了、
+        // 查询时间戳也不更新，主循环就会原地空转（曾一秒写上万行日志把磁盘写满）。
+        let broadcast = self.send_to(&bytes, (Ipv4Addr::BROADCAST, self.announced_port));
         // 同机多节点：广播不一定回到本机，补发回环
-        self.send_to(&bytes, (LOOPBACK, self.announced_port))?;
+        let loopback = self.send_to(&bytes, (LOOPBACK, self.announced_port));
+        // 只有「回环也发不出去」才说明套接字本身出了问题，那才是真错误
+        loopback?;
+        let _ = broadcast;
         Ok(())
     }
 

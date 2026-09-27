@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use glowlink_core::controller::discovery::{DiscoveryEvent, DiscoveryTransport};
 use glowlink_core::controller::transfer::{TransferController, TransferListener, TransferView};
-use glowlink_core::model::packet::{Frame, Hello};
+use glowlink_core::model::packet::{Frame, Hello, MAX_FRAME};
+use glowlink_core::model::probe::{PortDecision, PortOwner};
 use glowlink_core::patterns::adapter::{
     reply_target, TcpListenerAdapter, TcpTransportAdapter, UdpDiscoveryAdapter,
 };
@@ -168,4 +169,52 @@ fn query_sends_broadcast_without_error() {
     let port = free_udp_port();
     let adapter = UdpDiscoveryAdapter::bind(port).unwrap();
     adapter.query(&hello()).expect("广播查询应当发送成功");
+}
+
+/// 广播发不出去（网卡关着 / 没有路由 / 机器刚唤醒）时，这一轮**不能算失败**。
+///
+/// 曾经的毛病：`query()` 里广播那句用了 `?`，一失败就整轮返回错误，
+/// 于是收包不做了、查询时间戳也不更新，守护进程主循环原地空转，
+/// 真机上一秒写 1.5 万行同样的错误、把 `daemon.log` 写到 180MB。
+///
+/// 复现手法：把套接字绑在回环地址上——内核没有「127.0.0.1 → 255.255.255.255」的路由，
+/// 广播必然报 EADDRNOTAVAIL，而回环那一份照样发得出去（同机节点不该受影响）。
+#[test]
+fn broadcast_failure_does_not_fail_the_round() {
+    let port = free_udp_port();
+    let watcher = UdpSocket::bind(("127.0.0.1", port)).unwrap();
+    watcher
+        .set_read_timeout(Some(Duration::from_millis(1000)))
+        .unwrap();
+
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    socket.set_broadcast(true).unwrap();
+    let adapter = UdpDiscoveryAdapter::from_decision(PortDecision {
+        socket,
+        port: 0,
+        preferred: port,
+        owner: PortOwner::Free,
+        shifted: false,
+    })
+    .unwrap();
+
+    adapter.query(&hello()).expect("广播发不出去不该让整轮失败");
+
+    // 回环那一份必须真的发出去了（否则同机节点就人间蒸发了）
+    let mut buf = vec![0u8; MAX_FRAME];
+    let (len, _from) = watcher.recv_from(&mut buf).expect("同机节点应当收到回环查询");
+    assert!(matches!(Frame::decode(&buf[..len]).unwrap(), Frame::Query(_)));
+}
+
+/// 对照实验：证明上面那条用例确实处在一个「广播发不出去」的环境里。
+/// 否则它可能只是碰巧通过（比如日后的系统允许从回环广播）。
+#[test]
+fn broadcast_from_loopback_really_is_impossible() {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    socket.set_broadcast(true).unwrap();
+    let refused = socket.send_to(b"x", ("255.255.255.255", 9267));
+    assert!(
+        refused.is_err(),
+        "前提变了：这台机器居然能从回环地址发广播，上面的用例需要换复现手法"
+    );
 }
