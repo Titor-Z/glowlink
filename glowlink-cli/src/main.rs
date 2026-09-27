@@ -76,6 +76,7 @@ fn run() -> Result<()> {
         Some(daemon::DAEMON_COMMAND) => cmd_daemon(&config, &args[1..]),
         Some("on") => cmd_on(&config, &args[1..]),
         Some("off") => cmd_off(&config, &args[1..]),
+        Some("trust") => cmd_trust(&args[1..]),
         Some("accept") => cmd_decide(true, &args[1..]),
         Some("reject") => cmd_decide(false, &args[1..]),
         Some("send") => cmd_send(&config, &args[1..]),
@@ -616,6 +617,68 @@ fn cmd_off(_config: &Config, _args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// `glowlink trust [forget <指纹|名称>]`：查看/取消已配对设备的免确认。
+fn cmd_trust(args: &[String]) -> Result<()> {
+    let trust = TrustFile::open_default()?;
+    let positional = positional_args(args);
+    match positional.first().map(String::as_str) {
+        None => {
+            let devices = trust.devices();
+            if devices.is_empty() {
+                println!("信任列表为空（还没有配对过任何设备）。");
+                println!("配对方式：收到陌生设备的文件时核对 6 位校验码，然后 glowlink accept <编号>。");
+                return Ok(());
+            }
+            println!("{:<18} {:<16} {}", "设备指纹", "名称", "配对时间");
+            for device in &devices {
+                println!(
+                    "{:<18} {:<16} {}",
+                    device.fingerprint,
+                    truncate(&device.name, 14),
+                    relative_time(device.paired_at)
+                );
+            }
+            println!("\n取消某台设备的免确认：glowlink trust forget <指纹|名称>");
+            Ok(())
+        }
+        Some("forget") => {
+            let key = positional.get(1).ok_or_else(|| {
+                GlowError::Usage("用法：glowlink trust forget <指纹|名称>".into())
+            })?;
+            // 指纹和名称都允许，用户手上可能只有其中一个
+            let target = trust
+                .devices()
+                .into_iter()
+                .find(|d| d.fingerprint == *key || d.name == *key)
+                .ok_or_else(|| GlowError::NotFound(format!("信任列表里没有「{key}」")))?;
+            trust.forget(&target.fingerprint)?;
+            println!(
+                "已取消 {}（{}）的免确认，下次它发文件会重新要求人工确认。",
+                target.fingerprint, target.name
+            );
+            Ok(())
+        }
+        Some(other) => Err(GlowError::Usage(format!(
+            "未知子命令「{other}」；用法：glowlink trust [forget <指纹|名称>]"
+        ))),
+    }
+}
+
+/// 把配对时间说成人话（不引入日期库）。
+fn relative_time(paired_at: u64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let elapsed = now.saturating_sub(paired_at);
+    match elapsed {
+        0..=59 => "刚刚".to_string(),
+        60..=3599 => format!("{} 分钟前", elapsed / 60),
+        3600..=86_399 => format!("{} 小时前", elapsed / 3600),
+        _ => format!("{} 天前", elapsed / 86_400),
+    }
+}
+
 /// `glowlink accept [编号]` / `glowlink reject [编号]`：
 /// 为守护进程里挂起的接收请求落决定；有多个请求时必须给编号。
 fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
@@ -874,6 +937,7 @@ fn print_help() {
          \x20 glowlink on   [--dir 目录] [--yes] [--ipc-port 端口]\n\
          \x20                                           后台常驻；--yes 仅对已信任设备免确认\n\
          \x20 glowlink accept [编号] | reject [编号]   确认/拒绝待接收的文件（编号见 list）\n\
+         \x20 glowlink trust [forget 指纹|名称]        查看/取消已配对设备的免确认\n\
          \x20 glowlink off                           停止守护进程\n\n\
          配置文件：{}（工程默认）→ ~/.config/glowlink/config.toml（用户覆盖）\n\
          也可用 $GLOWLINK_CONFIG 指定用户配置文件路径。\n\

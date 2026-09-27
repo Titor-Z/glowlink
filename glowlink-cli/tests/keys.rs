@@ -162,6 +162,32 @@ fn trust_file_tolerates_broken_lines() {
 }
 
 #[test]
+fn identity_path_can_be_overridden_by_env() {
+    // 同机模拟两台设备：两个进程用不同的身份文件
+    let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = temp_dir("env-identity");
+    let custom = dir.join("another-identity.txt");
+    std::env::set_var("GLOWLINK_IDENTITY", &custom);
+
+    assert_eq!(glowlink_cli::keys::identity_path(), custom);
+
+    let identity = load_or_create_identity_at(&glowlink_cli::keys::identity_path()).unwrap();
+    assert!(custom.is_file(), "应写到覆盖后的路径");
+
+    // 与默认路径下的身份互不影响
+    let default_path = dir.join("identity.txt");
+    let other = load_or_create_identity_at(&default_path).unwrap();
+    assert_ne!(
+        identity.fingerprint(),
+        other.fingerprint(),
+        "两份身份文件应当是两个不同的设备身份"
+    );
+
+    std::env::remove_var("GLOWLINK_IDENTITY");
+    assert!(glowlink_cli::keys::identity_path().ends_with(".glowlink/identity.txt"));
+}
+
+#[test]
 fn identity_and_trust_use_distinct_files() {
     let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = temp_dir("paths");

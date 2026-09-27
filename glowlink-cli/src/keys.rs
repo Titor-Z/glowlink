@@ -1,7 +1,8 @@
 //! 身份密钥文件与信任列表（IO 层）。
 //!
 //! 两个文件都放在 `~/.glowlink/` 下，**行式文本**、原子写入（临时文件 + rename）：
-//! - `identity.txt`：本机长期身份私钥 + 公钥（Unix 上 0600）
+//! - `identity.txt`：本机长期身份私钥 + 公钥（Unix 上 0600）；
+//!   路径可用 `$GLOWLINK_IDENTITY` 覆盖（同机模拟两台设备时用）
 //! - `trusted.txt`：已配对设备（每行 `指纹\t名称\t配对时间`）
 //!
 //! 为什么不用 JSON：这两个文件都是「一行一条记录」的平面结构，
@@ -25,8 +26,14 @@ const IDENTITY_FILE: &str = "identity.txt";
 const TRUST_FILE: &str = "trusted.txt";
 
 /// 身份密钥文件路径。
+///
+/// 可用 `$GLOWLINK_IDENTITY` 直接指定文件，便于**同一台机器模拟两台设备**
+/// （否则同机同用户的进程共享同一份身份，两端指纹会一样）。
 pub fn identity_path() -> PathBuf {
-    state_dir().join(IDENTITY_FILE)
+    match std::env::var_os("GLOWLINK_IDENTITY") {
+        Some(path) => PathBuf::from(path),
+        None => state_dir().join(IDENTITY_FILE),
+    }
 }
 
 /// 信任列表文件路径。
@@ -94,7 +101,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(text: &str) -> Option<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
+    if text.len() % 2 != 0 {
         return None;
     }
     (0..text.len())
