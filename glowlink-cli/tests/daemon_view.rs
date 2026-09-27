@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use glowlink_cli::keys::TrustFile;
 use glowlink_cli::pending::PendingQueue;
+use glowlink_cli::transfers::Transfers;
 use glowlink_cli::DaemonView;
 use glowlink_core::controller::transfer::TransferView;
 use glowlink_core::patterns::secure::{session_slot, NoTrust, SessionInfo, SessionSlot};
@@ -16,6 +17,11 @@ use glowlink_core::patterns::secure::TrustList;
 
 /// 这些用例会改进程级 `HOME`，必须串行。
 static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+/// 每次给一份新的传输登记表：用例之间不共享状态。
+fn transfers() -> Arc<Transfers> {
+    Arc::new(Transfers::new())
+}
 
 /// 当前用例的临时目录（避免碰真实的 ~/.glowlink）。
 fn isolate_home(tag: &str) -> std::sync::MutexGuard<'static, ()> {
@@ -62,12 +68,26 @@ fn trust_file(tag: &str, trusted: bool) -> Arc<TrustFile> {
 
 /// 默认视图：**未信任** + 不开自动接收 ⇒ 一定走「登记待确认」。
 fn view(queue: Arc<PendingQueue>, timeout: Duration, tag: &str) -> DaemonView {
-    DaemonView::new(queue, timeout, session(false), trust_file(tag, false), false)
+    DaemonView::new(
+        queue,
+        timeout,
+        session(false),
+        trust_file(tag, false),
+        false,
+        transfers(),
+    )
 }
 
 /// 已信任 + `--yes` ⇒ 免确认自动接收。
 fn auto_view(queue: Arc<PendingQueue>, timeout: Duration, tag: &str) -> DaemonView {
-    DaemonView::new(queue, timeout, session(true), trust_file(tag, true), true)
+    DaemonView::new(
+        queue,
+        timeout,
+        session(true),
+        trust_file(tag, true),
+        true,
+        transfers(),
+    )
 }
 
 fn wait_until(queue: &PendingQueue, count: usize) {
@@ -191,6 +211,7 @@ fn untrusted_device_is_never_auto_accepted_even_with_yes() {
         session(false),
         trust_file("yes-untrusted", false),
         true,
+        transfers(),
     );
     let worker = std::thread::spawn(move || view.confirm_receive(PEER, "陌生.bin", 4096));
 
@@ -214,6 +235,7 @@ fn confirming_a_new_device_remembers_it_for_next_time() {
         session(false),
         Arc::clone(&trust),
         false,
+        transfers(),
     );
 
     assert!(!trust.is_trusted(FINGERPRINT), "确认之前不该在信任列表里");
@@ -245,6 +267,7 @@ fn rejecting_a_new_device_does_not_remember_it() {
         session(false),
         Arc::clone(&trust),
         false,
+        transfers(),
     );
 
     let decider = {
@@ -271,6 +294,7 @@ fn missing_session_is_refused_outright() {
         empty_session(),
         trust_file("no-session", false),
         false,
+        transfers(),
     );
 
     assert!(!view.confirm_receive(PEER, "可疑.bin", 1));

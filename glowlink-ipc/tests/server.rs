@@ -4,7 +4,8 @@ mod common;
 
 use common::{a_device, pairing_row, pending_row, FakeHost};
 
-use glowlink_ipc::row::PairingState;
+use glowlink_core::model::error::GlowError;
+use glowlink_ipc::row::{PairingState, TransferDirection, TransferRow, TransferState};
 
 use glowlink_ipc::server::{bind_ipc, handle_line};
 
@@ -274,4 +275,58 @@ fn pair_decide_with_unknown_token_is_refused() {
     let (lines, _) = handle_line(&host, "PAIR_ACCEPT 999 000000");
     assert!(lines[0].starts_with("ERR usage "), "实际：{}", lines[0]);
     assert!(host.pair_decisions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn send_passes_device_and_path_and_returns_token_with_code() {
+    let host = FakeHost::default();
+    let (lines, keep_open) = handle_line(&host, "SEND a21cfb23e10383e7 /tmp/报告 final.pdf");
+    assert!(keep_open);
+    // 校验码要和编号一起回：界面要立刻显示码给人核对（不能等传完）
+    assert_eq!(lines[0], "OK 001 513904");
+    let sent = host.sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1);
+    // 路径带空格：只切第一个空白，其余原样
+    assert_eq!(sent[0].1, "/tmp/报告 final.pdf");
+}
+
+#[test]
+fn send_requires_both_the_device_and_the_path() {
+    let host = FakeHost::default();
+    for bad in ["SEND", "SEND a21cfb23e10383e7", "SEND a21cfb23e10383e7   "] {
+        let (lines, _) = handle_line(&host, bad);
+        assert!(lines[0].starts_with("ERR usage "), "「{bad}」应报用法错误：{}", lines[0]);
+    }
+    assert!(host.sent.lock().unwrap().is_empty(), "参数不全时不该真去发");
+}
+
+#[test]
+fn send_reports_the_error_kind_so_exit_codes_survive_ipc() {
+    // 设备找不到是网络侧失败（退出码 3），种类必须原样传回客户端
+    let host = FakeHost::default();
+    host.send_fails.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (lines, _) = handle_line(&host, "SEND 幽灵机 /tmp/a.bin");
+    let expected = glowlink_ipc::codec::error_reply(&GlowError::NotFound("幽灵机".into()));
+    assert_eq!(lines[0], expected, "错误种类必须原样传回，否则退出码会漂");
+    assert!(lines[0].starts_with("ERR "), "实际：{}", lines[0]);
+}
+
+#[test]
+fn transfers_lists_rows_with_the_count_line_first() {
+    let host = FakeHost::default();
+    host.transfers.lock().unwrap().push(TransferRow {
+        token: "001".into(),
+        direction: TransferDirection::Send,
+        name: "a.bin".into(),
+        peer: "甲机".into(),
+        done: 3,
+        total: 10,
+        state: TransferState::Running,
+        note: String::new(),
+    });
+    let (lines, _) = handle_line(&host, "TRANSFERS");
+    assert_eq!(lines[0], "OK 1");
+    let row = TransferRow::from_line(&lines[1]).expect("客户端要能解析这一行");
+    assert_eq!(row.done, 3);
+    assert_eq!(row.direction, TransferDirection::Send);
 }

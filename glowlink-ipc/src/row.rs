@@ -10,6 +10,7 @@
 //! DEVICES  名称 \t ID \t 地址 \t 存活毫秒 \t 类型 \t 是否已信任
 //! PENDING  编号 \t 来源 \t 文件名 \t 字节数 \t 指纹 \t 校验码
 //! PAIRINGS / PAIRPENDING  编号 \t 对端 \t 校验码 \t 状态 \t 剩余尝试
+//! TRANSFERS  编号 \t 方向 \t 文件名 \t 已传字节 \t 总字节 \t 状态 \t 说明
 //! ```
 
 use std::net::SocketAddr;
@@ -82,6 +83,124 @@ impl DeviceRow {
         let trusted = parts.next().map(|v| v == "1").unwrap_or(false);
         Some(DeviceRow { name, id, addr, age_ms, kind, trusted })
     }
+}
+
+/// `SEND` 成功后的回执：编号（后续轮询 `TRANSFERS` 用）+ 6 位校验码。
+///
+/// 校验码**在发文件之前就返回**：接收方要拿它核对，发送方屏幕上必须先有。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SendTicket {
+    pub token: String,
+    pub code: String,
+}
+
+/// 传输的方向。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferDirection {
+    /// 本机发出去。
+    Send,
+    /// 往本机收（对端发来的）。
+    Receive,
+}
+
+impl TransferDirection {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            TransferDirection::Send => "send",
+            TransferDirection::Receive => "recv",
+        }
+    }
+
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "recv" => TransferDirection::Receive,
+            _ => TransferDirection::Send,
+        }
+    }
+}
+
+/// 一次传输的状态。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferState {
+    Running,
+    Done,
+    /// 失败（磁盘、网络、协议）：`note` 里有原因。
+    Failed,
+    /// 对方拒绝接收。
+    Rejected,
+}
+
+impl TransferState {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            TransferState::Running => "running",
+            TransferState::Done => "done",
+            TransferState::Failed => "failed",
+            TransferState::Rejected => "rejected",
+        }
+    }
+
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "done" => TransferState::Done,
+            "failed" => TransferState::Failed,
+            "rejected" => TransferState::Rejected,
+            _ => TransferState::Running,
+        }
+    }
+}
+
+/// `TRANSFERS` 的一行：一次进行中或刚结束的传输。
+///
+/// 速度与 ETA **不在协议里**：界面拿相邻两次快照自己算（除以真实间隔），
+/// 比在守护进程里再养一个测速器更准，也少一处会与真实时间轴脱节的数字。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TransferRow {
+    pub token: String,
+    pub direction: TransferDirection,
+    pub name: String,
+    /// 对端显示名（谁在发 / 发给谁）。
+    pub peer: String,
+    pub done: u64,
+    pub total: u64,
+    pub state: TransferState,
+    /// 失败原因等补充说明；正常时为空。
+    pub note: String,
+}
+
+impl TransferRow {
+    pub fn to_line(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            self.token,
+            self.direction.as_token(),
+            self.name,
+            self.peer,
+            self.done,
+            self.total,
+            self.state.as_token(),
+            self.note
+        )
+    }
+
+    /// 前 7 列缺了就是坏行；`note` 可缺（老服务端不带它）。
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut parts = line.split('\t');
+        let token = parts.next()?.to_string();
+        let direction = TransferDirection::from_token(parts.next()?);
+        let name = parts.next()?.to_string();
+        let peer = parts.next()?.to_string();
+        let done = parts.next()?.parse().ok()?;
+        let total = parts.next()?.parse().ok()?;
+        let state = TransferState::from_token(parts.next()?);
+        let note = parts.next().unwrap_or("").to_string();
+        Some(TransferRow { token, direction, name, peer, done, total, state, note })
+    }
+}
+
+/// 解析 `TRANSFERS` 响应的数据行（跳过首行 `OK <数量>`）。
+pub fn parse_transfers(lines: &[String]) -> Vec<TransferRow> {
+    lines.iter().skip(1).filter_map(|line| TransferRow::from_line(line)).collect()
 }
 
 /// 配对槽位的状态（IPC 行里的可读名字）。

@@ -12,7 +12,9 @@ use std::time::Instant;
 use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::{Device, DeviceId};
-use glowlink_ipc::row::{PairingRow, PairingState, PendingRow};
+use glowlink_ipc::row::{
+    PairingRow, PairingState, PendingRow, SendTicket, TransferRow,
+};
 use glowlink_ipc::server::IpcHost;
 use glowlink_ipc::state::State;
 
@@ -74,6 +76,12 @@ pub struct FakeHost {
     pub pair_decisions: Mutex<Vec<(String, Option<String>)>>,
     /// 已信任的设备 ID（指纹）。
     pub trusted: Mutex<Vec<String>>,
+    /// 被请求发送的 `(设备 ID, 路径)`。
+    pub sent: Mutex<Vec<(String, String)>>,
+    /// 要展示的传输行。
+    pub transfers: Mutex<Vec<TransferRow>>,
+    /// 让 `send_file` 报错（测错误分支）。
+    pub send_fails: AtomicBool,
 }
 
 impl IpcHost for FakeHost {
@@ -131,6 +139,19 @@ impl IpcHost for FakeHost {
 
     fn request_stop(&self) {
         self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    fn send_file(&self, device_id: &str, path: &str) -> Result<SendTicket> {
+        self.sent.lock().unwrap().push((device_id.to_string(), path.to_string()));
+        if self.send_fails.load(Ordering::SeqCst) {
+            // 网络类错误：客户端要靠这个种类还原退出码
+            return Err(GlowError::NotFound(device_id.to_string()));
+        }
+        Ok(SendTicket { token: "001".to_string(), code: "513904".to_string() })
+    }
+
+    fn transfers(&self) -> Vec<TransferRow> {
+        self.transfers.lock().unwrap().clone()
     }
 
     fn pair(&self, key: &str) -> Result<(String, String)> {

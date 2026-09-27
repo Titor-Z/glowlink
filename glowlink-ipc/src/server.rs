@@ -11,7 +11,7 @@ use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::Device;
 
 use crate::codec::{error_reply, END};
-use crate::row::{DeviceRow, PairingRow, PendingRow};
+use crate::row::{DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow};
 use crate::state::State;
 
 /// 本地 IPC 首选端口。与发现端口（9267）无关：IPC 只监听回环，
@@ -62,6 +62,22 @@ pub trait IpcHost: Send + Sync {
 
     /// 请求守护进程退出。
     fn request_stop(&self);
+
+    /// 让守护进程把一个文件发给指定设备。
+    ///
+    /// **同步等到握手完成**（几百毫秒级）才返回：校验码是握手的产物，
+    /// 而它必须在文件开始传之前就显示给用户（接收方要拿它核对）。
+    /// 之后的进度靠 [`Self::transfers`] 轮询，不阻塞调用方。
+    ///
+    /// 默认实现如实报错：不支持发送的替身/老守护进程不该静默成功。
+    fn send_file(&self, _device_id: &str, _path: &str) -> Result<SendTicket> {
+        Err(GlowError::Usage("这个守护进程不支持 SEND".into()))
+    }
+
+    /// 进行中与刚结束的传输（界面画传输卡用）。
+    fn transfers(&self) -> Vec<TransferRow> {
+        Vec::new()
+    }
 }
 
 /// 处理一行 IPC 指令，返回要写回的行；`true` 表示连接可以继续复用。
@@ -182,6 +198,34 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
         "PAIR_REJECT" => match host.pair_decide(arg, None) {
             Ok(token) => (vec![format!("OK 已拒绝 #{token}")], true),
             Err(e) => (vec![error_reply(&e)], true),
+        },
+        "TRANSFERS" => {
+            let rows = host.transfers();
+            let mut lines = vec![format!("OK {}", rows.len())];
+            for row in &rows {
+                lines.push(row.to_line());
+            }
+            (lines, true)
+        }
+        // `SEND <设备 ID> <文件路径>`：路径可能带空格，所以只切第一个空白。
+        // 设备 ID 是 16 位十六进制指纹，本身不会带空格。
+        "SEND" => match arg.split_once(char::is_whitespace) {
+            Some((device_id, path)) if !path.trim().is_empty() => {
+                match host.send_file(device_id, path.trim()) {
+                    // 校验码与 PAIR 同一套形式：界面拿到就显示
+                    Ok(ticket) => (
+                        vec![format!("OK {} {}", ticket.token, ticket.code)],
+                        true,
+                    ),
+                    Err(e) => (vec![error_reply(&e)], true),
+                }
+            }
+            _ => (
+                vec![error_reply(&GlowError::Usage(
+                    "用法：SEND <设备ID> <文件路径>".into(),
+                ))],
+                true,
+            ),
         },
         "STOP" => {
             host.request_stop();

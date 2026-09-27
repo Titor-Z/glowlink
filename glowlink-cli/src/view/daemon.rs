@@ -12,13 +12,16 @@
 //! 陌生设备即使开了 `--yes` 也必须人工确认，否则「无感」就等于「谁都能塞文件」。
 
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use glowlink_core::controller::transfer::TransferView;
 use glowlink_core::patterns::secure::SessionSlot;
+use glowlink_ipc::row::TransferDirection;
 
 use crate::keys::TrustFile;
 use crate::pending::{PendingOffer, PendingQueue};
+use crate::transfers::{Job, Transfers};
 use glowlink_ipc::state::append_log;
 
 /// `glowlink list` 里每条待确认请求的「来源」提示（已信任也要带校验码）。
@@ -44,6 +47,10 @@ pub struct DaemonView {
     session: SessionSlot,
     trust: Arc<TrustFile>,
     auto_accept: bool,
+    /// 传输登记表：接收方向也要能看见进度（不然桌面版只能看“已接收”前的一片空白）。
+    transfers: Arc<Transfers>,
+    /// 本次接收的登记项（确认接收时才建，之后进度往它上写）。
+    job: Mutex<Option<Job>>,
 }
 
 impl DaemonView {
@@ -53,8 +60,17 @@ impl DaemonView {
         session: SessionSlot,
         trust: Arc<TrustFile>,
         auto_accept: bool,
+        transfers: Arc<Transfers>,
     ) -> Self {
-        DaemonView { queue, timeout, session, trust, auto_accept }
+        DaemonView {
+            queue,
+            timeout,
+            session,
+            trust,
+            auto_accept,
+            transfers,
+            job: Mutex::new(None),
+        }
     }
 }
 
@@ -72,6 +88,16 @@ impl TransferView for DaemonView {
         };
         let (fingerprint, code, trusted) =
             (info.peer_fingerprint.clone(), info.code.clone(), info.trusted);
+
+        // 收到就登记：界面从「待确认」变「正在接收」是同一个事件的两半，
+        // 中间不排空档（否则点完确认会有一瞬间什么都没有）。
+        let job = self.transfers.start(
+            TransferDirection::Receive,
+            name.to_string(),
+            peer.to_string(),
+            size,
+        );
+        *self.job.lock().unwrap_or_else(|e| e.into_inner()) = Some(job.clone());
 
         // 已信任 + 开了 --yes ⇒ 无感接收
         if trusted && self.auto_accept {
@@ -113,10 +139,34 @@ impl TransferView for DaemonView {
             }
         } else {
             append_log("未确认（被拒绝或超时），已放弃本次接收");
+            job.reject("本机用户未确认（拒绝或超时）");
         }
         accepted
     }
 
-    /// 守护进程没有终端，进度不往日志里刷：一次传输刷几十行会把有用信息淹掉。
-    fn progress(&self, _label: &str, _done: u64, _total: u64) {}
+    /// 进度写入登记表：守护进程没有终端，日志里刷进度会把有用信息淹掉。
+    fn progress(&self, _label: &str, done: u64, total: u64) {
+        if let Some(job) = self.job.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            job.update(done, total);
+        }
+    }
+}
+
+impl DaemonView {
+    /// 这次接收传完了。
+    ///
+    /// 接收侧必须自己收尾：只管写 `progress` 而不落终态的话，
+    /// 界面上的卡片会永远停在 `running`（实测踩到过）。
+    pub fn finish(&self) {
+        if let Some(job) = self.job.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            job.finish();
+        }
+    }
+
+    /// 这次接收失败了（磁盘写满、对端断开……）。
+    pub fn fail(&self, note: impl Into<String>) {
+        if let Some(job) = self.job.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            job.fail(note);
+        }
+    }
 }

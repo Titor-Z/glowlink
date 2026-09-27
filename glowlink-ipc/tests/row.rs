@@ -1,6 +1,9 @@
 //! `glowlink-ipc/src/row.rs` 的单元测试：数据行的线上格式（跨进程契约）。
 
-use glowlink_ipc::row::{DeviceRow, PendingRow};
+use glowlink_ipc::row::{
+    parse_transfers, DeviceRow, PairingRow, PairingState, PendingRow, TransferDirection,
+    TransferRow, TransferState,
+};
 use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::{Device, DeviceId};
 
@@ -114,4 +117,54 @@ fn file_name_with_spaces_and_tabs_survives() {
         .unwrap();
     assert_eq!(row.name, "屏幕录制 2026-09-15 040220.mp4");
     assert_eq!(row.size, 842_400_000);
+}
+
+#[test]
+fn transfer_row_round_trips_through_the_wire() {
+    let row = TransferRow {
+        token: "001".into(),
+        direction: TransferDirection::Send,
+        name: "屏幕录制 2026.mp4".into(),
+        peer: "甲机".into(),
+        done: 1234,
+        total: 842_400_000,
+        state: TransferState::Running,
+        note: String::new(),
+    };
+    let back = TransferRow::from_line(&row.to_line()).expect("数据行要能被客户端解析");
+    assert_eq!(back, row);
+    assert_eq!(back.direction.as_token(), "send");
+}
+
+#[test]
+fn transfer_row_note_is_optional_but_the_rest_is_not() {
+    // note 是后加的列：老服务端没有它，认成空串而不是整行丢掉
+    let row = TransferRow::from_line("002\trecv\t报告.pdf\t乙机\t9\t10\tdone").unwrap();
+    assert_eq!(row.note, "");
+    assert_eq!(row.state, TransferState::Done);
+    assert_eq!(row.direction, TransferDirection::Receive);
+    // 前 7 列缺一个就是坏行
+    assert!(TransferRow::from_line("002\trecv\t报告.pdf\t乙机\t9\t10").is_none());
+}
+
+#[test]
+fn unknown_transfer_tokens_fall_back_to_the_cautious_reading() {
+    // 方向认不出按「发送」：宁可多显示一个方向，也不要因为一个陌生词丢掉整条进度。
+    // 状态认不出按「进行中」：不能把没跑完的传输显示成已完成。
+    let row = TransferRow::from_line("003\tweird\tx.bin\t甲机\t1\t2\tweird").unwrap();
+    assert_eq!(row.direction, TransferDirection::Send);
+    assert_eq!(row.state, TransferState::Running);
+}
+
+#[test]
+fn parse_transfers_skips_the_count_line() {
+    let lines = vec![
+        "OK 2".to_string(),
+        "001\tsend\ta.bin\t甲机\t5\t10\trunning\t".to_string(),
+        "002\trecv\tb.bin\t乙机\t10\t10\tdone\t".to_string(),
+    ];
+    let rows = parse_transfers(&lines);
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name, "a.bin");
+    assert_eq!(rows[1].state, TransferState::Done);
 }

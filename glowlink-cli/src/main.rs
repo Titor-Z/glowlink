@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
@@ -17,12 +17,15 @@ use glowlink_cli::exit;
 use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::codec;
 use glowlink_ipc::daemon;
-use glowlink_ipc::row::{DeviceRow, PairingRow, PendingRow};
+use glowlink_ipc::row::{
+    DeviceRow, PairingRow, PendingRow, SendTicket, TransferDirection, TransferRow,
+};
 use glowlink_ipc::server::{self as ipc_server, IpcHost};
 use glowlink_ipc::state;
 use glowlink_cli::keys::{install_device_id, load_or_create_identity, TrustFile};
 use glowlink_cli::pairing::PairingHub;
 use glowlink_cli::pending::PendingQueue;
+use glowlink_cli::transfers::{Job, Transfers};
 use glowlink_ipc::state::State;
 use glowlink_cli::view::cli::human_size;
 use glowlink_cli::view::tui::{self, Header, TuiAction};
@@ -37,7 +40,7 @@ use glowlink_core::patterns::factory::{
     DiscoveryTransportFactory, NativeTransportFactory, TransferTransportFactory,
 };
 use glowlink_core::{
-    detect, Config, DeviceIdentity, DiscoveryController, GlowError, Intent, PairingSession,
+    detect, Config, DeviceIdentity, DiscoveryController, GlowError, Identity, Intent, PairingSession,
     Preloaded, Result, TransferController,
 };
 
@@ -971,6 +974,105 @@ fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// 发送一个文件所需的依赖快照（从 [`DaemonShared`] 搬出来给线程用）。
+struct SendWorker {
+    identity: Arc<Identity>,
+    trust: Arc<TrustFile>,
+    chunk_size: usize,
+    ring_capacity: usize,
+    connect_timeout: Duration,
+}
+
+impl SendWorker {
+    /// 连上 → 握手 → 上报校验码 → 传文件。
+    ///
+    /// “被对方拒绝”和“传输失败”是两种结果：前者是明确结论（`job.reject`），
+    /// 后者才是错误（`job.fail`）—— 界面的文案不同，不能搔成一团。
+    fn send(
+        &self,
+        addr: SocketAddr,
+        path: &std::path::Path,
+        peer_name: &str,
+        job: &Job,
+        ready: &mpsc::Sender<Result<String>>,
+    ) -> Result<()> {
+        let factory = NativeTransportFactory;
+        let stream = factory.connect(addr, self.connect_timeout)?;
+        let session: SessionSlot = session_slot();
+        let mut secure = SecureTransport::initiator(
+            stream,
+            Arc::clone(&self.identity),
+            Arc::clone(&self.trust) as Arc<dyn TrustList>,
+            Arc::clone(&session),
+        );
+        secure.handshake()?;
+        // 校验码必须**在传文件之前**交给调用方：接收侧要拿它核对，
+        // 发送侧屏幕上没有码，核对就成了空话（这个坑踩过一次）。
+        let code = secure.session_info().map(|info| info.code.clone()).unwrap_or_default();
+        let _ = ready.send(Ok(code.clone()));
+        state::append_log(&format!(
+            "正在向 {peer_name} 发送「{}」（校验码 {code}）",
+            path.display()
+        ));
+
+        let transfer = TransferController::new(self.chunk_size, self.ring_capacity);
+        match transfer.send_file(&mut secure, path, job) {
+            Ok(sent) => {
+                job.finish();
+                state::append_log(&format!(
+                    "已发送给 {peer_name}：{}（{sent} 字节）",
+                    path.display()
+                ));
+                Ok(())
+            }
+            // 对方拒收：这是一条明确结论，不是错误（界面文案也不一样）
+            Err(GlowError::Rejected(reason)) => {
+                job.reject(reason.clone());
+                state::append_log(&format!("向 {peer_name} 发送被拒绝：{reason}"));
+                Ok(())
+            }
+            Err(e) => {
+                state::append_log(&format!("向 {peer_name} 发送失败：{e}"));
+                Err(e)
+            }
+        }
+    }
+}
+
+/// 从会话槽里取对端指纹（握手已完成时才有）。
+fn session_info_fingerprint(session: &SessionSlot) -> String {
+    session
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|info| info.peer_fingerprint.clone())
+        .unwrap_or_default()
+}
+
+/// 按指纹在设备表里找对端名字（找不到返回 `None`）。
+///
+/// 设备 ID 就是它的身份指纹，所以这里能对上；对不上说明它不在当前设备表里
+/// （例如刚上线、或设备表被 TTL 清掉）——那时由调用方决定退成什么。
+fn peer_label(devices: &Mutex<Vec<glowlink_core::Device>>, fingerprint: &str) -> Option<String> {
+    if fingerprint.is_empty() {
+        return None;
+    }
+    devices
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|device| device.id.as_str() == fingerprint)
+        .map(|device| device.name.clone())
+}
+
+/// 设备名对不上时的显示名：短指纹（与 `glowlink trust` 里那串字符一致）。
+fn short_fingerprint(fingerprint: &str) -> String {
+    if fingerprint.is_empty() {
+        return "未知设备".to_string();
+    }
+    truncate(fingerprint, 8)
+}
+
 /// 守护进程共享状态：IPC 线程只读这里的快照。
 ///
 /// 发现循环**不能**和 IPC 共用一把锁：`tick()` 里要阻塞等收包（数百毫秒），
@@ -982,6 +1084,14 @@ struct DaemonShared {
     pending: Arc<PendingQueue>,
     /// 配对：两个方向的槽位表 + 两条流程都住在这里。
     pairing: Arc<PairingHub>,
+    /// 传输登记表：界面靠它画进度。
+    transfers: Arc<Transfers>,
+    /// 发送要用的长期身份与信任列表（与接收侧同一份）。
+    identity: Arc<Identity>,
+    trust: Arc<TrustFile>,
+    chunk_size: usize,
+    ring_capacity: usize,
+    connect_timeout: Duration,
     /// 是否对**已信任**设备免确认自动接收（`on --yes`）。
     auto_accept: bool,
     stop: AtomicBool,
@@ -1038,6 +1148,66 @@ impl IpcHost for DaemonShared {
 
     fn pair_decide(&self, token: &str, code: Option<String>) -> Result<String> {
         self.pairing.queue().decide(token, code)
+    }
+
+    fn transfers(&self) -> Vec<TransferRow> {
+        self.transfers.rows()
+    }
+
+    /// 把文件发给某台设备：握手**在这里等**（校验码要立刻能显示），传输丢给线程。
+    fn send_file(&self, device_id: &str, path: &str) -> Result<SendTicket> {
+        let device = self.find(device_id).ok_or_else(|| GlowError::NotFound(device_id.to_string()))?;
+
+        let path = PathBuf::from(path);
+        let meta = fs::metadata(&path)?;
+        if !meta.is_file() {
+            return Err(GlowError::Protocol(format!("不是普通文件：{}", path.display())));
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+
+        // 先登记再开线程：界面立刻能看到「正在传」，而不是等第一块数据才冒出来
+        let job = self.transfers.start(
+            TransferDirection::Send,
+            name.clone(),
+            device.name.clone(),
+            meta.len(),
+        );
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
+        let worker = SendWorker {
+            identity: Arc::clone(&self.identity),
+            trust: Arc::clone(&self.trust),
+            chunk_size: self.chunk_size,
+            ring_capacity: self.ring_capacity,
+            connect_timeout: self.connect_timeout,
+        };
+        let job_for_thread = job.clone();
+        let peer_name = device.name.clone();
+        let peer_for_reply = peer_name.clone();
+        let addr = device.addr;
+        let ticket_tx = ready_tx.clone();
+        std::thread::spawn(move || {
+            if let Err(e) =
+                worker.send(addr, &path, &peer_name, &job_for_thread, &ticket_tx)
+            {
+                job_for_thread.fail(e.to_string());
+                // 握手前就失败的话调用方还在等 ready：必须把它叫醒
+                let _ = ticket_tx.send(Err(e));
+            }
+        });
+
+        // 等握手结果（连接 + 握手都是几百毫秒级）；超时留得比 connect_timeout 宽，
+        // 否则网络慢一点就报超时，而线程其实还在跑、界面上的卡片却已经消失。
+        match ready_rx.recv_timeout(self.connect_timeout + Duration::from_secs(10)) {
+            Ok(Ok(code)) => Ok(SendTicket { token: job.token(), code }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                job.fail("等待对端握手超时");
+                Err(GlowError::Protocol(format!("与「{peer_for_reply}」握手超时")))
+            }
+        }
     }
 }
 
@@ -1119,6 +1289,12 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         devices: Mutex::new(Vec::new()),
         pending: Arc::new(PendingQueue::new()),
         pairing,
+        transfers: Arc::new(Transfers::new()),
+        identity: Arc::clone(&identity_key),
+        trust: Arc::clone(&trust),
+        chunk_size: config.chunk_size(),
+        ring_capacity: config.ring_capacity(),
+        connect_timeout: Duration::from_secs(config.connect_timeout_secs),
         auto_accept,
         stop: AtomicBool::new(false),
     });
@@ -1156,17 +1332,22 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         let auto_accept = shared.auto_accept;
         let pending = Arc::clone(&shared.pending);
         let pairing = Arc::clone(&shared.pairing);
+        let transfers_for_recv = Arc::clone(&shared.transfers);
+        // 接连接时按指纹查设备名（把 IP 挡在用户视线之外）
+        let shared_for_recv = Arc::clone(&shared);
         let config_pending_timeout = config.pending_timeout_secs;
         std::thread::spawn(move || loop {
             match listener.accept() {
                 // 每个到达的连接单开一个线程：等待确认期间不能挡住后面来的设备，
                 // 否则第二个发送方只会静默挂在 backlog 里（就是单槽版本的毛病）。
-                Ok((stream, peer)) => {
+                Ok((stream, _peer)) => {
                     let trust = Arc::clone(&trust);
                     let identity_key = Arc::clone(&identity_key);
                     let dir = dir.clone();
                     let pending = Arc::clone(&pending);
                     let pairing = Arc::clone(&pairing);
+                    let transfers = Arc::clone(&transfers_for_recv);
+                    let shared_conn = Arc::clone(&shared_for_recv);
                     std::thread::spawn(move || {
                         // 每个连接各自握手，会话信息（指纹 + 校验码）交给本连接的视图
                         let session: SessionSlot = session_slot();
@@ -1197,18 +1378,33 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                         }
                         // 传输：把已读到的那一帧放回去，transfer 那边看不出差别
                         let transfer = TransferController::new(chunk_size, ring_capacity);
+                        // 对端显示名：按指纹从设备表里找（先取，`session` 要移进视图）。
+                        // **不用 IP**：那东西在桌面版里属于「不该给用户看」的技术细节，
+                        // 而卡片上写「来自 127.0.0.1」对用户毫无意义。
+                        // 找不到就退成 IP（CLI 侧可以看，桌面版不展示它）。
+                        let fingerprint = session_info_fingerprint(&session);
+                        // 兜底不用 IP：那是技术细节，桌面版一概不展示。
+                        // 短指纹与信任列表里看到的是同一串字符，用户对得上。
+                        let label = peer_label(&shared_conn.devices, &fingerprint)
+                            .unwrap_or_else(|| short_fingerprint(&fingerprint));
                         let view = DaemonView::new(
                             pending,
                             Duration::from_secs(config_pending_timeout),
                             session,
                             trust,
                             auto_accept,
+                            Arc::clone(&transfers),
                         );
-                        let label = peer.ip().to_string();
                         let mut stream = Preloaded::new(secure, first);
                         match transfer.receive_file(&mut stream, &dir, &label, &view) {
-                            Ok(path) => state::append_log(&format!("已接收：{}", path.display())),
-                            Err(e) => state::append_log(&format!("接收失败：{e}")),
+                            Ok(path) => {
+                                view.finish();
+                                state::append_log(&format!("已接收：{}", path.display()));
+                            }
+                            Err(e) => {
+                                view.fail(e.to_string());
+                                state::append_log(&format!("接收失败：{e}"));
+                            }
                         }
                     });
                 }
