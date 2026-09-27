@@ -89,6 +89,11 @@ unsafe fn libc_signal(signum: i32, handler: usize) {
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let config = config::load()?;
+    // `<命令> --help` / `-h`：一律给这条命令自己的说明
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        return cmd_help(&config, &args);
+    }
+
     match args.first().map(String::as_str) {
         Some("list") => cmd_list(&config, &args[1..]),
         Some("serve") => cmd_serve(&config, &args[1..]),
@@ -110,10 +115,7 @@ fn run() -> Result<()> {
                 cmd_panel()
             }
         }
-        Some("help") | Some("--help") | Some("-h") => {
-            println!("{}", panel::help_text(VERSION, config.discovery_port));
-            Ok(())
-        }
+        Some("help") => cmd_help(&config, &args[1..]),
         Some("--version") | Some("-V") => {
             println!("glowlink {VERSION}");
             Ok(())
@@ -319,6 +321,27 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
                 ],
             )
         }
+    }
+}
+
+/// `glowlink help [命令]` 与 `glowlink <命令> --help` 的实现。
+///
+/// 不认识的命令名按用法错误处理（退出码 2）并指路总览——比默默打总览更容易发现问题。
+fn cmd_help(config: &Config, args: &[String]) -> Result<()> {
+    // 过滤掉开关：`glowlink help send --yes` 也应当给 send 的说明
+    let name = args.iter().find(|arg| !arg.starts_with('-'));
+    let Some(name) = name else {
+        println!("{}", panel::help_text(VERSION, config.discovery_port));
+        return Ok(());
+    };
+    match panel::command_help(name) {
+        Some(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        None => Err(GlowError::Usage(format!(
+            "glowlink help: 没有「{name}」这个命令\n\n可用命令见 glowlink --help"
+        ))),
     }
 }
 

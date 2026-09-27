@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use glowlink_cli::view::panel::{help_text, status_panel, DaemonStatus};
+use glowlink_cli::view::panel::{command_help, find_command, help_text, status_panel, DaemonStatus, COMMANDS};
 
 fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
@@ -106,4 +106,98 @@ fn help_stays_readable() {
     // 行宽别超出常见终端，否则一换行就散架
     let widest = lines(&help).iter().map(|l| l.chars().count()).max().unwrap_or(0);
     assert!(widest <= 90, "最宽一行 {widest} 列，太宽了");
+}
+
+/// 总览必须列出表里的**每一条**命令：新增命令忘了写总览，这条会先红。
+#[test]
+fn overview_lists_every_command_in_the_table() {
+    let help = help_text("0.1.4", 9267);
+    for command in COMMANDS {
+        assert!(
+            help.contains(command.usages[0]),
+            "总览里没有 {} 的用法行：\n{help}",
+            command.name
+        );
+        assert!(
+            help.contains(command.summary),
+            "总览里没有 {} 的摘要：\n{help}",
+            command.name
+        );
+    }
+    // 表里的名字不能重复（find_command 只返回第一个）
+    let mut names: Vec<&str> = COMMANDS.iter().map(|c| c.name).collect();
+    names.sort_unstable();
+    let unique = names.len();
+    names.dedup();
+    assert_eq!(names.len(), unique, "命令名有重复");
+}
+
+/// 每一个命令都要有详细说明，且该说到的都说到了。
+#[test]
+fn every_command_has_a_usable_help_page() {
+    for command in COMMANDS {
+        let text = command_help(command.name).unwrap_or_else(|| panic!("{} 没有帮助页", command.name));
+        assert!(text.starts_with(&format!("glowlink {} — {}", command.name, command.summary)));
+        assert!(text.contains("用法："), "{} 的帮助缺用法", command.name);
+        for usage in command.usages {
+            assert!(text.contains(usage), "{} 的帮助缺用法行「{usage}」", command.name);
+            assert!(usage.starts_with("glowlink "), "用法行要以 glowlink 开头：{usage}");
+        }
+        for example in command.examples {
+            assert!(text.contains(example), "{} 的帮助缺示例「{example}」", command.name);
+        }
+        let count = text.lines().count();
+        assert!(count <= 30, "{} 的帮助 {count} 行，太长了", command.name);
+        let widest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+        assert!(widest <= 90, "{} 的帮助有 {widest} 列宽的行", command.name);
+        // 每条命令都要指路总览，用户才知道还能看什么
+        assert!(text.contains("glowlink --help"), "{} 的帮助没指路总览", command.name);
+    }
+}
+
+#[test]
+fn unknown_command_has_no_help_page() {
+    assert!(command_help("nope").is_none());
+    assert!(find_command("nope").is_none());
+    assert!(find_command("send").is_some());
+}
+
+/// 表与真正的命令分派必须对得上：真跑二进制问一遍。
+///
+/// 只看表不看分派会漏掉「表里写了、分派里拼错」这种漂移——那种情况下
+/// 帮助说得好好的，敲下去却是「未知命令」。
+#[test]
+fn the_binary_accepts_every_command_in_the_table() {
+    let bin = env!("CARGO_BIN_EXE_glowlink");
+    for command in COMMANDS {
+        let output = std::process::Command::new(bin)
+            .args(["help", command.name])
+            .output()
+            .expect("应当能启动 glowlink");
+        assert!(
+            output.status.success(),
+            "`glowlink help {}` 失败：{}",
+            command.name,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(command.summary),
+            "`glowlink help {}` 没打出这条命令的说明：{stdout}",
+            command.name
+        );
+    }
+}
+
+/// 未知命令必须是用法错误（退出码 2），并指路总览。
+#[test]
+fn the_binary_rejects_unknown_commands_with_usage_exit_code() {
+    let bin = env!("CARGO_BIN_EXE_glowlink");
+    let output = std::process::Command::new(bin)
+        .args(["help", "nope"])
+        .output()
+        .expect("应当能启动 glowlink");
+    assert_eq!(output.status.code(), Some(2), "用法错误应当是退出码 2");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("glowlink --help"), "要指路总览：{stderr}");
 }

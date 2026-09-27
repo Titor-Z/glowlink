@@ -20,6 +20,7 @@
 ./glowlink                 # 交互式界面：↑↓ 选择 · 回车（设备：输入文件路径 / 待确认：接受）
                            #   · d 拒绝待确认 · r 刷新 · q 退出（退出后后台服务继续跑）
 ./glowlink ui              # 同上，显式写法
+./glowlink help send            # 单条命令的详细用法（也可 glowlink send --help）
 ./glowlink list            # 一次性列表（守护进程在跑时结果来自它）
 
 # 发送：按设备名或 ID 发送（可多个文件）
