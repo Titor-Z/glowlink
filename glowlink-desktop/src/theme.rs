@@ -350,6 +350,8 @@ pub const EMPTY_NOTE_Y: f32 = 312.0;
 /// 拖拽区与卡片。
 pub const DROPZONE_H: f32 = 44.0;
 pub const DROPZONE_INSET: f32 = 16.0;
+/// 拖拽区虚线边框宽度（设计稿 1.5px）。
+pub const DROPZONE_BORDER: f32 = 1.5;
 pub const CARD_W: f32 = 200.0;
 pub const POPOVER_W: f32 = 236.0;
 

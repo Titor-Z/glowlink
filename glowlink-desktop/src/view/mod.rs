@@ -4,5 +4,6 @@
 //! 也不直接发起阻塞 IO（数据由上层取好再交给这里画）。
 
 pub mod app;
+pub mod dropzone;
 pub mod node;
 pub mod titlebar;

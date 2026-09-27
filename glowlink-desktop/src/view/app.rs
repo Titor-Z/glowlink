@@ -18,7 +18,8 @@ use crate::controller::{DeviceSource, DeviceView, IpcSource};
 use crate::model::layout::{self, NodeSize};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
-use crate::view::{node, titlebar};
+use crate::model::drop::DropState;
+use crate::view::{dropzone, node, titlebar};
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -42,6 +43,10 @@ pub struct AppRoot {
     placement: layout::Placement,
     /// 上次布局用的设备 ID，用来判断「集合是否真变了」。
     placed_ids: Vec<String>,
+    /// 底部拖拽区的状态（拖入/拒收由 `FileDropEvent` 驱动，见下一步）。
+    drop: DropState,
+    /// 已选中的目标设备名（点设备节点选中；一台设备时不必选）。
+    selected: Option<String>,
 }
 
 impl AppRoot {
@@ -70,6 +75,8 @@ impl AppRoot {
             devices,
             placement,
             placed_ids,
+            drop: DropState::Idle,
+            selected: None,
         }
     }
 
@@ -250,6 +257,8 @@ impl Render for AppRoot {
                         },
                     )),
             )
+            // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
+            .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
             .child(titlebar::window_border(&t))
     }
 }
