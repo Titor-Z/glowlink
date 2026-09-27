@@ -82,6 +82,8 @@ pub struct FakeHost {
     pub transfers: Mutex<Vec<TransferRow>>,
     /// 被取消的传输编号（测 `CANCEL` 打到宿主上）。
     pub canceled: Mutex<Vec<String>>,
+    /// 被放弃的配对编号（测 `PAIR_CANCEL`）。
+    pub pair_canceled: Mutex<Vec<String>>,
     /// 让 `send_file` 报错（测错误分支）。
     pub send_fails: AtomicBool,
 }
@@ -198,6 +200,15 @@ impl IpcHost for FakeHost {
             .lock()
             .unwrap()
             .push((token.to_string(), code));
+        Ok(token.to_string())
+    }
+
+    fn pair_cancel(&self, token: &str) -> Result<String> {
+        let mut canceled = self.pair_canceled.lock().unwrap();
+        if canceled.contains(&token.to_string()) {
+            return Err(GlowError::Missing(format!("配对 #{token} 已经结束了")));
+        }
+        canceled.push(token.to_string());
         Ok(token.to_string())
     }
 }

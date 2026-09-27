@@ -212,6 +212,28 @@ impl TransferTransport for TcpTransportAdapter {
         Frame::read_from(&mut self.stream)
     }
 
+    /// `peek` 返回 0 字节就是 EOF（对方关了连接）。
+    fn peer_closed(&mut self) -> Result<bool> {
+        self.stream.set_read_timeout(Some(std::time::Duration::from_millis(30)))?;
+        let mut probe = [0u8; 1];
+        let outcome = self.stream.peek(&mut probe);
+        self.stream.set_read_timeout(None)?;
+        match outcome {
+            Ok(0) => Ok(true),
+            Ok(_) => Ok(false),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(false)
+            }
+            // 其它错误（连接重置等）也当「对方不在了」
+            Err(_) => Ok(true),
+        }
+    }
+
     /// 用 `peek` 探一探：**读过就走**会把帧切开，加密层当场错位。
     ///
     /// 临时设读超时、探完恢复——不恢复的话后面每个分块都会有个「超时窗口」。

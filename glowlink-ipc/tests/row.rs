@@ -188,3 +188,26 @@ fn canceled_is_its_own_state_and_survives_a_round_trip() {
     assert_eq!(back.state, TransferState::Canceled);
     assert_ne!(back.state, TransferState::Failed);
 }
+
+#[test]
+fn abandoned_pairing_is_its_own_state() {
+    // 「本机已放弃」进协议：与「被拒」「失败」分开，界面文案才说得准
+    for state in [
+        PairingState::WaitingPeer,
+        PairingState::WaitingUser,
+        PairingState::Paired,
+        PairingState::Denied,
+        PairingState::Abandoned,
+        PairingState::Failed,
+    ] {
+        assert_eq!(PairingState::from_token(state.as_token()), state, "{state:?} 往返失败");
+    }
+    let row = PairingRow {
+        token: "003".into(),
+        peer: "iPad mini".into(),
+        code: "123456".into(),
+        state: PairingState::Abandoned,
+        remaining: 0,
+    };
+    assert_eq!(PairingRow::from_line(&row.to_line()).unwrap(), row);
+}

@@ -1155,6 +1155,11 @@ impl IpcHost for DaemonShared {
     fn pair_decide(&self, token: &str, code: Option<String>) -> Result<String> {
         self.pairing.queue().decide(token, code)
     }
+    fn pair_cancel(&self, token: &str) -> Result<String> {
+        let token = self.pairing.queue().cancel_outgoing(token)?;
+        state::append_log(&format!("已放弃配对 #{token}"));
+        Ok(token)
+    }
 
     fn transfers(&self) -> Vec<TransferRow> {
         self.transfers.rows()

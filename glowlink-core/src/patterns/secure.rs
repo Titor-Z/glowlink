@@ -207,6 +207,10 @@ impl TransferTransport for SecureTransport {
         self.inner.wait_readable(timeout)
     }
 
+    fn peer_closed(&mut self) -> Result<bool> {
+        self.inner.peer_closed()
+    }
+
     fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         self.handshake()?;
         let plaintext = frame.encode()?;

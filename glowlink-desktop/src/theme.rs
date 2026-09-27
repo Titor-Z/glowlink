@@ -364,6 +364,8 @@ pub const TEXT_BRAND: f32 = 14.0;
 pub const TEXT_DEVICE_LABEL: f32 = 10.0;
 pub const TEXT_BODY: f32 = 11.0;
 pub const TEXT_META: f32 = 9.0;
+/// 配对码的字号：全窗最大的字（**唯一需要用户隔屏读数**的地方）。
+pub const TEXT_CODE: f32 = 22.0;
 
 /// 标题栏按钮簇内的间隔。
 pub const GAP_ICON_BUTTON: f32 = 2.0;

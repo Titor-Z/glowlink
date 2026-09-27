@@ -184,6 +184,13 @@ impl PairingSession {
     }
 
     /// 6 位校验码。
+    /// 对方还在这条连接上吗（用来发现「对方放弃了配对」）。
+    ///
+    /// 非消耗性：只看连接状态，不碰帧。
+    pub fn peer_closed(&mut self) -> bool {
+        self.transport.peer_closed().unwrap_or(true)
+    }
+
     pub fn code(&self) -> Result<String> {
         Ok(self.peer()?.code)
     }

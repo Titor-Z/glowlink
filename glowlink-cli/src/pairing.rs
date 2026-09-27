@@ -25,6 +25,9 @@ use crate::keys::TrustFile;
 /// 建立连接的等待时长（本机网络，超过说明对端没在听）。
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 等用户拍板时每次醒来的间隔：切片到期只意味着「去看看对面还在不在」。
+const DECISION_SLICE: Duration = Duration::from_millis(200);
+
 /// 已结束的配对槽位保留多久：界面要能看见成败，但不能无限堆积。
 const OUTGOING_TTL: Duration = Duration::from_secs(60);
 
@@ -60,6 +63,9 @@ struct OutgoingSlot {
     code: String,
     state: PairingState,
     finished_at: Option<Instant>,
+    /// 这条连接的**另一个句柄**：取消时用它 `shutdown`，让阻塞在等对方答复的
+    /// 后台线程立刻醒过来。没有它就只能干等（最长 `pending_timeout_secs`）。
+    stream: Option<TcpStream>,
 }
 
 #[derive(Default)]
@@ -149,7 +155,7 @@ impl PairingQueue {
     }
 
     /// 本机发起：开一个槽位（结果由后台线程回填），返回编号。
-    pub fn open_outgoing(&self, peer: String, code: String) -> String {
+    pub fn open_outgoing(&self, peer: String, code: String, stream: Option<TcpStream>) -> String {
         let mut inner = self.lock();
         let token = Self::next_token(&mut inner);
         inner.outgoing.push(OutgoingSlot {
@@ -158,17 +164,46 @@ impl PairingQueue {
             code,
             state: PairingState::WaitingPeer,
             finished_at: None,
+            stream,
         });
         token
     }
 
     /// 回填本机发起的配对结果。
+    ///
+    /// **终态只有第一个算数**：用户先点了 ✕（放弃），后台线程随后拿着
+    /// 「连接被掐断」的错误回来，不能把「本机已放弃」改口成「失败」。
     pub fn finish_outgoing(&self, token: &str, state: PairingState) {
         let mut inner = self.lock();
         if let Some(slot) = inner.outgoing.iter_mut().find(|s| s.token == token) {
+            if slot.finished_at.is_some() {
+                return;
+            }
             slot.state = state;
             slot.finished_at = Some(Instant::now());
+            slot.stream = None;
         }
+    }
+
+    /// 本机放弃一次发起的配对（配对卡上的 ✕）。
+    ///
+    /// 两件事一起做：① 槽位落成「本机已放弃」（界面据此收起卡片）；
+    /// ② 掐掉连接，让后台那个阻塞等答复的线程立刻退出（否则它要等到超时）。
+    pub fn cancel_outgoing(&self, token: &str) -> Result<String> {
+        let mut inner = self.lock();
+        let Some(slot) = inner.outgoing.iter_mut().find(|s| s.token == token) else {
+            return Err(GlowError::Missing(format!("没有编号为 {token} 的配对")));
+        };
+        if slot.finished_at.is_some() {
+            return Err(GlowError::Missing(format!("配对 #{token} 已经结束了")));
+        }
+        slot.state = PairingState::Abandoned;
+        slot.finished_at = Some(Instant::now());
+        if let Some(stream) = slot.stream.take() {
+            // 掐断：等答复的那个线程会立刻拿到错误并退出
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        Ok(token.to_string())
     }
 
     /// 本机发起的配对槽位（含刚结束的，供界面显示成败）。
@@ -265,6 +300,8 @@ impl PairingHub {
         let stream = TcpStream::connect_timeout(&device.addr, CONNECT_TIMEOUT)?;
         // 给读操作设上限：对端不回答时不能让这个线程无限期挂着
         stream.set_read_timeout(Some(self.wait))?;
+        // 留一个句柄给「取消」用（适配器会拿走原 stream，所以先克隆）
+        let cancel_handle = stream.try_clone().ok();
         let transport = TcpTransportAdapter::from_stream(stream)?;
         let mut session = PairingSession::initiate(
             Box::new(transport),
@@ -274,7 +311,7 @@ impl PairingHub {
         )?;
 
         let code = session.code()?;
-        let token = self.queue.open_outgoing(device.name.clone(), code.clone());
+        let token = self.queue.open_outgoing(device.name.clone(), code.clone(), cancel_handle);
         // 自报的是**显示名**（来自本机身份单例），不是密钥身份
         session.request(&DeviceIdentity::global().name)?;
 
@@ -304,7 +341,9 @@ impl PairingHub {
                     PairingState::Denied
                 }
                 Err(e) => {
-                    append_log(&format!("与「{peer_name}」配对失败：{e}"));
+                    // 用户点了 ✕ 之后这里会拿到「连接被掐断」的错误：
+                    // 那不是失败，是取消（槽位已是终态，`finish_outgoing` 会忽略）
+                    append_log(&format!("与「{peer_name}」配对未完成：{e}"));
                     PairingState::Failed
                 }
             };
@@ -326,9 +365,12 @@ impl PairingHub {
 
         let deadline = Instant::now() + self.wait;
         let mut accepted = false;
+        // 短切片轮询而不是一觉睡到超时：等的是「用户拍板」，但也可能是
+        // **对方放弃了**（关窗走人）。不轮询的话我们这边要傻等到超时。
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match self.queue.wait_decision(&token, remaining) {
+            let slice = remaining.min(DECISION_SLICE);
+            match self.queue.wait_decision(&token, slice) {
                 Verdict::Allow(typed) => {
                     if session.approve(&typed)? {
                         accepted = true;
@@ -347,9 +389,16 @@ impl PairingHub {
                     break;
                 }
                 Verdict::Timeout => {
-                    session.deny("等待确认超时")?;
-                    append_log(&format!("配对 #{token}：等待确认超时，已自动拒绝"));
-                    break;
+                    // 切片到期 ≠ 总时限到期：只有真的等满了才自动拒绝
+                    if Instant::now() >= deadline {
+                        session.deny("等待确认超时")?;
+                        append_log(&format!("配对 #{token}：等待确认超时，已自动拒绝"));
+                        break;
+                    }
+                    if session.peer_closed() {
+                        append_log(&format!("配对 #{token}：对方放弃了配对，已收起"));
+                        break;
+                    }
                 }
             }
         }

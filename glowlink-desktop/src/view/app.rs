@@ -87,6 +87,8 @@ pub struct AppRoot {
     meter: SpeedMeter,
     /// 被用户关掉的传输卡（按编号记：守护进程还会保留那条记录一小段时间）。
     dismissed: Vec<String>,
+    /// 被用户关掉的配对卡（同理）。
+    dismissed_pairs: Vec<String>,
     /// 进度条填充的**平滑值**（设计稿要求 0.12s 过渡：IPC 的进度是跳着来的，
     /// 直接画会像抽动）。这里用同一个弹簧原语做，不用另一套机制。
     progress: Spring,
@@ -182,6 +184,7 @@ impl AppRoot {
             transfer: None,
             meter: SpeedMeter::default(),
             dismissed: Vec::new(),
+            dismissed_pairs: Vec::new(),
             progress: Spring::new(0.0, ZETA_CRITICAL, PROGRESS_RESPONSE),
             pulse: 0.0,
             transfer_speed: 0.0,
@@ -338,6 +341,41 @@ impl AppRoot {
         }
     }
 
+    /// 放弃一次配对（配对卡上的 ✕，或断开那台设备的气泡）。
+    ///
+    /// 两件事：① 让守护进程**放弃**这次配对（它还要掐掉那条连接，
+    /// 否则后台线程要一直等到超时）；② 收起卡片。
+    /// 已经结束的（成功/被拒/失败）只需收起，不再打扰守护进程。
+    pub fn abandon_pairing(&mut self, token: &str) {
+        let finished = self
+            .pair
+            .as_ref()
+            .map(|card| card.state != glowlink_ipc::row::PairingState::WaitingPeer)
+            .unwrap_or(true);
+        if finished {
+            self.dismiss_pair(token);
+            return;
+        }
+        if let Some(pairing) = self.pairing.clone() {
+            log::info!("放弃配对 #{token}");
+            if let Err(e) = pairing.cancel(token) {
+                log::info!("放弃配对失败：{e}");
+            }
+        }
+        // 槽位会在下一轮快照里变成「已放弃」；这里先收起，界面立刻有反应
+        self.dismiss_pair(token);
+    }
+
+    /// 收起配对卡（只影响本机视图，不改守护进程的状态）。
+    pub fn dismiss_pair(&mut self, token: &str) {
+        if !self.dismissed_pairs.iter().any(|t| t == token) {
+            self.dismissed_pairs.push(token.to_string());
+        }
+        if self.pair.as_ref().map(|card| card.token.as_str()) == Some(token) {
+            self.pair = None;
+        }
+    }
+
     /// 用户主动关掉传输卡（设计稿：完成后不自动消失，由用户自己关）。
     pub fn dismiss_transfer(&mut self, token: &str) {
         if !self.dismissed.iter().any(|t| t == token) {
@@ -476,6 +514,14 @@ impl AppRoot {
         // 「留在原地」与「不合法就得让开」是两件事，后者交给排斥迭代
         self.seeds.retain(|seed| seed.id != id);
         self.seeds.push(layout::Seed { id: id.to_string(), point });
+        // 断开这台设备时，如果配对卡正为它开着，一并收起（用户的心智动作是同一个：
+        // 「这台我不连了」）——否则卡片会孤零零留在屏幕上，还得再点一次 ✕
+        let peer = self.devices.iter().find(|d| d.id == id).map(|d| d.name.clone());
+        if let (Some(peer), Some(card)) = (peer, self.pair.clone()) {
+            if card.peer == peer {
+                self.abandon_pairing(&card.token);
+            }
+        }
         log::info!("已断开：{id}（就地留下 {:.0}, {:.0}，恢复全尺寸）", point.x, point.y);
     }
 
@@ -611,7 +657,14 @@ impl AppRoot {
                         code: row.code,
                         state: row.state,
                     };
-                    if fresh != card {
+                    // 用户已收起的卡片不再弹回来（守护进程还会保留这条记录一小会儿）
+                    let hidden = self.dismissed_pairs.iter().any(|t| *t == fresh.token);
+                    if hidden {
+                        if self.pair.is_some() {
+                            self.pair = None;
+                            changed = true;
+                        }
+                    } else if fresh != card {
                         log::info!("配对状态：{}", crate::model::drag::pair_state_note(fresh.state));
                         self.pair = Some(fresh);
                         changed = true;
@@ -978,16 +1031,27 @@ impl Render for AppRoot {
                     // 设备气泡（画在中心盘之后 = 之上；重叠由物理保证不会发生）
                     .when(show_devices, |el| el.children(devices)),
             )
-            .when_some(self.pair.clone(), |el, card| {
-                el.child(paircard::card(&t, &card.peer, &card.code, card.state))
-            })
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
-            // 传输卡：画在拖拽区**之上**（设计稿层级：拖拽区 < 传输卡 / 配对卡）
-            .when_some(self.transfer.clone(), |el, row| {
-                let numbers = transfer::numbers(&row, self.transfer_speed);
-                let fraction = self.progress.x() as f64;
-                el.child(progress::card(&t, &row, &numbers, fraction, cx))
+            // 浮层卡（配对 / 传输）画在拖拽区**之上**（层级：拖拽区 < 卡 < 隐私浮层）：
+            // 两张卡占**同一个槽位**（同一个 `view::card` 外壳），所以同时出现时
+            // 配对卡优先——配对是等人拍板的事，传输卡让它一步回去（「一次只强调一件事」）。
+            .when(self.pair.is_none(), |el| {
+                el.when_some(self.transfer.clone(), |el, row| {
+                    let numbers = transfer::numbers(&row, self.transfer_speed);
+                    let fraction = self.progress.x() as f64;
+                    el.child(progress::card(&t, &row, &numbers, fraction, cx))
+                })
+            })
+            .when_some(self.pair.clone(), |el, card| {
+                el.child(paircard::card(
+                    &t,
+                    &card.token,
+                    &card.peer,
+                    &card.code,
+                    card.state,
+                    cx,
+                ))
             })
             .child(titlebar::window_border(&t))
     }

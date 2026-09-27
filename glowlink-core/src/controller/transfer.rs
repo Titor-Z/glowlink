@@ -33,6 +33,16 @@ pub trait TransferTransport: Send {
     fn wait_readable(&mut self, _timeout: std::time::Duration) -> Result<bool> {
         Ok(true)
     }
+
+    /// 对方是不是**已经把连接关了**（非消耗性探测）。
+    ///
+    /// 用来发现「对面放弃了」：配对时对方可能一直没答复，甚至直接关窗走人；
+    /// 不探的话我们这边要一直等到超时，卡片傻开着。
+    ///
+    /// **非消耗性**：不能把帧读走（后面还要用它确认配对）。默认「没关」。
+    fn peer_closed(&mut self) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// 监听端（接口），接收方使用。

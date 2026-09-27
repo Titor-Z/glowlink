@@ -343,6 +343,11 @@ impl PairingSource for IpcSource {
         self.submit(format!("PAIR_REJECT {token}"));
         Ok(())
     }
+
+    fn cancel(&self, token: &str) -> Result<()> {
+        self.submit(format!("PAIR_CANCEL {token}"));
+        Ok(())
+    }
 }
 
 impl TransferSource for IpcSource {

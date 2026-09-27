@@ -1,73 +1,84 @@
-//! View：配对码卡片（设计稿未定义，本案新增的最小浮层）。
+//! View：配对卡。
 //!
-//! **唯一需要用户隔屏读数的地方**，所以码是全窗最大的字（22px 等宽 `tnum`）。
-//! 设计约束：不引入新颜色——失败也是文案，不是红色。
+//! **格式与传输卡完全一致**（同一个 [`crate::view::card`] 外壳：磨砂玻璃、与拖拽区同宽同边距、
+//! 右上角圆形 ✕）——两张浮层卡是一类东西，各写一套就会各偏一点
+//! （配对卡曾经停在 `bottom: 12`，被拖拽区盖住，看起来「跑到拖拽按钮下面」）。
+//!
+//! 内容：`与 <设备> 配对` + 6 位码 + 一句状态说明。码是全窗最大的字（22px 等宽 `tnum`）——
+//! 这是**唯一需要用户隔屏读数**的地方。设计约束：不引入新颜色（失败也是文案 + 抖动）。
 
-use gpui::{div, prelude::*, px, FontWeight, IntoElement, SharedString, Styled};
+use gpui::{
+    div, px, Context, Div, FontWeight, ParentElement, SharedString, Stateful, Styled,
+};
 
 use crate::model::drag::{pair_state_note, PAIR_CODE_HINT};
 use crate::theme::{self, Theme};
+use crate::view::app::AppRoot;
+use crate::view::card;
 use glowlink_ipc::row::PairingState;
 
 /// 配对卡：`与 <设备> 配对` + 6 位码 + 一句状态说明。
+///
+/// ✕ = **放弃这次配对**（本机主动取消，与「被拒」是两回事）。
 pub fn card(
     t: &Theme,
+    token: &str,
     peer: &str,
     code: &str,
     state: PairingState,
-) -> impl IntoElement {
-    div()
-        .absolute()
-        // 横向居中、贴在节点图底部：本机盘在正中，卡片压在它上面会挡住锚点
-        .left(px((theme::WINDOW_W - theme::CARD_W) / 2.0))
-        .bottom(px(12.0))
-        .w(px(theme::CARD_W))
-        .p(px(16.0))
-        .rounded(px(theme::RADIUS_CARD))
-        .bg(t.card_bg)
-        .border_1()
-        .border_color(t.window_border)
-        .shadow(vec![gpui::BoxShadow {
-            color: theme::hsla(t.card_shadow),
-            offset: gpui::point(px(0.0), px(8.0)),
-            blur_radius: px(24.0),
-            spread_radius: px(0.0),
-            inset: false,
-        }])
+    cx: &mut Context<AppRoot>,
+) -> Stateful<Div> {
+    let token = token.to_string();
+    let shell = card::chrome(
+        t,
+        &format!("pair-{token}"),
+        cx.listener(move |this, _, _, cx| {
+            this.abandon_pairing(&token);
+            cx.notify();
+        }),
+    );
+
+    let title = format!("与 {peer} 配对");
+    // 码是这一屏最重要的东西：给足空间，别让 ✕ 挤到它
+    let code_row = div()
         .flex()
-        .flex_col()
+        .flex_row()
         .items_center()
-        .gap(px(6.0))
+        .justify_center()
+        .w_full()
+        .pr(px(card::title_reserve()))
         .child(
             div()
-                .text_size(px(10.5))
-                .text_color(t.text_muted)
-                .child(SharedString::from(format!("与 {peer} 配对"))),
-        )
-        .child(
-            // 码是给人念/给人敲的：等宽 + tnum，数字不跳
-            div()
-                .text_size(px(22.0))
+                .text_size(px(theme::TEXT_CODE))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(t.text_primary)
                 .child(SharedString::from(code.to_string())),
-        )
+        );
+
+    shell
+        .gap(px(6.0))
         .child(
             div()
-                .text_size(px(9.5))
-                .text_color(t.text_muted)
-                .child(SharedString::from(match state {
-                    PairingState::WaitingPeer => PAIR_CODE_HINT.to_string(),
-                    other => pair_state_note(other).to_string(),
-                })),
+                .text_size(px(theme::TEXT_BODY))
+                .text_color(t.text_secondary)
+                .child(SharedString::from(title)),
         )
+        .child(code_row)
         .child(
             div()
-                .text_size(px(9.5))
+                .text_size(px(theme::TEXT_META))
                 .text_color(t.text_hint)
-                .child(SharedString::from(match state {
-                    PairingState::WaitingPeer => pair_state_note(state).to_string(),
-                    _ => String::new(),
+                .child(SharedString::from(pair_state_note(state))),
+        )
+        .child(
+            div()
+                .text_size(px(theme::TEXT_META))
+                .text_color(t.text_hint)
+                // 提示只在「等对方输码」时有意义（其余状态那句话已经说清了）
+                .child(SharedString::from(if state == PairingState::WaitingPeer {
+                    PAIR_CODE_HINT
+                } else {
+                    ""
                 })),
         )
 }

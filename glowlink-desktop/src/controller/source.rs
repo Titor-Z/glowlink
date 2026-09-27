@@ -69,8 +69,11 @@ pub trait PairingSource: Send + Sync {
     fn pending(&self) -> Vec<PairingView>;
     /// 允许并提交用户输入的码。
     fn approve(&self, token: &str, code: &str) -> Result<()>;
-    /// 拒绝。
+    /// 拒绝（对端发起的请求）。
     fn reject(&self, token: &str) -> Result<()>;
+    /// **放弃本机发起的配对**（配对卡上的 ✕）：守护进程会掐掉那条连接，
+    /// 否则等对方答复的后台线程要一直等到超时。
+    fn cancel(&self, token: &str) -> Result<()>;
 }
 
 /// 传输来源。

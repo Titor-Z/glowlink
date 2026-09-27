@@ -124,6 +124,10 @@ impl PairingSource for PreviewPairing {
     fn reject(&self, _token: &str) -> Result<()> {
         Ok(())
     }
+
+    fn cancel(&self, _token: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// 预览传输：给一张固定的进度卡。

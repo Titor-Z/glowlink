@@ -60,6 +60,14 @@ pub trait IpcHost: Send + Sync {
     /// 落定一个待决定的配对请求：`code` 为 `Some` 表示允许并提交用户输入的码。
     fn pair_decide(&self, token: &str, code: Option<String>) -> Result<String>;
 
+    /// **本机放弃**一次自己发起的配对（配对卡上的 ✕）。
+    ///
+    /// 与 [`Self::pair_decide`] 不同：那是「对端请求、本机拍板」，这是「本机自己反悔」。
+    /// 默认如实报错：不支持取消的守护进程不该静默成功。
+    fn pair_cancel(&self, _token: &str) -> Result<String> {
+        Err(GlowError::Usage("这个守护进程不支持 PAIR_CANCEL".into()))
+    }
+
     /// 请求守护进程退出。
     fn request_stop(&self);
 
@@ -204,6 +212,11 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
         }
         "PAIR_REJECT" => match host.pair_decide(arg, None) {
             Ok(token) => (vec![format!("OK 已拒绝 #{token}")], true),
+            Err(e) => (vec![error_reply(&e)], true),
+        },
+        // `PAIR_CANCEL <编号>`：本机放弃自己发起的配对
+        "PAIR_CANCEL" => match host.pair_cancel(arg) {
+            Ok(token) => (vec![format!("OK 已放弃 #{token}")], true),
             Err(e) => (vec![error_reply(&e)], true),
         },
         "TRANSFERS" => {

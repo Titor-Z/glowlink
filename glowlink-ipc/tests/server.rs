@@ -355,3 +355,15 @@ fn cancel_stops_a_running_transfer_and_says_so() {
     let (lines, _) = handle_line(&host, "CANCEL 999");
     assert!(lines[0].starts_with("ERR "), "不存在的编号也该报错：{}", lines[0]);
 }
+
+#[test]
+fn pair_cancel_abandons_the_outgoing_pairing() {
+    let host = FakeHost::default();
+    let (lines, _) = handle_line(&host, "PAIR_CANCEL 004");
+    assert!(lines[0].starts_with("OK "), "{}", lines[0]);
+    assert!(lines[0].contains("004"), "要带上编号：{}", lines[0]);
+    // 再放一次要如实报错（已经结束了），不能假装成功
+    let (lines, _) = handle_line(&host, "PAIR_CANCEL 004");
+    assert!(lines[0].starts_with("ERR "), "{}", lines[0]);
+    assert_eq!(*host.pair_canceled.lock().unwrap(), vec!["004".to_string()]);
+}

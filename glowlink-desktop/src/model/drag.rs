@@ -28,6 +28,7 @@ pub fn pair_state_note(state: PairingState) -> &'static str {
         PairingState::WaitingUser => "请在此设备上输入此码",
         PairingState::Paired => "已配对，下次免核对",
         PairingState::Denied => "对方拒绝了配对",
+        PairingState::Abandoned => "已放弃配对",
         PairingState::Failed => "配对失败，可重新拖动",
     }
 }

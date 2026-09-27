@@ -218,6 +218,9 @@ pub enum PairingState {
     Paired,
     /// 被拒绝（用户点了拒绝、或码错到次数用尽）。
     Denied,
+    /// **本机主动放弃**（配对卡上的 ✕）：与「被拒」「失败」都不是一回事，
+    /// 文案必须能区分（用户要知道是自己取消的，不是对面拒绝、也不是故障）。
+    Abandoned,
     /// 出错（对端断开、对方超时）。
     Failed,
 }
@@ -229,6 +232,7 @@ impl PairingState {
             PairingState::WaitingUser => "waiting_user",
             PairingState::Paired => "paired",
             PairingState::Denied => "denied",
+            PairingState::Abandoned => "abandoned",
             PairingState::Failed => "failed",
         }
     }
@@ -238,6 +242,7 @@ impl PairingState {
             "waiting_peer" => PairingState::WaitingPeer,
             "paired" => PairingState::Paired,
             "denied" => PairingState::Denied,
+            "abandoned" => PairingState::Abandoned,
             "failed" => PairingState::Failed,
             _ => PairingState::WaitingUser,
         }
