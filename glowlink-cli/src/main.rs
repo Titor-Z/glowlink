@@ -347,7 +347,8 @@ fn cmd_help(args: &[String]) -> Result<()> {
 }
 
 fn cmd_config(config: &Config) -> Result<()> {
-    println!("生效配置（按 {} → 用户配置 顺序叠加）", config::PROJECT_CONFIG);
+    println!("生效配置（按 内置默认 → {} → 用户配置 顺序叠加）", config::PROJECT_CONFIG_SOURCE);
+    println!("  已嵌入  {}", config::PROJECT_CONFIG_SOURCE);
     for path in config::config_paths() {
         let mark = if path.is_file() { "已加载" } else { "不存在" };
         println!("  {mark}  {}", path.display());

@@ -191,10 +191,11 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "config",
         section: Section::Config,
-        summary: "显示生效配置与配置文件位置",
+        summary: "显示生效配置与各层是否加载",
         usages: &["glowlink config"],
         details: &[
-            "优先级：内置默认 < ./glowlink.toml < ~/.config/glowlink/config.toml < 命令行开关。",
+            "优先级：内置默认 < 编译期嵌入的 glowlink.toml < ~/.config/glowlink/config.toml < 命令行开关。",
+            "工程配置 glowlink.toml 是**开发者的工程常量**，编进二进制：改了要重新编译才生效。",
             "配置文件是扁平的 key = value；写错键名会直接报错并指出行号。",
         ],
         examples: &["glowlink config"],

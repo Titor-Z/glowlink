@@ -71,16 +71,24 @@ xattr -dr com.apple.quarantine glowlink
 
 ## 配置文件
 
-同目录下的 `glowlink.toml` 是工程默认配置，可直接修改。优先级：
+分两层，职责不同：
+
+| 层 | 在哪里 | 什么时候生效 | 给谁用 |
+|---|---|---|---|
+| **工程配置** | 仓库里的 `glowlink.toml` | **编译期**（`include_str!` 编进二进制） | 开发者：工程常量（端口、超时、分块大小） |
+| **用户配置** | `~/.config/glowlink/config.toml`（可用 `$GLOWLINK_CONFIG` 指定） | 运行时 | 用户：改接收目录、临时换端口 |
 
 ```
-内置默认 < ./glowlink.toml < ~/.config/glowlink/config.toml（可用 $GLOWLINK_CONFIG 指定）< 命令行开关
+内置默认 < 编译期嵌入的 glowlink.toml < ~/.config/glowlink/config.toml < 命令行开关
 ```
+
+**工程配置改了要重新编译才生效**（这是刻意的）：它不随压缩包分发，也不会在运行目录里去找。
+用户配置不存在就跳过，只当那一层没有覆盖。
 
 可改的项：`discovery_port`、`transfer_port`、`receive_dir`、`query_interval_secs`、
 `device_timeout_secs`、`scan_timeout_secs`、`connect_timeout_secs`、`pending_timeout_secs`、
 `chunk_size_kib`、`ring_capacity_kib`、`discovery_port_span`（发现端口被占时的顺延跨度，
-同时也是查询覆盖的候选端口数，默认 21；**局域网内要一致**）。用 `glowlink config` 查看当前生效值与配置文件位置。
+同时也是查询覆盖的候选端口数，默认 21；**局域网内要一致**）。用 `glowlink config` 查看当前生效值与各层是否加载。
 
 ## 注意事项
 
