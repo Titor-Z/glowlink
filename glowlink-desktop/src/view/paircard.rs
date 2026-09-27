@@ -207,12 +207,10 @@ pub fn request_card(
                 .child(hint(
                     t,
                     if request.wrong {
-                        // 输错不新增颜色：文案 + 「还剩几次」
-                        "校验码不符，还剩 1 次机会"
-                    } else if request.remaining <= 1 {
-                        "校验码不符次数已用尽"
+                        // 输错不新增颜色：文案 + **真实**剩余次数（写死次数等于骗人）
+                        format!("校验码不符，还剩 {} 次机会", request.remaining)
                     } else {
-                        ""
+                        String::new()
                     },
                 ))
                 .child(card::mini_button(
@@ -229,11 +227,11 @@ pub fn request_card(
 }
 
 /// 卡片里的说明文字（统一字号与颜色）。
-fn hint(t: &Theme, text: &str) -> Div {
+fn hint(t: &Theme, text: impl Into<SharedString>) -> Div {
     div()
         .text_size(px(theme::TEXT_META))
         .text_color(t.text_hint)
-        .child(SharedString::from(text.to_string()))
+        .child(text.into())
 }
 
 /// 接收侧卡片要显示的东西（由 `AppRoot` 从快照里得到）。
