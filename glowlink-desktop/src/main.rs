@@ -18,31 +18,28 @@ fn main() {
 
     let name = glowlink_core::DeviceIdentity::global().name.clone();
 
-    // 装配点（依赖注入）：有守护进程就用真数据；没有就**显示空表**。
-    //
-    // 「连不上就回落预览假数据」曾经很方便（离线比对设计稿），但它把假设备
-    // 当真设备画了出来——用户看到 `Pixel 9` / `iPad mini` 会以为附近真有这些机器。
-    // 所以预览改成显式开关：`GLOWLINK_PREVIEW=1`，只给设计比对用。
-    let source: Arc<dyn DeviceSource> = match IpcSource::attach() {
-        Some(ipc) => {
-            log::info!("已连上守护进程，设备表来自 IPC");
-            ipc
+    // 预览模式：只给离线比对设计稿用（设备表是写死的假数据，不碰真实服务）
+    let preview = std::env::var_os("GLOWLINK_PREVIEW").is_some();
+    let ipc = IpcSource::spawn();
+
+    // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
+    // 不自动拉起的话，每次测试都得先手敲一遍 `glowlink on` —— 那是把服务当命令行工具的用法。
+    let (source, service): (Arc<dyn DeviceSource>, Option<Arc<IpcSource>>) = if preview {
+        log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
+        (Arc::new(PreviewSource::discovered()), None)
+    } else {
+        if !ipc.running() {
+            log::info!("服务没在跑，正在拉起守护进程…");
+            ipc.start_service();
         }
-        None if std::env::var_os("GLOWLINK_PREVIEW").is_some() => {
-            log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
-            Arc::new(PreviewSource::discovered())
-        }
-        None => {
-            log::info!("守护进程没在跑：设备表为空（先 `glowlink on` 才能看到设备）");
-            Arc::new(PreviewSource::empty())
-        }
+        (Arc::clone(&ipc) as Arc<dyn DeviceSource>, Some(Arc::clone(&ipc)))
     };
 
     gpui_ce_platform::application()
         // 图标必须注册资源源，否则 `svg()` 静默不画（不报错、不警告）
         .with_assets(glowlink_desktop::assets::Assets)
         .run(move |cx: &mut App| {
-            glowlink_desktop::view::app::open(name.clone(), source, cx);
+            glowlink_desktop::view::app::open(name.clone(), source, service, cx);
             cx.activate(true);
         });
 }

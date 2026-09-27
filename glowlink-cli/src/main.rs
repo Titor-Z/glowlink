@@ -13,10 +13,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
 use glowlink_cli::config;
-use glowlink_cli::daemon;
 use glowlink_cli::exit;
 use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::codec;
+use glowlink_ipc::daemon;
 use glowlink_ipc::row::{DeviceRow, PairingRow, PendingRow};
 use glowlink_ipc::server::{self as ipc_server, IpcHost};
 use glowlink_ipc::state;
@@ -827,9 +827,6 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    // 残留状态文件先清掉，免得客户端读到不存在的 IPC 端口。
-    state::remove_state()?;
-
     let ipc_port = flag_u16(args, "--ipc-port")?.unwrap_or(ipc_server::IPC_PORT);
     let mut child_args = vec![daemon::DAEMON_COMMAND.to_string()];
     if auto_accept {
@@ -844,22 +841,9 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
     child_args.push("--ipc-port".to_string());
     child_args.push(ipc_port.to_string());
 
-    let exe = daemon::current_exe()?;
-    let child = daemon::spawn_detached(&exe, &child_args)?;
-
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    while Instant::now() < deadline {
-        if let Some(state) = daemon::running_state() {
-            print_on_summary(&state, "已启动");
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Err(GlowError::Usage(format!(
-        "glowlink on: 守护进程未能就绪（PID {}）\n\n日志：{}",
-        child.id(),
-        state::log_path().display()
-    )))
+    let state = daemon::ensure_running(&child_args, STARTUP_TIMEOUT)?;
+    print_on_summary(&state, "已启动");
+    Ok(())
 }
 
 fn print_on_summary(state: &State, prefix: &str) {
@@ -880,32 +864,13 @@ fn print_on_summary(state: &State, prefix: &str) {
     println!("日志 {}    停止：glowlink off", state::log_path().display());
 }
 
-/// `glowlink off`：优先优雅停止，IPC 不通时兜底强杀。
+/// `glowlink off`：优先优雅停止，IPC 不通时兜底强杀（机制在 `glowlink-ipc::daemon`）。
 fn cmd_off(_config: &Config, _args: &[String]) -> Result<()> {
-    let Some(state) = state::read_state()? else {
-        println!("萤光守护进程未在运行。");
-        return Ok(());
-    };
-
-    let stopping = match IpcClient::connect(&state) {
-        Ok(mut client) => client.call("STOP").is_ok(),
-        Err(_) => false,
-    };
-    if !stopping {
-        // 连不上（进程卡死或状态文件过期），直接按 PID 强杀兜底
-        daemon::terminate(state.pid);
+    match daemon::stop(Duration::from_secs(3))? {
+        Some(state) => println!("萤光守护进程（PID {}）已停止。", state.pid),
+        // 停止一个没在跑的服务不是错误（与既有行为一致）
+        None => println!("萤光守护进程未在运行。"),
     }
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline && daemon::running_state().is_some() {
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    if daemon::running_state().is_some() {
-        daemon::terminate(state.pid);
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    state::remove_state()?;
-    println!("萤光守护进程（PID {}）已停止。", state.pid);
     Ok(())
 }
 

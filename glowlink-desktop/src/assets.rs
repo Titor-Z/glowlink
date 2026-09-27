@@ -31,7 +31,8 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/monitor.svg", include_bytes!("../assets/icons/monitor.svg")),
     ("icons/phone.svg", include_bytes!("../assets/icons/phone.svg")),
     ("icons/tablet.svg", include_bytes!("../assets/icons/tablet.svg")),
-    ("icons/toggle-3.svg", include_bytes!("../assets/icons/toggle-3.svg")),
+    ("icons/toggle-off.svg", include_bytes!("../assets/icons/toggle-off.svg")),
+    ("icons/toggle-on.svg", include_bytes!("../assets/icons/toggle-on.svg")),
     ("icons/tray.svg", include_bytes!("../assets/icons/tray.svg")),
     ("icons/unknown.svg", include_bytes!("../assets/icons/unknown.svg")),
 ];

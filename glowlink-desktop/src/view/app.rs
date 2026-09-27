@@ -14,7 +14,7 @@ use gpui::{
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::controller::{DeviceSource, DeviceView};
+use crate::controller::{DeviceSource, DeviceView, IpcSource};
 use crate::model::layout::{self, NodeSize};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
@@ -30,33 +30,53 @@ pub struct AppRoot {
     state: UiState,
     /// 设备表来源（已在跑的守护进程，或预览实现）。
     source: Arc<dyn DeviceSource>,
+    /// 服务开关的来源；预览模式下是 `None`（那时不碰真实服务）。
+    service: Option<Arc<IpcSource>>,
+    /// 服务是否在跑（标题栏开关的显示状态）。
+    service_on: bool,
     /// 当前显示的设备（快照）。
     devices: Vec<DeviceView>,
 }
 
 impl AppRoot {
-    pub fn new(device_name: impl Into<SharedString>, source: Arc<dyn DeviceSource>) -> Self {
+    pub fn new(
+        device_name: impl Into<SharedString>,
+        source: Arc<dyn DeviceSource>,
+        service: Option<Arc<IpcSource>>,
+    ) -> Self {
         let devices = source.devices();
+        let service_on = service.as_ref().map(|s| s.running()).unwrap_or(false);
         // 初值也记一笔：排查「界面是空的」时，先分清楚是「真没设备」还是「压根没连上」
-        log::info!("设备表初值：{} 台", devices.len());
+        log::info!(
+            "设备表初值：{} 台（服务{}）",
+            devices.len(),
+            if service_on { "在跑" } else { "没在跑" }
+        );
         let mut state = UiState::new();
         state.observe_devices(devices.len());
-        AppRoot { device_name: device_name.into(), state, source, devices }
+        AppRoot { device_name: device_name.into(), state, source, service, service_on, devices }
     }
 
-    /// 拉一次设备快照；**真变了才返回 `true`**（调用方据此决定要不要重绘）。
+    /// 拉一次快照；**真变了才返回 `true`**（调用方据此决定要不要重绘）。
     ///
     /// 设备表很小，比一次比每次都 `notify()` 好：后者会让窗口每秒白重绘 3 次，
     /// 而重绘会打断正在跑的动画（呼吸圈的相位会被拖回去）。
     pub fn sync(&mut self) -> bool {
         let fresh = self.source.devices();
-        if fresh == self.devices {
+        let service_on = self.service.as_ref().map(|s| s.running()).unwrap_or(false);
+        if fresh == self.devices && service_on == self.service_on {
             return false;
         }
-        // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
-        log::info!("设备表更新：{} 台", fresh.len());
-        self.devices = fresh;
-        self.state.observe_devices(self.devices.len());
+        if fresh != self.devices {
+            // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
+            log::info!("设备表更新：{} 台", fresh.len());
+            self.devices = fresh;
+            self.state.observe_devices(self.devices.len());
+        }
+        if service_on != self.service_on {
+            log::info!("服务开关：{}", if service_on { "开" } else { "关" });
+            self.service_on = service_on;
+        }
         true
     }
 }
@@ -66,12 +86,37 @@ impl Render for AppRoot {
         let t = Theme::DARK;
         let cx_handle = cx.entity().clone();
 
+        // 服务开关（预览模式下不显示）：开 = 品牌蓝 + 滑块在右，关 = 次白墨色 + 滑块在左。
+        // 两个信号（位置 + 颜色）同时给：只靠颜色在灰底上读不出来，只靠位置又不够快。
+        let service_on = self.service_on;
+        let supervisor = self.service.clone();
+        let toggle = self.service.as_ref().map(|_| {
+            titlebar::icon_button(
+                "service",
+                &t,
+                if service_on { "icons/toggle-on.svg" } else { "icons/toggle-off.svg" },
+                if service_on { theme::NODE_SELF } else { t.text_secondary },
+                None,
+                theme::IconHover::Neutral,
+                move |_, _, _| {
+                    // 状态在**点击时**读：闭包捕获的是“开/关”的旧值的话就会点反
+                    let Some(source) = supervisor.clone() else { return };
+                    if source.running() {
+                        source.stop_service();
+                    } else {
+                        source.start_service();
+                    }
+                },
+            )
+        });
+
         // 标题栏右侧三个：隐私浮层 · 收进托盘 · 关闭。
         // 关闭是**自绘的窗口控制**（系统红绿灯已经藏掉，见 `crate::platform`）。
         let privacy = titlebar::icon_button(
             "privacy",
             &t,
             "icons/lock.svg",
+            t.text_secondary,
             None,
             theme::IconHover::Neutral,
             move |_, _, cx| {
@@ -82,6 +127,7 @@ impl Render for AppRoot {
             "tray",
             &t,
             "icons/tray.svg",
+            t.text_secondary,
             None,
             theme::IconHover::Neutral,
             |_, _, _| {},
@@ -90,6 +136,7 @@ impl Render for AppRoot {
             "close",
             &t,
             "icons/close.svg",
+            t.text_secondary,
             Some(gpui::WindowControlArea::Close),
             theme::IconHover::Close,
             // 关窗 + 退出进程：只 `remove_window` 的话 macOS 会留一个没有窗口的活进程
@@ -143,6 +190,7 @@ impl Render for AppRoot {
                             .flex_row()
                             .items_center()
                             .gap(px(theme::GAP_ICON_BUTTON))
+                            .children(toggle)
                             .child(privacy)
                             .child(tray)
                             .child(close),
@@ -180,7 +228,12 @@ fn graph_space(rect: layout::Rect) -> layout::Rect {
 }
 
 /// 打开主窗口。
-pub fn open(device_name: String, source: Arc<dyn DeviceSource>, cx: &mut App) {
+pub fn open(
+    device_name: String,
+    source: Arc<dyn DeviceSource>,
+    service: Option<Arc<IpcSource>>,
+    cx: &mut App,
+) {
     let bounds = corner_bounds(cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -199,7 +252,7 @@ pub fn open(device_name: String, source: Arc<dyn DeviceSource>, cx: &mut App) {
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let view = cx.new(|_| AppRoot::new(device_name, source));
+        let view = cx.new(|_| AppRoot::new(device_name, source, service));
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
         // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
         let weak = view.downgrade();

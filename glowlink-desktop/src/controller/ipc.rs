@@ -5,16 +5,16 @@
 //!
 //! ## 线程模型（这里是本模块唯一需要想清楚的地方）
 //!
-//! - **读**：一个独立轮询线程把三张表抓成 [`Snapshot`]，界面线程只读快照；
-//!   版本号变了才重绘（否则每 300ms 白重绘一次）。
-//! - **写**：指令进队列，由**同一个轮询线程**发出。界面绝不自己连 IPC——
-//!   一次 `PAIR` 在守护进程那边要先连对端，慢起来就是好几秒，
-//!   放在按钮回调里就是「点了没反应，窗口卡住」。详见 [`PairingSource::start`]。
-//! - 为什么不用 gpui 的 executor：它是裸 pollster，阻塞在里面会把其他后台任务
-//!   一起拖住（认知纠正里记过），所以轮询用 `std::thread`。
+//! - **读**：一个独立轮询线程把三张表 + 服务开关状态抓成 [`Snapshot`]，
+//!   界面线程只读快照；版本号变了才重绘（否则每 300ms 白重绘一次）。
+//! - **写**：指令与「启停服务」请求都进队列，由**同一个轮询线程**执行。
+//!   界面绝不自己连 IPC、也绝不自己 spawn 进程 —— 拉起守护进程要等它就绪（几百毫秒到几秒），
+//!   放在按钮回调里就是「点了没反应，窗口卡住」。详见 [`IpcSource::start_service`]。
+//! - 为什么不用 gpui 的 executor：它是裸 pollster，阻塞在里面会把其他后台任务一起拖住
+//!   （认知纠正里记过），所以轮询用 `std::thread`。
 //!
-//! 代价（诚实记录）：指令是**异步**的，`Ok(())` 只代表「已交给守护进程」，
-//! 真正的成败靠下一轮快照（`error` 字段 + 表变化）反映到界面上。
+//! 代价（诚实记录）：写操作是**异步**的，`Ok(())` 只代表「已交给守护进程」，
+//! 真正的成败靠下一轮快照（`error` + `running` + 表变化）反映到界面上。
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,8 +24,9 @@ use std::time::Duration;
 use glowlink_core::model::error::{GlowError, Result};
 
 use glowlink_ipc::client::IpcClient;
+use glowlink_ipc::daemon;
 use glowlink_ipc::row::{DeviceRow, PairingRow, PendingRow};
-use glowlink_ipc::state::read_state;
+use glowlink_ipc::state::{read_state, state_dir};
 
 use crate::controller::source::{
     DeviceSource, DeviceView, PairingSource, PairingView, PendingView, ProgressView, TransferSource,
@@ -34,9 +35,23 @@ use crate::controller::source::{
 /// 轮询周期：界面 3 次/秒够用，再密只是让守护进程空转。
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-/// 三张表 + 最近一次抓取的结果。
+/// 拉起守护进程的等待上限（与 CLI `on` 同一量级：冷启动要建 IPC 监听 + 绑发现端口）。
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// 停止守护进程的等待上限。
+const STOP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// 对服务生命周期的一次请求（在轮询线程里执行）。
+enum ServiceRequest {
+    Start,
+    Stop,
+}
+
+/// 三张表 + 服务状态 + 最近一次抓取的结果。
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Snapshot {
+    /// 守护进程在跑吗（「能 PING 通」才算，不是「状态文件存在」）。
+    running: bool,
     devices: Vec<DeviceView>,
     pending: Vec<PendingView>,
     /// 本机发起、等对方输码的配对槽位（码要显示给人核对）。
@@ -47,44 +62,51 @@ struct Snapshot {
     error: Option<String>,
 }
 
-/// 守护进程数据源。
+/// 守护进程数据源 + 服务开关。
+///
+/// **总是存在**（不再像早期那样「连不上就返回 `None`」）：开关要知道「现在到底跑没跑」，
+/// 这个答案得每轮刷新，不能只在启动时问一次。
 pub struct IpcSource {
     shared: Arc<Mutex<Snapshot>>,
     /// 待发指令队列（由轮询线程取走）。
     outgoing: Arc<Mutex<Vec<String>>>,
+    /// 待执行的启停请求（同样由轮询线程执行）。
+    service: Arc<Mutex<Vec<ServiceRequest>>>,
     /// 快照版本号：界面靠它判断要不要重绘。
     version: Arc<AtomicU64>,
 }
 
 impl IpcSource {
-    /// 连上守护进程并开始轮询；没在跑或 PING 不通时返回 `None`。
-    ///
-    /// **先 PING**：状态文件存在 != 守护进程活着（可能刚崩、端口被别人占了），
-    /// 「能连上并 PING 通」才是判据（与 CLI 同一口径）。
-    pub fn attach() -> Option<Arc<Self>> {
-        let state = read_state().ok().flatten()?;
-        IpcClient::connect(&state).ok()?.call_first("PING").ok()?;
-
+    /// 启动轮询线程（**不要求守护进程已在跑**）。
+    pub fn spawn() -> Arc<Self> {
         let source = Arc::new(IpcSource {
             shared: Arc::new(Mutex::new(Snapshot::default())),
             outgoing: Arc::new(Mutex::new(Vec::new())),
+            service: Arc::new(Mutex::new(Vec::new())),
             version: Arc::new(AtomicU64::new(0)),
         });
 
         let shared = Arc::clone(&source.shared);
         let outgoing = Arc::clone(&source.outgoing);
+        let service = Arc::clone(&source.service);
         let version = Arc::clone(&source.version);
+        // 独立线程而不是 gpui 的 executor：executor 是裸 pollster，
+        // 阻塞在里面会把其他后台任务一起拖住（认知纠正里记过）。
         thread::spawn(move || loop {
-            // 先发指令再抓表：本轮的改动下一轮就能看到，界面感觉是「点完就动」
-            for command in outgoing.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
-                if let Err(e) = send(&command) {
-                    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-                    guard.error = Some(e.to_string());
-                    version.fetch_add(1, Ordering::SeqCst);
+            // 先处理启停与指令，再抓表：本轮的改动下一轮就能看到，界面感觉是「点完就动」
+            for request in service.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+                if let Err(e) = run_service_request(request) {
+                    fail(&shared, &version, e.to_string());
                 }
             }
+            for command in outgoing.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+                if let Err(e) = send(&command) {
+                    fail(&shared, &version, e.to_string());
+                }
+            }
+            let fresh = fetch();
             let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-            match fetch() {
+            match fresh {
                 Ok(fresh) => {
                     if *guard != fresh {
                         *guard = fresh;
@@ -104,12 +126,17 @@ impl IpcSource {
             thread::sleep(POLL_INTERVAL);
         });
 
-        Some(source)
+        source
     }
 
     /// 快照版本号：变了就说明该重绘。
     pub fn version(&self) -> u64 {
         self.version.load(Ordering::SeqCst)
+    }
+
+    /// 守护进程现在在跑吗。
+    pub fn running(&self) -> bool {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).running
     }
 
     /// 最近一次抓取失败的原因（成功时为 `None`）。
@@ -121,6 +148,22 @@ impl IpcSource {
             .clone()
     }
 
+    /// 开服务。**异步**：真正拉起到就绪要几百毫秒到几秒，不能放在按钮回调里。
+    pub fn start_service(&self) {
+        self.service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ServiceRequest::Start);
+    }
+
+    /// 关服务（异步，理由同上）。
+    pub fn stop_service(&self) {
+        self.service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(ServiceRequest::Stop);
+    }
+
     /// 把一条指令交给轮询线程。
     fn submit(&self, command: String) {
         self.outgoing
@@ -130,14 +173,65 @@ impl IpcSource {
     }
 }
 
-/// 抓一次三张表。
+/// 记一笔失败：不动表，只把原因挂出来。
+fn fail(shared: &Arc<Mutex<Snapshot>>, version: &Arc<AtomicU64>, text: String) {
+    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.error.as_deref() != Some(text.as_str()) {
+        guard.error = Some(text);
+        version.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// 执行一条启停请求（守护进程本体的机制在 `glowlink-ipc::daemon`）。
+fn run_service_request(request: ServiceRequest) -> Result<()> {
+    match request {
+        ServiceRequest::Start => {
+            let state = daemon::ensure_running(&launch_args(), STARTUP_TIMEOUT)?;
+            log::info!("服务已启动（PID {}，IPC {}）", state.pid, state.ipc_port);
+        }
+        ServiceRequest::Stop => match daemon::stop(STOP_TIMEOUT)? {
+            Some(state) => log::info!("服务已停止（PID {}）", state.pid),
+            None => log::info!("服务本来就没在跑"),
+        },
+    }
+    Ok(())
+}
+
+/// 桌面版拉起守护进程时带的参数。
+///
+/// - `--yes`：对**已信任**设备免确认自动接收。桌面版现在还没有待确认入口，
+///   不带这个开关的话，收到文件会卡在「等人确认」直到超时被拒。
+///   （等 GUI 做出待确认列表再改回默认。）
+/// - `--dir`：接收目录给**绝对路径** `~/.glowlink/received`。相对路径会跟着
+///   「谁把它拉起来的、当时在哪个目录」跑，文件落在哪儿全凭运气。
+fn launch_args() -> Vec<String> {
+    vec![
+        daemon::DAEMON_COMMAND.to_string(),
+        "--yes".to_string(),
+        "--dir".to_string(),
+        state_dir().join("received").display().to_string(),
+    ]
+}
+
+/// 抓一次快照。
+///
+/// 服务没在跑**不是错误**：那是「关着」这个正常状态，返回 `running: false` + 空表。
+/// 只有「状态文件在、但连不上/答不上话」才算真失败（交给调用方保留上一份表）。
 fn fetch() -> Result<Snapshot> {
-    let mut client = IpcClient::connect(&current_state()?)?;
+    let Some(state) = read_state()? else {
+        return Ok(Snapshot::default());
+    };
+    if daemon::running_state().is_none() {
+        // 状态文件是残留（进程已死）：当作「关着」，不报错
+        return Ok(Snapshot::default());
+    }
+    let mut client = IpcClient::connect(&state)?;
     let devices = client.call("DEVICES")?;
     let pending = client.call("PENDING")?;
     let pairing_outgoing = client.call("PAIRINGS")?;
     let pairing_pending = client.call("PAIRPENDING")?;
     Ok(Snapshot {
+        running: true,
         devices: devices.iter().skip(1).filter_map(|l| DeviceRow::from_line(l)).map(device_view).collect(),
         pending: pending.iter().skip(1).filter_map(|l| PendingRow::from_line(l)).map(pending_view).collect(),
         pairing_outgoing: pairing_outgoing
@@ -158,12 +252,13 @@ fn fetch() -> Result<Snapshot> {
 
 /// 发一条指令（用一次性连接；IPC 是有状态的短交互，不值得养长连接）。
 fn send(command: &str) -> Result<String> {
-    let mut client = IpcClient::connect(&current_state()?)?;
+    let state = current_state()?;
+    let mut client = IpcClient::connect(&state)?;
     client.call_first(command)
 }
 
 fn current_state() -> Result<glowlink_ipc::state::State> {
-    read_state()?.ok_or_else(|| GlowError::Missing("后台服务没在跑（先运行 glowlink on）".into()))
+    read_state()?.ok_or_else(|| GlowError::Missing("后台服务没在跑（先 `glowlink on`）".into()))
 }
 
 fn device_view(row: DeviceRow) -> DeviceView {

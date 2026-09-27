@@ -8,7 +8,7 @@
 
 pub mod args;
 pub mod config;
-pub mod daemon;
+
 pub mod exit;
 pub mod keys;
 pub mod pairing;

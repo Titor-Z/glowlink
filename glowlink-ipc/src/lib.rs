@@ -17,6 +17,7 @@
 
 pub mod client;
 pub mod codec;
+pub mod daemon;
 pub mod row;
 pub mod server;
 pub mod state;

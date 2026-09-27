@@ -112,11 +112,13 @@ fn brand_dot(t: &Theme) -> impl IntoElement {
 ///
 /// `control` 是给平台层的窗口控制语义（`Close` 之类）：Windows 会据此返回
 /// `HTCLOSE`，让系统给出原生 hover/点击行为；macOS 不用它（用 `on_click`）。
-/// `hover` 决定鼠标经过的观感（见 `theme::IconHover`）。
+/// `hover` 决定鼠标经过的观感（见 `theme::IconHover`）；`ink` 是常态墨色
+/// （服务开关靠它上色：开 = 品牌蓝）。
 pub fn icon_button(
     id: &'static str,
     t: &Theme,
     icon: &'static str,
+    ink: Rgba,
     control: Option<WindowControlArea>,
     hover: theme::IconHover,
     on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut gpui::App) + 'static,
@@ -146,7 +148,7 @@ pub fn icon_button(
             .path(icon)
             .w(px(14.0))
             .h(px(14.0))
-            .text_color(t.text_secondary)
+            .text_color(ink)
             // `svg()` **不继承**父级 `text_color`，hover 的墨色只能在 svg 上给
             .group_hover(group, move |s| s.text_color(hover_ink)),
     )
