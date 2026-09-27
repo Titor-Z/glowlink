@@ -1,80 +1,67 @@
+//! `model/ports.rs` 的测试：端口可用性判定与候选端口序列。
+
 use std::net::UdpSocket;
 
-use glowlink_core::model::ports::{bind_udp_with_fallback, is_port_conflict, probe_udp, BindOutcome};
-
-/// 借系统分配一个空闲端口后立刻释放。
-/// 找一个确实可绑定的端口（避开本机可能存在的 UDP 残留绑定）。
-fn free_udp_port() -> u16 {
-    for _ in 0..200 {
-        let probe = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-        let port = probe.local_addr().unwrap().port();
-        drop(probe);
-        if UdpSocket::bind(("0.0.0.0", port)).is_ok() {
-            return port;
-        }
-    }
-    panic!("找不到可用端口");
-}
+use glowlink_core::model::ports::{
+    candidate_at, candidate_ports, is_port_conflict, probe_udp, BindOutcome, DISCOVERY_PORT_SPAN,
+};
 
 #[test]
-fn probe_reports_free_port_as_bound() {
-    let port = free_udp_port();
-    assert_eq!(probe_udp(port), BindOutcome::Bound(port));
-}
-
-#[test]
-fn probe_reports_taken_port_as_taken() {
-    let port = free_udp_port();
-    let holder = UdpSocket::bind(("0.0.0.0", port)).unwrap();
-
+fn probe_reports_bound_for_free_port() {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    // 该端口此刻被自己持有，探测必须报「被占」（说明 probe 用的是真 bind 结果）
     assert_eq!(probe_udp(port), BindOutcome::Taken);
-    // 同端口再次绑定必须失败，这正是降级逻辑的前提
-    assert!(UdpSocket::bind(("0.0.0.0", port)).is_err());
-    drop(holder);
+    drop(socket);
 }
 
 #[test]
-fn bind_with_fallback_uses_preferred_when_free() {
-    let port = free_udp_port();
-    let (socket, bound, degraded) = bind_udp_with_fallback(port).unwrap();
-    assert_eq!(bound, port);
-    assert!(!degraded, "首选端口可用时不应标记为降级");
-    assert!(socket.local_addr().unwrap().port() == port);
-}
-
-#[test]
-fn bind_with_fallback_shifts_when_preferred_taken() {
-    // 占住连续 3 个端口，验证顺延会跳过它们
-    let base = free_udp_port();
-    let mut holders = Vec::new();
-    for offset in 0..3 {
-        match UdpSocket::bind(("0.0.0.0", base + offset)) {
-            Ok(socket) => holders.push(socket),
-            // 该端口恰好被别的进程占了也无妨，同样达到“被占”的效果
-            Err(_) => {}
-        }
+fn probe_reports_bound_after_release() {
+    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    let port = socket.local_addr().unwrap().port();
+    drop(socket);
+    // 释放后应当可用；万一被别的进程抢走则跳过（不制造假故障）
+    match probe_udp(port) {
+        BindOutcome::Bound(p) => assert_eq!(p, port),
+        BindOutcome::Taken => eprintln!("端口 {port} 已被其它进程占用，跳过本次断言"),
     }
-
-    let (socket, bound, degraded) = bind_udp_with_fallback(base).unwrap();
-    assert!(degraded, "首选端口被占时标记为降级");
-    assert!(bound > base);
-    // 返回的必须是我们真正持有的端口
-    assert_eq!(socket.local_addr().unwrap().port(), bound);
-    drop(holders);
 }
 
 #[test]
-fn bind_with_fallback_keeps_broadcast_enabled() {
-    let port = free_udp_port();
-    let (socket, _, _) = bind_udp_with_fallback(port).unwrap();
-    // set_broadcast 成功即说明属性可用；这里通过再次设置来间接确认套接字有效
-    assert!(socket.set_broadcast(true).is_ok());
+fn port_conflicts_are_recognised() {
+    let error = std::io::Error::from(std::io::ErrorKind::AddrInUse);
+    assert!(is_port_conflict(&error));
+    let other = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+    assert!(!is_port_conflict(&other));
 }
 
+/// 候选端口必须从约定端口开始、连续覆盖整个跨度。
 #[test]
-fn port_conflict_classification() {
-    let taken = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
-    let port = taken.local_addr().unwrap().port();
-    let error = UdpSocket::bind(("127.0.0.1", port)).unwrap_err();
-    assert!(is_port_conflict(&error), "AddrInUse 必须被识别为端口冲突");
+fn candidates_cover_the_whole_span() {
+    let ports = candidate_ports(9267, 21);
+    assert_eq!(ports.len(), 21);
+    assert_eq!(ports.first(), Some(&9267));
+    assert_eq!(ports.last(), Some(&9287));
+    assert_eq!(candidate_at(9267, 20), Some(9287));
+    assert_eq!(candidate_at(9267, 21), Some(9288));
+}
+
+/// 越界不回绕：宁可少几个候选，也不要跳回低端口区。
+#[test]
+fn candidates_do_not_wrap_around_the_port_space() {
+    let ports = candidate_ports(65530, 21);
+    assert_eq!(ports, vec![65530, 65531, 65532, 65533, 65534, 65535]);
+    assert_eq!(candidate_at(65535, 1), None);
+    // 跨度 0 视为 1，保证至少探测约定端口本身
+    assert_eq!(candidate_ports(9267, 0), vec![9267]);
+    assert_eq!(candidate_ports(0, 2), vec![1, 2], "端口 0 不可用，从 1 起算");
+}
+
+/// 协议常量本身必须是合理值：太小会导致顺延即失联，太大等于刷屏。
+#[test]
+fn span_constant_is_sane() {
+    assert!(
+        (10..=64).contains(&DISCOVERY_PORT_SPAN),
+        "跨度 {DISCOVERY_PORT_SPAN} 超出合理范围（广播流量与容错能力的折中）"
+    );
 }

@@ -1,8 +1,13 @@
 use glowlink_core::model::error::GlowError;
+use glowlink_core::model::ports::DISCOVERY_PORT_SPAN;
 use glowlink_core::Config;
 
 fn config(text: &str) -> Config {
     Config::parse(text).expect("配置应能解析")
+}
+
+fn config_result(text: &str) -> Result<Config, GlowError> {
+    Config::parse(text)
 }
 
 #[test]
@@ -82,4 +87,31 @@ fn sizes_convert_to_bytes() {
     let parsed = config("chunk_size_kib = 8\nring_capacity_kib = 32\n");
     assert_eq!(parsed.chunk_size(), 8 * 1024);
     assert_eq!(parsed.ring_capacity(), 32 * 1024);
+}
+
+/// 候选端口个数：可解析，且越界必须报错并指出允许范围。
+#[test]
+fn discovery_port_span_is_parsed_and_bounded() {
+    let parsed = config("discovery_port_span = 5");
+    assert_eq!(parsed.discovery_port_span, 5);
+
+    // 0 等于「只发约定端口」，顺延过的节点就再也找不到了，必须拦住
+    let zero = config_result("discovery_port_span = 0").unwrap_err().to_string();
+    assert!(zero.contains("discovery_port_span"), "错误要指出是哪个键：{zero}");
+    assert!(zero.contains("1..=64"), "错误要给出允许范围：{zero}");
+
+    let too_big = config_result("discovery_port_span = 65").unwrap_err().to_string();
+    assert!(too_big.contains("1..=64"), "错误要给出允许范围：{too_big}");
+}
+
+/// 默认值与协议常量同源：默认必须能覆盖协议约定的顺延范围。
+#[test]
+fn default_span_matches_protocol_constant() {
+    let parsed = config("");
+    assert_eq!(parsed.discovery_port_span, DISCOVERY_PORT_SPAN);
+    assert_eq!(
+        parsed.discovery_port_span,
+        glowlink_core::model::ports::candidate_ports(9267, DISCOVERY_PORT_SPAN).len() as u16,
+        "跨度与实际探测的端口个数必须一致"
+    );
 }

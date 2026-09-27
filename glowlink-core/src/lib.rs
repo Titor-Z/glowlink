@@ -20,7 +20,7 @@ pub use model::crypto::{
 pub use model::device::{Device, DeviceBook, DeviceId};
 pub use model::error::{GlowError, Result};
 pub use model::packet::{Frame, Hello, Probe, CHUNK_SIZE, DISCOVERY_PORT, VERSION_STR};
-pub use model::ports::{bind_udp_with_fallback, resolve_udp_port, BindOutcome};
+pub use model::ports::{candidate_ports, BindOutcome, DISCOVERY_PORT_SPAN};
 pub use model::probe::{
     bind_or_identify, compare_versions, decide_port, identify, PortDecision, PortOwner,
     VersionVerdict,

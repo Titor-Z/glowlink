@@ -13,7 +13,14 @@ fn value_flags_swallow_their_value() {
 #[test]
 fn every_value_flag_is_registered() {
     // 这条用例防止新增开关时忘记登记，导致取值混进位置参数。
-    for flag in ["--timeout", "--port", "--dir", "--discovery-port", "--peer"] {
+    for flag in [
+        "--timeout",
+        "--port",
+        "--dir",
+        "--discovery-port",
+        "--discovery-port-span",
+        "--peer",
+    ] {
         let a = args(&[flag, "取值", "文件"]);
         assert_eq!(positional_args(&a), args(&["文件"]), "{flag} 未登记为取值开关");
     }

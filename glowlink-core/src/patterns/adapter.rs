@@ -8,6 +8,7 @@ use crate::controller::discovery::{DiscoveryEvent, DiscoveryTransport};
 use crate::controller::transfer::{TransferListener, TransferTransport};
 use crate::model::error::{GlowError, Result};
 use crate::model::packet::{Frame, Hello, Probe, MAX_FRAME};
+use crate::model::ports::{candidate_ports, DISCOVERY_PORT_SPAN};
 use crate::model::probe::PortDecision;
 
 /// 回环地址：广播包不保证回到本机，额外单发一份让同机多节点也能互相发现。
@@ -24,6 +25,8 @@ pub struct UdpDiscoveryAdapter {
     degraded: bool,
     /// 对外宣告使用的端口（用于发送到广播地址）。
     announced_port: u16,
+    /// 查询时向「约定端口 + 顺延位」共几个端口各发一份。
+    span: u16,
 }
 
 impl UdpDiscoveryAdapter {
@@ -36,6 +39,7 @@ impl UdpDiscoveryAdapter {
             socket: decision.socket,
             degraded: false,
             announced_port: decision.preferred,
+            span: DISCOVERY_PORT_SPAN,
         })
     }
 
@@ -44,16 +48,32 @@ impl UdpDiscoveryAdapter {
         match UdpSocket::bind(("0.0.0.0", port)) {
             Ok(socket) => {
                 socket.set_broadcast(true)?;
-                Ok(UdpDiscoveryAdapter { socket, degraded: false, announced_port: port })
+                Ok(UdpDiscoveryAdapter {
+                    socket,
+                    degraded: false,
+                    announced_port: port,
+                    span: DISCOVERY_PORT_SPAN,
+                })
             }
             Err(e) if e.kind() == ErrorKind::AddrInUse => {
                 // 不绑定固定端口，让 UDP 栈在每次发送时分配临时源端口。
                 let socket = UdpSocket::bind(("0.0.0.0", 0))?;
                 socket.set_broadcast(true)?;
-                Ok(UdpDiscoveryAdapter { socket, degraded: true, announced_port: port })
+                Ok(UdpDiscoveryAdapter {
+                    socket,
+                    degraded: true,
+                    announced_port: port,
+                    span: DISCOVERY_PORT_SPAN,
+                })
             }
             Err(e) => Err(GlowError::Io(e)),
         }
+    }
+
+    /// 查询要覆盖的端口个数（约定端口加顺延位）。默认走协议常量。
+    pub fn with_span(mut self, span: u16) -> Self {
+        self.span = span.max(1);
+        self
     }
 
     /// 实际监听端口；降级模式下没有监听端口。
@@ -85,9 +105,20 @@ impl DiscoveryTransport for UdpDiscoveryAdapter {
         // 广播发不出去**不算协议失败**：网卡关着、没有路由、机器刚唤醒都会
         // 报 ENETUNREACH。这类环境问题不能中断这一轮——否则收包也不做了、
         // 查询时间戳也不更新，主循环就会原地空转（曾一秒写上万行日志把磁盘写满）。
-        let broadcast = self.send_to(&bytes, (Ipv4Addr::BROADCAST, self.announced_port));
-        // 同机多节点：广播不一定回到本机，补发回环
-        let loopback = self.send_to(&bytes, (LOOPBACK, self.announced_port));
+        //
+        // 而且**要向每个候选端口各发一份**：对方可能因为端口被占而顺延，
+        // 只发约定端口的话，两个都顺延了的节点会互相看不见（真机上撞到过）。
+        let mut broadcast = Ok(());
+        let mut loopback = Ok(());
+        for port in candidate_ports(self.announced_port, self.span) {
+            if let Err(e) = self.send_to(&bytes, (Ipv4Addr::BROADCAST, port)) {
+                broadcast = Err(e);
+            }
+            // 同机多节点：广播不一定回到本机，补发回环
+            if let Err(e) = self.send_to(&bytes, (LOOPBACK, port)) {
+                loopback = Err(e);
+            }
+        }
         // 只有「回环也发不出去」才说明套接字本身出了问题，那才是真错误
         loopback?;
         let _ = broadcast;

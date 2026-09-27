@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::model::error::{GlowError, Result};
 use crate::model::packet::{Frame, Probe, VERSION_STR};
-use crate::model::ports::{is_port_conflict, FALLBACK_SPAN};
+use crate::model::ports::{candidate_at, is_port_conflict, DISCOVERY_PORT_SPAN};
 
 /// 单次握手的等待时长。
 ///
@@ -232,12 +232,20 @@ impl PortDecision {
 /// 而是在握手判定后换个端口继续绑，适合 `serve` / 守护进程这类
 /// "一定要跑起来"的场景。
 pub fn decide_port(preferred: u16) -> Result<PortDecision> {
+    decide_port_within(preferred, DISCOVERY_PORT_SPAN)
+}
+
+/// 与 [`decide_port`] 相同，但显式给定顺延跨度。
+///
+/// 跨度**必须与查询时的候选端口数一致**（见 [`crate::model::ports::candidate_ports`]）：
+/// 我们最多顺延到哪，别人就最多找到哪。
+pub fn decide_port_within(preferred: u16, span: u16) -> Result<PortDecision> {
     let start = preferred.max(1);
     // 只在第一个失败的端口上做一次握手，用来解释"为什么顺延"
     let mut owner = PortOwner::Free;
 
-    for offset in 0..FALLBACK_SPAN {
-        let candidate = next_candidate(start, offset);
+    for offset in 0..span.max(1) {
+        let candidate = candidate_at(start, offset);
         let Some(candidate) = candidate else { continue };
         match UdpSocket::bind(("0.0.0.0", candidate)) {
             Ok(socket) => {
@@ -260,16 +268,7 @@ pub fn decide_port(preferred: u16) -> Result<PortDecision> {
         }
     }
     Err(GlowError::Config(format!(
-        "端口 {start} 起的 {FALLBACK_SPAN} 个端口全部用不了，请用 --discovery-port 指定其它端口"
+        "端口 {start} 起的 {span} 个端口全部用不了，请用 --discovery-port 指定其它端口"
     )))
 }
 
-/// 顺序取候选端口；溢出不回绕（宁可少试几个，也不要跳回低端口区）。
-fn next_candidate(start: u16, offset: u16) -> Option<u16> {
-    let candidate = start.checked_add(offset)?;
-    if candidate == 0 {
-        None
-    } else {
-        Some(candidate)
-    }
-}

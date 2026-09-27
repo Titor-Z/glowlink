@@ -15,7 +15,7 @@ use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_a
 use glowlink_cli::config;
 use glowlink_cli::daemon;
 use glowlink_cli::ipc::{self, IpcHost};
-use glowlink_cli::keys::{load_or_create_identity, TrustFile};
+use glowlink_cli::keys::{install_device_id, load_or_create_identity, TrustFile};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
@@ -34,6 +34,11 @@ use glowlink_core::{
 };
 
 fn main() {
+    // **第一件事**：用持久身份里的指纹注入本机 ID。
+    // 必须早于任何 `DeviceIdentity::global()`——实例一旦用临时 ID 初始化，再注入就晚了，
+    // 表现是「本机 ID 每次运行都变」。集成测试盯着这件事。
+    install_device_id();
+
     reset_sigpipe();
     match run() {
         Ok(()) => {}
@@ -191,6 +196,7 @@ const DEVICE_POLL: Duration = Duration::from_millis(300);
 fn spawn_device_source(
     config: &Config,
     discovery_port: u16,
+    span: u16,
 ) -> Result<Arc<Mutex<Vec<glowlink_core::Device>>>> {
     let snapshot: Arc<Mutex<Vec<glowlink_core::Device>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -212,7 +218,7 @@ fn spawn_device_source(
     // 没有后台服务：自己起一个发现线程（UDP 收包会阻塞，不能放在界面线程里）
     let snapshot_for_thread = Arc::clone(&snapshot);
     let identity = DeviceIdentity::global().clone();
-    let transport = NativeTransportFactory.create(discovery_port)?;
+    let transport = NativeTransportFactory.create(discovery_port, span)?;
     let mut discovery = DiscoveryController::new(
         transport,
         identity,
@@ -243,7 +249,8 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
         ));
     }
     let discovery_port = discovery_port(config, args)?;
-    let snapshot = spawn_device_source(config, discovery_port)?;
+    let span = discovery_port_span(config, args)?;
+    let snapshot = spawn_device_source(config, discovery_port, span)?;
     let daemon = daemon::running_state().map(|state| {
         let pending = daemon_pending(&state).unwrap_or(0);
         (state.pid, pending)
@@ -288,6 +295,7 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
     let timeout = search_timeout(config, args);
     let watch = has_flag(args, "--watch");
     let discovery_port = discovery_port(config, args)?;
+    let span = discovery_port_span(config, args)?;
 
     // 守护进程在跑就走 IPC：既快（设备表是累积的，不用等一轮扫描），
     // 也避免和守护进程抢发现端口。
@@ -297,7 +305,7 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
 
     let factory = NativeTransportFactory;
     let identity = DeviceIdentity::global().clone();
-    let transport = factory.create(discovery_port)?;
+    let transport = factory.create(discovery_port, span)?;
     let mut discovery = DiscoveryController::new(
         transport,
         identity.clone(),
@@ -549,11 +557,12 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
     // serve 必须跑起来：发现端口被占时顺延，只打一句 [信息]。
     // decide_port 已完成探测与绑定，这里**不能再探测一次**：
     // 新端口此刻正被自己持有，重探只会把自己误判成“绑定异常”。
-    let decision = glowlink_core::model::probe::decide_port(discovery_port)?;
+    let span = discovery_port_span(config, args)?;
+    let decision = glowlink_core::model::probe::decide_port_within(discovery_port, span)?;
     if let Some(notice) = decision.notice() {
         print_notice(&notice);
     }
-    let transport = factory.from_bound_socket(decision)?;
+    let transport = factory.from_bound_socket(decision, span)?;
     let mut discovery = DiscoveryController::new(
         transport,
         identity.clone(),
@@ -633,6 +642,7 @@ const SEND_USAGE: &str = "glowlink send: 缺少参数\n\n\
 fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
     let timeout = search_timeout(config, args);
     let discovery_port = discovery_port(config, args)?;
+    let span = discovery_port_span(config, args)?;
     let peer = flag_value(args, "--peer");
     let positional = positional_args(args);
 
@@ -671,7 +681,7 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
                 addr
             } else {
                 let identity = DeviceIdentity::global().clone();
-                let transport = factory.create(discovery_port)?;
+                let transport = factory.create(discovery_port, span)?;
                 let mut discovery = DiscoveryController::new(
                     transport,
                     identity,
@@ -836,6 +846,9 @@ fn cmd_trust(args: &[String]) -> Result<()> {
     let positional = positional_args(args);
     match positional.first().map(String::as_str) {
         None => {
+            // 本机指纹永远打印：列表为空时用户更需要它来和对方核对
+            let me = load_or_create_identity()?;
+            println!("本机设备指纹 {}", me.fingerprint());
             let devices = trust.devices();
             if devices.is_empty() {
                 println!("信任列表为空（还没有配对过任何设备）。");
@@ -990,13 +1003,14 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
     let listener = factory.listen(port)?;
     let port = listener.local_port()?;
     // 与 serve 相同：发现端口被占时顺延，但已绑好的套接字不能重探
-    let decision = glowlink_core::model::probe::decide_port(discovery_port)?;
+    let span = discovery_port_span(config, args)?;
+    let decision = glowlink_core::model::probe::decide_port_within(discovery_port, span)?;
     if let Some(notice) = decision.notice() {
         state::append_log(&notice);
     }
     // 顺延后要记实际端口：状态文件是客户端了解真实端口的唯一来源
     let bound_discovery_port = decision.port;
-    let transport = factory.from_bound_socket(decision)?;
+    let transport = factory.from_bound_socket(decision, span)?;
     let mut discovery = DiscoveryController::new(
         transport,
         DeviceIdentity::global().clone(),
@@ -1145,5 +1159,20 @@ fn device_timeout(config: &Config) -> Duration {
 /// 发现端口：命令行 > 配置文件。
 fn discovery_port(config: &Config, args: &[String]) -> Result<u16> {
     Ok(flag_u16(args, "--discovery-port")?.unwrap_or(config.discovery_port))
+}
+
+/// 候选端口个数：命令行 > 配置文件 > 内置默认（协议常量）。
+///
+/// 命名为 `span`（跨度/个数）而不是 `range`：后者容易读成「起止两端」，
+/// 与既有 `--discovery-port`（起点）配对更清楚。
+fn discovery_port_span(config: &Config, args: &[String]) -> Result<u16> {
+    let span = flag_u16(args, "--discovery-port-span")?.unwrap_or(config.discovery_port_span);
+    if !(1..=glowlink_core::model::config::MAX_PORT_SPAN).contains(&span) {
+        return Err(GlowError::Usage(format!(
+            "glowlink: --discovery-port-span 需在 1..={} 之间，收到 {span}",
+            glowlink_core::model::config::MAX_PORT_SPAN
+        )));
+    }
+    Ok(span)
 }
 

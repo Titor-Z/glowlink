@@ -196,3 +196,52 @@ fn identity_and_trust_use_distinct_files() {
     assert!(glowlink_cli::keys::identity_path().ends_with(".glowlink/identity.txt"));
     assert!(glowlink_cli::keys::trust_path().ends_with(".glowlink/trusted.txt"));
 }
+
+/// 真跑二进制两次：本机 ID 必须**跨运行一致**，且与配对指纹同源。
+///
+/// 这条用例同时盯着一个启动顺序问题：ID 是在 `main()` 第一句注入的，
+/// 一旦有人把注入挪到 `DeviceIdentity::global()` 之后，两次运行的 ID 就会不同。
+#[test]
+fn local_id_is_stable_across_runs_and_matches_the_fingerprint() {
+    let home = temp_dir("stable-id");
+    let identity = home.join("identity.txt");
+    let bin = env!("CARGO_BIN_EXE_glowlink");
+
+    let run = |args: &[&str]| {
+        let output = std::process::Command::new(bin)
+            // 子进程用自己的 HOME：不碰真实 ~/.glowlink，也不需要与别的用例串行
+            .env("HOME", &home)
+            .env("GLOWLINK_IDENTITY", &identity)
+            .args(args)
+            .output()
+            .expect("应当能启动 glowlink");
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+
+    let local_id = |text: &str| {
+        let start = text.find('（').expect("面板应打印本机信息") + '（'.len_utf8();
+        let rest = &text[start..];
+        rest[..rest.find('）').expect("本机信息应带括号")].to_string()
+    };
+
+    let first = local_id(&run(&[]));
+    let second = local_id(&run(&[]));
+    assert_eq!(first, second, "本机 ID 跨运行必须一致：{first} vs {second}");
+    assert_eq!(first.len(), 8, "面板显示 8 位十六进制：{first}");
+
+    // 与配对指纹同源：面板 ID 必须是指纹的前缀（同一套身份，只是显示长度不同）
+    let fingerprint = load_or_create_identity_at(&identity)
+        .expect("身份应能加载")
+        .fingerprint();
+    assert!(
+        fingerprint.starts_with(&first),
+        "面板 ID {first} 应当是指纹 {fingerprint} 的前缀"
+    );
+
+    // 用户可读路径也要能拿到完整指纹（空信任列表时同样打印）
+    let trust = run(&["trust"]);
+    assert!(
+        trust.contains(&fingerprint),
+        "glowlink trust 应当打印本机指纹：{trust}"
+    );
+}

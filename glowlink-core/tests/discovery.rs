@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -8,6 +8,9 @@ use glowlink_core::controller::discovery::{
 };
 use glowlink_core::model::error::Result;
 use glowlink_core::model::packet::Hello;
+use glowlink_core::model::ports::DISCOVERY_PORT_SPAN;
+use glowlink_core::model::probe::{PortDecision, PortOwner};
+use glowlink_core::patterns::adapter::UdpDiscoveryAdapter;
 use glowlink_core::patterns::singleton::DeviceIdentity;
 
 /// 发现通道的测试替身：记录发出的查询与应答，并返回预设的收包队列。
@@ -228,4 +231,107 @@ fn answers_probe_so_port_selfcheck_can_identify_us() {
     assert_eq!(answers[0].1, FakePeer::peer_addr());
     // 探测不应被当成设备记录
     assert!(discovery.devices().is_empty());
+}
+
+/// 借一组「基准端口 + 两个紧邻的空闲端口」，用来模拟「约定端口被占、两个节点都顺延」。
+///
+/// 不用 9267 这类固定端口：本机可能真被残留进程占着，用固定值会让用例时灵时不灵。
+fn shifted_pair() -> (u16, UdpSocket, UdpSocket) {
+    for _ in 0..200 {
+        let probe = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let base = probe.local_addr().unwrap().port();
+        if base + 2 > u16::MAX {
+            continue;
+        }
+        let Ok(first) = UdpSocket::bind(("127.0.0.1", base + 1)) else { continue };
+        let Ok(second) = UdpSocket::bind(("127.0.0.1", base + 2)) else { continue };
+        drop(probe);
+        return (base, first, second);
+    }
+    panic!("找不到可用的基准端口");
+}
+
+fn shifted_adapter(base: u16, socket: UdpSocket, span: u16) -> Box<dyn DiscoveryTransport> {
+    let _ = socket.set_broadcast(true);
+    Box::new(
+        UdpDiscoveryAdapter::from_decision(PortDecision {
+            socket,
+            // 实际落点已经顺延，但约定端口仍是 base
+            port: 0,
+            preferred: base,
+            owner: PortOwner::Stale,
+            shifted: true,
+        })
+        .unwrap()
+        .with_span(span),
+    )
+}
+
+/// 真实场景：约定端口被残留占用，两个节点分别顺延到 base+1 / base+2。
+///
+/// 修复前查询只发往约定端口 base，两个都顺延了的节点互相看不见——
+/// 表现为「两台机器都开着，就是搜不到对方」。
+#[test]
+fn shifted_nodes_still_find_each_other() {
+    let (base, socket_a, socket_b) = shifted_pair();
+    let span = DISCOVERY_PORT_SPAN;
+    let mut a = DiscoveryController::new(
+        shifted_adapter(base, socket_a, span),
+        DeviceIdentity::new("node-a", "甲机"),
+        0,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+    );
+    let mut b = DiscoveryController::new(
+        shifted_adapter(base, socket_b, span),
+        DeviceIdentity::new("node-b", "乙机"),
+        0,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+    );
+
+    // 交替推进：a 发查询 → b 收到并单播应答 → a 收到应答
+    for _ in 0..3 {
+        a.tick().unwrap();
+        b.tick().unwrap();
+    }
+
+    assert!(
+        a.devices().iter().any(|d| d.id.as_str() == "node-b"),
+        "顺延后的节点必须仍能发现对方（甲机看不到乙机）"
+    );
+    assert!(
+        b.devices().iter().any(|d| d.id.as_str() == "node-a"),
+        "顺延后的节点必须仍能发现对方（乙机看不到甲机）"
+    );
+}
+
+/// 对照实验：跨度只有 1（即「只发约定端口」）时，这套场景**必须发现不了**。
+///
+/// 没有这条，上面那条用例可能在别的原因下通过（例如碰巧两边落在同一个端口上）。
+#[test]
+fn without_the_span_shifted_nodes_miss_each_other() {
+    let (base, socket_a, socket_b) = shifted_pair();
+    let mut a = DiscoveryController::new(
+        shifted_adapter(base, socket_a, 1),
+        DeviceIdentity::new("node-a", "甲机"),
+        0,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+    );
+    let mut b = DiscoveryController::new(
+        shifted_adapter(base, socket_b, 1),
+        DeviceIdentity::new("node-b", "乙机"),
+        0,
+        Duration::from_secs(5),
+        Duration::from_millis(200),
+    );
+    for _ in 0..3 {
+        a.tick().unwrap();
+        b.tick().unwrap();
+    }
+    assert!(
+        a.devices().iter().all(|d| d.id.as_str() != "node-b"),
+        "跨度 1 时不该发现（这正是修复前的现象）"
+    );
 }

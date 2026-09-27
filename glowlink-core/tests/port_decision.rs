@@ -1,4 +1,4 @@
-use glowlink_core::model::ports::FALLBACK_SPAN;
+use glowlink_core::model::ports::DISCOVERY_PORT_SPAN;
 use glowlink_core::model::probe::{decide_port, PortOwner};
 
 /// 找出一个在当前机器上确实“绑不上也无人应答”的端口（内核残留绑定）。
@@ -59,7 +59,7 @@ fn decision_keeps_announced_port_separate_from_actual() {
 
     // 适配器对外仍然广播到约定的首选端口
     let transport = NativeTransportFactory
-        .from_bound_socket(decision)
+        .from_bound_socket(decision, DISCOVERY_PORT_SPAN)
         .expect("已决策好的端口不应再失败");
     transport
         .query(&glowlink_core::model::packet::Hello {
@@ -130,5 +130,8 @@ fn foreign_program_is_reported_as_stranger() {
 #[test]
 fn fallback_span_is_reasonable() {
     // 顺延范围不能太小（容不下端口冲突），也不能太大（避免扫到敏感端口）
-    assert!(FALLBACK_SPAN >= 10 && FALLBACK_SPAN <= 1000, "顺延范围：{FALLBACK_SPAN}");
+    assert!(
+        DISCOVERY_PORT_SPAN >= 10 && DISCOVERY_PORT_SPAN <= 1000,
+        "顺延范围：{DISCOVERY_PORT_SPAN}"
+    );
 }

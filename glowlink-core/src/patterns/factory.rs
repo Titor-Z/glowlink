@@ -11,11 +11,15 @@ use crate::patterns::adapter::{TcpListenerAdapter, TcpTransportAdapter, UdpDisco
 
 /// 发现通道工厂。
 pub trait DiscoveryTransportFactory {
-    /// `port` 为本机发现端口（局域网内应统一）。
-    fn create(&self, port: u16) -> Result<Box<dyn DiscoveryTransport>>;
+    /// `port` 为本机发现端口，`span` 为查询要覆盖的候选端口个数（局域网内应统一）。
+    fn create(&self, port: u16, span: u16) -> Result<Box<dyn DiscoveryTransport>>;
 
     /// 用已经做好端口决策的套接字创建通道，避免重复 bind。
-    fn from_bound_socket(&self, decision: PortDecision) -> Result<Box<dyn DiscoveryTransport>>;
+    fn from_bound_socket(
+        &self,
+        decision: PortDecision,
+        span: u16,
+    ) -> Result<Box<dyn DiscoveryTransport>>;
 }
 
 /// 传输通道工厂。
@@ -30,12 +34,16 @@ pub trait TransferTransportFactory {
 pub struct NativeTransportFactory;
 
 impl DiscoveryTransportFactory for NativeTransportFactory {
-    fn create(&self, port: u16) -> Result<Box<dyn DiscoveryTransport>> {
-        Ok(Box::new(UdpDiscoveryAdapter::bind(port)?))
+    fn create(&self, port: u16, span: u16) -> Result<Box<dyn DiscoveryTransport>> {
+        Ok(Box::new(UdpDiscoveryAdapter::bind(port)?.with_span(span)))
     }
 
-    fn from_bound_socket(&self, decision: PortDecision) -> Result<Box<dyn DiscoveryTransport>> {
-        Ok(Box::new(UdpDiscoveryAdapter::from_decision(decision)?))
+    fn from_bound_socket(
+        &self,
+        decision: PortDecision,
+        span: u16,
+    ) -> Result<Box<dyn DiscoveryTransport>> {
+        Ok(Box::new(UdpDiscoveryAdapter::from_decision(decision)?.with_span(span)))
     }
 }
 

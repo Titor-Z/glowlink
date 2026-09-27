@@ -44,6 +44,24 @@ pub fn trust_path() -> PathBuf {
 // ---------------------------------------------------------------- 身份密钥
 
 /// 读取本机长期身份；不存在就现场生成并落盘。
+/// 把持久身份里的 ID 注入全局设备身份，让面板与发现层看到的本机 ID **跨运行稳定**。
+///
+/// 失败不算致命（例如 HOME 不可写）：退回进程内临时 ID 并提示一句，
+/// 免得 `glowlink config` 这类只读命令也一起用不了。
+pub fn install_device_id() {
+    match load_or_create_identity() {
+        Ok(identity) => {
+            glowlink_core::patterns::singleton::install_id(identity.fingerprint());
+        }
+        Err(e) => eprintln!(
+            "{}",
+            crate::view::style().warn(&format!(
+                "[警告] 无法读写设备身份（{e}），本次运行的本机 ID 是临时的"
+            ))
+        ),
+    }
+}
+
 pub fn load_or_create_identity() -> Result<Arc<Identity>> {
     load_or_create_identity_at(&identity_path())
 }

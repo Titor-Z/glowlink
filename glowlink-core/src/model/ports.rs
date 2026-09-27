@@ -6,10 +6,11 @@
 
 use std::net::UdpSocket;
 
-use crate::model::error::{GlowError, Result};
-
-/// 从首选端口开始最多向外探测多少个端口。
-pub const FALLBACK_SPAN: u16 = 100;
+/// 发现端口的跨度：**既是**「被占用时最多顺延多少个端口」，**也是**「查询时向多少个端口各发一份」。
+///
+/// 这两个数字必须由同一个常量驱动：若节点能顺延到第 30 个端口，而别人只探测前 21 个，
+/// 它就会「明明开着却谁也发现不了」——比直接报错难查得多。
+pub const DISCOVERY_PORT_SPAN: u16 = 21;
 
 /// 一次端口尝试的结果，供调用方区分“被占”与“真出错”。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,56 +34,21 @@ pub fn probe_udp(port: u16) -> BindOutcome {
     }
 }
 
-/// 在 `[preferred, preferred + FALLBACK_SPAN)` 范围内找到第一个可用端口。
+/// 从 `preferred` 起算的第 `offset` 个候选端口；越界返回 `None`。
 ///
-/// 返回 `(实际端口, 是否为降级结果)`：首选端口可用时第二个值为 `false`，
-/// 顺延成功时为 `true`，全部失败则报错并提示用户显式指定端口。
-pub fn resolve_udp_port(preferred: u16) -> Result<(u16, bool)> {
-    let start = preferred.max(1);
-    for offset in 0..FALLBACK_SPAN {
-        let candidate = match start.checked_add(offset) {
-            Some(port) if port > 0 => port,
-            // 顺延越界（例如首选接近 65535）：回绕到高位区间继续试
-            _ => start.wrapping_add(offset),
-        };
-        if candidate == 0 {
-            continue;
-        }
-        if probe_udp(candidate) == BindOutcome::Bound(candidate) {
-            return Ok((candidate, offset != 0));
-        }
-    }
-    Err(GlowError::Config(format!(
-        "端口 {start} 起的 {FALLBACK_SPAN} 个端口全部被占用，请用 --discovery-port 指定其它端口"
-    )))
+/// 越界时**不回绕**：宁可少试几个，也不要跳回低端口区去（那里大概率也被占着，
+/// 而且会让「探查端口」与「实际落点」错位）。
+pub fn candidate_at(preferred: u16, offset: u16) -> Option<u16> {
+    let candidate = preferred.max(1).checked_add(offset)?;
+    (candidate > 0).then_some(candidate)
 }
 
-/// 绑定 UDP 端口，失败时自动顺延；返回套接字、实际端口与是否降级。
+/// 查询时要探测的候选端口列表：约定端口 + 顺延位，共 `span` 个。
 ///
-/// 与 [`resolve_udp_port`] 的区别：本函数直接返回**真正持有**的套接字，
-/// 避免“试探成功但随后被别的进程抢走”的竞态。
-pub fn bind_udp_with_fallback(preferred: u16) -> Result<(UdpSocket, u16, bool)> {
-    let start = preferred.max(1);
-    for offset in 0..FALLBACK_SPAN {
-        let candidate = match start.checked_add(offset) {
-            Some(port) if port > 0 => port,
-            _ => start.wrapping_add(offset),
-        };
-        if candidate == 0 {
-            continue;
-        }
-        match UdpSocket::bind(("0.0.0.0", candidate)) {
-            Ok(socket) => {
-                socket.set_broadcast(true)?;
-                return Ok((socket, candidate, offset != 0));
-            }
-            Err(e) if is_port_conflict(&e) => continue,
-            Err(e) => return Err(GlowError::Io(e)),
-        }
-    }
-    Err(GlowError::Config(format!(
-        "端口 {start} 起的 {FALLBACK_SPAN} 个端口全部被占用，请用 --discovery-port 指定其它端口"
-    )))
+/// 与节点实际可能落入的端口序列完全一致（都用 [`candidate_at`]），
+/// 所以「对方顺延到哪」与「我们去哪找」不会脱节。
+pub fn candidate_ports(preferred: u16, span: u16) -> Vec<u16> {
+    (0..span.max(1)).filter_map(|offset| candidate_at(preferred, offset)).collect()
 }
 
 /// 端口冲突类错误：换一个端口就能解决。

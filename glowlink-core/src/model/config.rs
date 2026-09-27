@@ -13,10 +13,12 @@ use std::path::PathBuf;
 
 use crate::model::error::{GlowError, Result};
 use crate::model::packet::DISCOVERY_PORT;
+use crate::model::ports::DISCOVERY_PORT_SPAN;
 
 /// 全部受支持的配置项，用于拼装「未知配置项」提示。
-pub const KEYS: [&str; 10] = [
+pub const KEYS: [&str; 11] = [
     "discovery_port",
+    "discovery_port_span",
     "transfer_port",
     "receive_dir",
     "query_interval_secs",
@@ -34,6 +36,11 @@ const DEFAULT_DISCOVERY_PORT: u16 = DISCOVERY_PORT;
 pub struct Config {
     /// 发现端口：局域网内所有节点应保持一致。
     pub discovery_port: u16,
+    /// 查询要覆盖的候选端口个数（约定端口加顺延位）。
+    ///
+    /// 同时决定「本机最多顺延到哪」与「去哪里找别人」，所以**局域网内应保持一致**：
+    /// 本机调小、对端顺延得更远时，就会出现「它开着但我找不到」。
+    pub discovery_port_span: u16,
     /// TCP 传输端口，0 表示由系统自动分配。
     pub transfer_port: u16,
     /// 接收文件的目录。
@@ -60,6 +67,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             discovery_port: DEFAULT_DISCOVERY_PORT,
+            discovery_port_span: DISCOVERY_PORT_SPAN,
             transfer_port: 0,
             receive_dir: PathBuf::from("./received"),
             query_interval_secs: 1,
@@ -111,6 +119,9 @@ impl Config {
     fn set(&mut self, line_no: usize, key: &str, value: &str) -> Result<()> {
         match key {
             "discovery_port" => self.discovery_port = parse_u16(line_no, key, value)?,
+            "discovery_port_span" => {
+                self.discovery_port_span = parse_span(line_no, key, value)?
+            }
             "transfer_port" => self.transfer_port = parse_u16(line_no, key, value)?,
             "receive_dir" => self.receive_dir = PathBuf::from(value),
             "query_interval_secs" => self.query_interval_secs = parse_u64(line_no, key, value)?,
@@ -136,6 +147,21 @@ impl Config {
 fn bad(line_no: usize, message: &str) -> GlowError {
     GlowError::Config(format!("第 {line_no} 行：{message}"))
 }
+
+/// 候选端口个数：太小容易「顺延即失联」，太大等于每秒刷几十个广播包。
+fn parse_span(line_no: usize, key: &str, value: &str) -> Result<u16> {
+    let span = parse_u16(line_no, key, value)?;
+    if !(1..=MAX_PORT_SPAN).contains(&span) {
+        return Err(bad(
+            line_no,
+            &format!("`{key}` 需在 1..={MAX_PORT_SPAN} 之间，收到「{value}」"),
+        ));
+    }
+    Ok(span)
+}
+
+/// 候选端口个数的上限（广播流量与容错能力的折中）。
+pub const MAX_PORT_SPAN: u16 = 64;
 
 fn parse_u16(line_no: usize, key: &str, value: &str) -> Result<u16> {
     value

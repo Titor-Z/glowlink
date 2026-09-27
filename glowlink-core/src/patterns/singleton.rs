@@ -17,12 +17,33 @@ impl DeviceIdentity {
 
     /// 全局唯一实例。
     ///
-    /// 说明：id 由启动时间与进程号派生，因此每次启动都会变化；
-    /// 设备指纹持久化（记住已信任设备）留到 Phase 4 加密配对时实现。
+    /// ID 由 [`install_id`] 注入（CLI 用持久身份里的指纹），因此**跨运行稳定**；
+    /// 若没人注入（例如单元测试、无身份的极简用法），退回进程内临时 ID。
     pub fn global() -> &'static DeviceIdentity {
         static INSTANCE: OnceLock<DeviceIdentity> = OnceLock::new();
-        INSTANCE.get_or_init(|| DeviceIdentity::new(format!("{:016x}", seed()), detect_name()))
+        INSTANCE.get_or_init(|| {
+            let id = INSTALLED_ID
+                .get()
+                .cloned()
+                .unwrap_or_else(|| format!("{:016x}", seed()));
+            DeviceIdentity::new(id, detect_name())
+        })
     }
+}
+
+/// 由调用方注入的本机 ID（持久身份的指纹）。
+static INSTALLED_ID: OnceLock<String> = OnceLock::new();
+
+/// 注入本机 ID。**必须在第一次 [`DeviceIdentity::global`] 之前调用**。
+///
+/// 为什么要注入而不是自己算：面板上显示的设备 ID 若每次启动都变，
+/// 用户会怀疑「这还是不是同一台机器」，对端也会把本机当成新设备。
+/// ID 取自持久身份指纹，与信任列表是同一套身份，只是显示长度不同。
+///
+/// 返回 `false` 表示已经注入过（重复调用无副作用）；若在 `global()` 之后调用，
+/// 因为实例已经用临时 ID 初始化，本次注入不会生效。
+pub fn install_id(id: impl Into<String>) -> bool {
+    INSTALLED_ID.set(id.into()).is_ok()
 }
 
 fn seed() -> u64 {

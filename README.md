@@ -77,7 +77,8 @@ xattr -dr com.apple.quarantine glowlink
 
 可改的项：`discovery_port`、`transfer_port`、`receive_dir`、`query_interval_secs`、
 `device_timeout_secs`、`scan_timeout_secs`、`connect_timeout_secs`、`pending_timeout_secs`、
-`chunk_size_kib`、`ring_capacity_kib`。用 `glowlink config` 查看当前生效值与配置文件位置。
+`chunk_size_kib`、`ring_capacity_kib`、`discovery_port_span`（发现端口被占时的顺延跨度，
+同时也是查询覆盖的候选端口数，默认 21；**局域网内要一致**）。用 `glowlink config` 查看当前生效值与配置文件位置。
 
 ## 注意事项
 

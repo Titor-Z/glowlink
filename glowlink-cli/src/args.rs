@@ -8,7 +8,14 @@ use std::time::Duration;
 use glowlink_core::{GlowError, Result};
 
 /// 会吃掉一个值的开关（带前导 `--`，比对时使用完整开关名）。
-pub const VALUE_FLAGS: [&str; 5] = ["--timeout", "--port", "--dir", "--discovery-port", "--peer"];
+pub const VALUE_FLAGS: [&str; 6] = [
+    "--timeout",
+    "--port",
+    "--dir",
+    "--discovery-port",
+    "--discovery-port-span",
+    "--peer",
+];
 
 pub fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
