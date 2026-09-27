@@ -5,7 +5,34 @@
 
 use std::path::Path;
 
-use glowlink_cli::view::panel::{command_help, find_command, help_text, status_panel, DaemonStatus, COMMANDS};
+use glowlink_cli::view::panel::{
+    command_help, find_command, help_text, status_panel, DaemonStatus, Section, COMMANDS,
+};
+use glowlink_cli::view::Style;
+
+/// 测试里一律用「不上色」的样式：断言的是信息本身，不是转义序列。
+fn plain() -> Style {
+    Style::plain()
+}
+
+/// 去掉 ANSI 转义序列，用来验证「颜色不改变文本」。
+fn strip(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' {
+            // 跳过 CSI 直到终止字母
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
 
 fn lines(text: &str) -> Vec<&str> {
     text.lines().collect()
@@ -13,7 +40,7 @@ fn lines(text: &str) -> Vec<&str> {
 
 #[test]
 fn panel_shows_stopped_state_and_top_commands() {
-    let panel = status_panel("0.1.4", "甲机", "5ad4e682", None);
+    let panel = status_panel(&plain(), "0.1.4", "甲机", "5ad4e682", None);
 
     assert!(panel.starts_with("萤光 GlowLink 0.1.4"), "实际：{panel}");
     assert!(panel.contains("本机：甲机（5ad4e682）"), "要能认出是哪台机器");
@@ -29,6 +56,7 @@ fn panel_shows_stopped_state_and_top_commands() {
 fn panel_reports_running_daemon_and_pending() {
     let dir = Path::new("./received");
     let panel = status_panel(
+        &plain(),
         "0.1.4",
         "甲机",
         "5ad4e682",
@@ -47,6 +75,7 @@ fn panel_reports_running_daemon_and_pending() {
 fn panel_hides_pending_count_when_unknown() {
     let dir = Path::new("/tmp/x");
     let panel = status_panel(
+        &plain(),
         "0.1.4",
         "甲机",
         "5ad4e682",
@@ -65,7 +94,7 @@ fn panel_stays_within_first_screen() {
         Some(DaemonStatus { pid: 1, receive_dir: dir, pending: Some(0) }),
         Some(DaemonStatus { pid: 1, receive_dir: dir, pending: Some(7) }),
     ] {
-        let panel = status_panel("0.1.4", "甲机", "5ad4e682", daemon.as_ref());
+        let panel = status_panel(&plain(), "0.1.4", "甲机", "5ad4e682", daemon.as_ref());
         assert!(
             lines(&panel).len() <= 15,
             "默认输出是「第一屏」，不该超过 15 行：\n{panel}"
@@ -75,22 +104,31 @@ fn panel_stays_within_first_screen() {
 
 #[test]
 fn help_is_grouped_into_four_sections() {
-    let help = help_text("0.1.4", 9267);
+    let help = help_text(&plain(), "0.1.4");
 
-    for section in ["后台服务：", "临时操作", "安全与信任：", "配置："] {
-        assert!(help.contains(section), "帮助缺少「{section}」这一节：\n{help}");
+    // 分节标题直接用同一份来源，避免测试里再抄一遍标题
+    for section in Section::ALL {
+        assert!(
+            help.contains(section.title()),
+            "帮助缺少「{}」这一节：\n{help}",
+            section.title()
+        );
     }
     // 每个命令都要出现，别漏
     for command in ["on", "off", "accept", "reject", "list", "send", "serve", "trust", "config"] {
         assert!(help.contains(&format!(" {command}")), "帮助里没有 {command}");
     }
-    assert!(help.contains("9267"), "要写明默认发现端口");
+    // 端口这类细节挪到了 help list，不再堆在总览里
+    assert!(
+        command_help(&plain(), "list").unwrap().contains("9267"),
+        "发现端口的说明应当在 help list 里"
+    );
     assert!(help.contains("--help"));
 }
 
 #[test]
 fn help_explains_that_yes_only_covers_trusted_devices() {
-    let help = help_text("0.1.4", 9267);
+    let help = help_text(&plain(), "0.1.4");
     // 这句是安全模型的关键，不能省：--yes 不等于谁都收
     assert!(
         help.contains("仅对已信任设备") || help.contains("仅对**已信任设备**"),
@@ -101,8 +139,11 @@ fn help_explains_that_yes_only_covers_trusted_devices() {
 
 #[test]
 fn help_stays_readable() {
-    let help = help_text("0.1.4", 9267);
-    assert!(lines(&help).len() <= 45, "完整帮助不该超过 45 行");
+    let help = help_text(&plain(), "0.1.4");
+    assert!(
+        lines(&help).len() <= 32,
+        "总览不该超过 32 行（它是索引，不是手册）：\n{help}"
+    );
     // 行宽别超出常见终端，否则一换行就散架
     let widest = lines(&help).iter().map(|l| l.chars().count()).max().unwrap_or(0);
     assert!(widest <= 90, "最宽一行 {widest} 列，太宽了");
@@ -111,11 +152,11 @@ fn help_stays_readable() {
 /// 总览必须列出表里的**每一条**命令：新增命令忘了写总览，这条会先红。
 #[test]
 fn overview_lists_every_command_in_the_table() {
-    let help = help_text("0.1.4", 9267);
+    let help = help_text(&plain(), "0.1.4");
     for command in COMMANDS {
         assert!(
-            help.contains(command.usages[0]),
-            "总览里没有 {} 的用法行：\n{help}",
+            help.contains(&format!("  {}  ", command.name)),
+            "总览里没有 {} 这一行：\n{help}",
             command.name
         );
         assert!(
@@ -136,7 +177,7 @@ fn overview_lists_every_command_in_the_table() {
 #[test]
 fn every_command_has_a_usable_help_page() {
     for command in COMMANDS {
-        let text = command_help(command.name).unwrap_or_else(|| panic!("{} 没有帮助页", command.name));
+        let text = command_help(&plain(), command.name).unwrap_or_else(|| panic!("{} 没有帮助页", command.name));
         assert!(text.starts_with(&format!("glowlink {} — {}", command.name, command.summary)));
         assert!(text.contains("用法："), "{} 的帮助缺用法", command.name);
         for usage in command.usages {
@@ -157,7 +198,7 @@ fn every_command_has_a_usable_help_page() {
 
 #[test]
 fn unknown_command_has_no_help_page() {
-    assert!(command_help("nope").is_none());
+    assert!(command_help(&plain(), "nope").is_none());
     assert!(find_command("nope").is_none());
     assert!(find_command("send").is_some());
 }
@@ -200,4 +241,42 @@ fn the_binary_rejects_unknown_commands_with_usage_exit_code() {
     assert_eq!(output.status.code(), Some(2), "用法错误应当是退出码 2");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("glowlink --help"), "要指路总览：{stderr}");
+}
+
+/// 颜色只是装饰：去掉转义序列后必须与纯文本版本**逐字节相同**。
+#[test]
+fn colors_never_change_the_text() {
+    let colored = Style::from_flags(true, false);
+    assert_ne!(colored.strong("x"), "x", "前提：这个样式确实会上色");
+    for (with, without) in [
+        (help_text(&colored, "0.1.4"), help_text(&plain(), "0.1.4")),
+        (
+            command_help(&colored, "send").unwrap(),
+            command_help(&plain(), "send").unwrap(),
+        ),
+        (
+            status_panel(&colored, "0.1.4", "甲机", "5ad4e682", None),
+            status_panel(&plain(), "0.1.4", "甲机", "5ad4e682", None),
+        ),
+    ] {
+        assert_eq!(strip(&with), without, "去掉颜色后文本必须一字不差");
+    }
+}
+
+/// TTY 下总览要真有色：否则「支持彩色」只是文档上的一句空话。
+#[test]
+fn help_is_colored_in_a_terminal() {
+    let text = help_text(&Style::from_flags(true, false), "0.1.4");
+    assert!(text.contains("\u{1b}["), "TTY 下应当出现转义序列");
+    // 小节标题与命令名都要上色（标题行、四个小节、每条命令）
+    for section in Section::ALL {
+        let heading = section.title();
+        assert!(
+            text.contains(&format!("\u{1b}[36;1m{heading}")),
+            "「{heading}」应当是彩色小节标题"
+        );
+    }
+    assert!(text.contains("\u{1b}[1mon"), "命令名应当加粗");
+    // 非 TTY：一个转义序列都不许有
+    assert!(!help_text(&plain(), "0.1.4").contains('\u{1b}'));
 }

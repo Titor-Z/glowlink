@@ -170,18 +170,16 @@ fn cmd_panel() -> Result<()> {
         None => None,
     };
 
-    let panel = panel::status_panel(
-        VERSION,
-        &identity.name,
-        &truncate(&identity.id, 8),
-        daemon_status.as_ref(),
+    println!(
+        "{}",
+        panel::status_panel(
+            style(),
+            VERSION,
+            &identity.name,
+            &truncate(&identity.id, 8),
+            daemon_status.as_ref(),
+        )
     );
-    // 只把标题加粗：颜色是装饰，去掉后信息一字不少
-    let mut lines = panel.lines();
-    if let Some(title) = lines.next() {
-        println!("{}", style().strong(title));
-    }
-    println!("{}", lines.collect::<Vec<_>>().join("\n"));
     Ok(())
 }
 
@@ -328,10 +326,10 @@ fn cmd_help(config: &Config, args: &[String]) -> Result<()> {
     // 过滤掉开关：`glowlink help send --yes` 也应当给 send 的说明
     let name = args.iter().find(|arg| !arg.starts_with('-'));
     let Some(name) = name else {
-        println!("{}", panel::help_text(VERSION, config.discovery_port));
+        println!("{}", panel::help_text(style(), VERSION));
         return Ok(());
     };
-    match panel::command_help(name) {
+    match panel::command_help(style(), name) {
         Some(text) => {
             println!("{text}");
             Ok(())

@@ -218,9 +218,14 @@ fn local_id_is_stable_across_runs_and_matches_the_fingerprint() {
         String::from_utf8_lossy(&output.stdout).to_string()
     };
 
+    // 只在「本机：」那一行里找括号：标题里也有括号，全局找第一个会抓错行
     let local_id = |text: &str| {
-        let start = text.find('（').expect("面板应打印本机信息") + '（'.len_utf8();
-        let rest = &text[start..];
+        let line = text
+            .lines()
+            .find(|line| line.contains("本机："))
+            .expect("面板应打印本机信息");
+        let start = line.find('（').expect("本机信息应带括号") + '（'.len_utf8();
+        let rest = &line[start..];
         rest[..rest.find('）').expect("本机信息应带括号")].to_string()
     };
 

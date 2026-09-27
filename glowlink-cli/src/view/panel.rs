@@ -3,16 +3,22 @@
 //! 三段文本的定位不同，长度都被测试钉住：
 //! - **[`status_panel`]**：敲 `glowlink` 回车看到的「第一屏」，只回答
 //!   「现在是什么状态 + 我最常做的三件事」，**不超过 15 行**；
-//! - **[`help_text`]**：`glowlink --help` 的四节总览，**不超过 45 行**；
+//! - **[`help_text`]**：`glowlink --help` 的四节总览，**不超过 32 行**，
+//!   且**只回答「有哪些命令、各自干什么」**——选项、示例、端口细节都放单命令帮助，
+//!   总览里堆选项会变成一堵墙，反而没人读；
 //! - **[`command_help`]**：`glowlink help <命令>` / `glowlink <命令> --help` 的
 //!   单命令说明，**不超过 30 行**。
 //!
 //! 命令的摘要、用法、参数、示例全部来自 [`COMMANDS`] 这一张表：
 //! 总览与单命令帮助都从它生成，改一处不会漏另一处。
 //!
-//! 这里不打印、不查状态，只把内容拼成字符串——状态由调用方查好后传进来。
+//! 这里不打印、不查状态，只把内容拼成字符串——状态由调用方查好后传进来；
+//! 着色也由调用方把 [`Style`] 传进来（依赖注入），因此**测试里用 `Style::plain()`
+//! 就能断言纯文本**，不必去猜当前是不是终端。
 
 use std::path::Path;
+
+use crate::view::style::Style;
 
 /// 守护进程状态摘要（由调用方查询后传入）。
 pub struct DaemonStatus<'a> {
@@ -36,7 +42,7 @@ pub enum Section {
 }
 
 impl Section {
-    fn title(self) -> &'static str {
+    pub fn title(self) -> &'static str {
         match self {
             Section::Service => "后台服务：",
             Section::Adhoc => "临时操作（不需要后台服务）：",
@@ -210,13 +216,14 @@ pub fn find_command(name: &str) -> Option<&'static Command> {
 
 /// 敲 `glowlink` 回车看到的默认输出。
 pub fn status_panel(
+    style: &Style,
     version: &str,
     name: &str,
     short_id: &str,
     daemon: Option<&DaemonStatus<'_>>,
 ) -> String {
     let mut lines = vec![
-        format!("萤光 GlowLink {version}"),
+        style.heading(&format!("萤光 GlowLink {version} — 局域网近场文件传输（已加密）")),
         String::new(),
         format!("本机：{name}（{short_id}）"),
     ];
@@ -257,60 +264,69 @@ pub fn status_panel(
 }
 
 /// `glowlink --help` 的四节总览（由 [`COMMANDS`] 生成，不另写一份）。
-pub fn help_text(version: &str, discovery_port: u16) -> String {
+///
+/// 总览只回答「有哪些命令、各自干什么」：选项与示例交给 `glowlink help <命令>`。
+/// 把 `--dir` / `--watch` 这些堆进总览会让它变成一堵墙，反而没人读（git / docker 也不这么干）。
+pub fn help_text(style: &Style, version: &str) -> String {
     let mut out = format!(
-        "萤光 GlowLink {version} — 局域网近场文件传输（传输已加密）\n\
-         \n\
-         用法：glowlink [命令] [选项]     某一命令的详细说明：glowlink help <命令>\n"
+        "{}\n\n用法：glowlink [命令] [选项]    每条命令的详细说明：{}（也可 {}）\n",
+        style.heading(&format!("萤光 GlowLink {version} — 局域网近场文件传输（已加密）")),
+        style.strong("glowlink help <命令>"),
+        style.strong("glowlink <命令> --help"),
     );
+
+    // 命令名对齐到最长的那一个，读起来是一列而不是锯齿
+    let width = COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0);
 
     for section in Section::ALL {
         out.push('\n');
-        out.push_str(section.title());
+        out.push_str(&style.heading(section.title()));
         out.push('\n');
         for command in COMMANDS.iter().filter(|c| c.section == section) {
-            out.push_str("  ");
-            out.push_str(command.usages[0]);
-            // 摘要跟在用法后面，方便一眼看出这条命令干什么
-            out.push_str(&format!("  — {}\n", command.summary));
+            out.push_str(&format!(
+                "  {}  {}\n",
+                style.strong(&format!("{:<width$}", command.name)),
+                command.summary
+            ));
         }
     }
 
     out.push_str(&format!(
-        "\n安全：首次与陌生设备互传时，两端显示同一个 6 位校验码，核对一致后再确认。\n\
+        "\n{}首次与陌生设备互传时，两端显示同一个 6 位校验码，核对一致后再确认。\n\
          --yes 仅对已信任设备免确认，陌生设备一律人工确认。\n\
-         设备身份私钥与信任列表在 ~/.glowlink/ 下。\n\
-         某条命令的详细用法：glowlink help <命令> 或 glowlink <命令> --help；版本：--version。\n\
-         \n\
-         配置：内置默认 < ./glowlink.toml < ~/.config/glowlink/config.toml（可用 \
-         $GLOWLINK_CONFIG 指定）< 命令行开关。\n\
-         发现端口默认 {discovery_port}，被占用时自动顺延到相邻端口。\n\
-         \n\
-         退出码：0 成功 · 1 通用错误 · 2 用法/配置错误 · 3 网络不可达\n\
-         \x20       4 加密或信任失败 · 5 被拒绝或超时。\n"
+         退出码：0 成功 · 1 通用错误 · 2 用法或配置 · 3 网络不可达 · 4 加密或信任 · 5 被拒绝或超时\n",
+        style.dim("安全："),
     ));
     out
 }
 
 /// 单个命令的详细说明；命令名不认识时返回 `None`。
-pub fn command_help(name: &str) -> Option<String> {
+pub fn command_help(style: &Style, name: &str) -> Option<String> {
     let command = find_command(name)?;
-    let mut out = format!("glowlink {} — {}\n\n用法：\n", command.name, command.summary);
+    let mut out = format!(
+        "{} — {}\n\n{}\n",
+        style.heading(&format!("glowlink {}", command.name)),
+        command.summary,
+        style.heading("用法：")
+    );
     for usage in command.usages {
-        out.push_str(&format!("  {usage}\n"));
+        out.push_str(&format!("  {}\n", style.strong(usage)));
     }
     if !command.details.is_empty() {
-        out.push_str("\n说明：\n");
+        out.push_str(&format!("\n{}\n", style.heading("说明：")));
         for detail in command.details {
             out.push_str(&format!("  {detail}\n"));
         }
     }
     if !command.examples.is_empty() {
-        out.push_str("\n示例：\n");
+        out.push_str(&format!("\n{}\n", style.heading("示例：")));
         for example in command.examples {
-            out.push_str(&format!("  {example}\n"));
+            out.push_str(&format!("  {}\n", style.dim(example)));
         }
     }
-    out.push_str("\n另见：glowlink --help（全部命令）\n");
+    out.push_str(&format!(
+        "\n另见：{}（全部命令）\n",
+        style.strong("glowlink --help")
+    ));
     Some(out)
 }

@@ -18,6 +18,8 @@ const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
+/// 小节标题：青 + 粗（合成一个序列，避免嵌套 reset 互相掐断）。
+const HEADING: &str = "\x1b[36;1m";
 
 /// 输出级别。级别只决定「前缀与颜色」，不改变信息内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,6 +115,14 @@ impl Style {
     /// 信息（青）。
     pub fn info(&self, text: &str) -> String {
         self.wrap(CYAN, text)
+    }
+
+    /// 小节标题：粗体 + 青。
+    ///
+    /// 单独一个方法而不是 `strong(info(x))` 套娃：两个 reset 叠在一起时，
+    /// 内层的 reset 会提前掐掉外层的粗体，看着就是「一会儿有一会儿没有」。
+    pub fn heading(&self, text: &str) -> String {
+        self.wrap(HEADING, text)
     }
 
     /// 强调（粗体），用于设备名、校验码这类用户要盯着看的内容。
