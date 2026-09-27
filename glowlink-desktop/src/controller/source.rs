@@ -59,9 +59,14 @@ pub trait DeviceSource: Send + Sync {
 
 /// 配对来源。
 pub trait PairingSource: Send + Sync {
-    /// 本机发起配对，返回 `(编号, 6 位校验码)`。
-    /// 码要**立刻**返回——界面得第一时间显示给人核对。
-    fn start(&self, device_id: &str) -> Result<(String, String)>;
+    /// 本机发起配对。
+    ///
+    /// **不返回校验码**：守护进程要先连对端才拿得到码，慢起来好几秒，
+    /// 界面不能在按钮回调里等它。码从 [`Self::outgoing`] 的快照里拿——
+    /// `PAIRINGS` 的每一行本就带码，界面下一轮（≤300ms）就能显示出来。
+    fn start(&self, device_id: &str) -> Result<()>;
+    /// 本机发起、等对方输码的槽位（含码，供人核对）。
+    fn outgoing(&self) -> Vec<PairingView>;
     /// 对端发起、等本机用户决定的请求。
     fn pending(&self) -> Vec<PairingView>;
     /// 允许并提交用户输入的码。

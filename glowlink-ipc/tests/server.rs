@@ -42,6 +42,20 @@ fn devices_lists_rows_with_tabs() {
     let row = glowlink_ipc::DeviceRow::from_line(&lines[1]).expect("数据行要能被客户端解析");
     assert_eq!(row.name, "甲机");
     assert_eq!(row.addr, addr);
+    assert!(!row.trusted, "替身没把它列入信任表，那一列应是 0：{}", lines[1]);
+}
+
+#[test]
+fn devices_marks_trusted_ids_from_the_daemon() {
+    // 信任列表住在守护进程里（配对成功就是它写的一笔），
+    // 界面不该自己去读那个文件——两处各读一份就会不一致。
+    let host = FakeHost::default();
+    host.devices.lock().unwrap().push(a_device("甲机", "127.0.0.1:53500".parse().unwrap()));
+    host.trusted.lock().unwrap().push("abc123def4567890".to_string());
+
+    let (lines, _) = handle_line(&host, "DEVICES");
+    let row = glowlink_ipc::DeviceRow::from_line(&lines[1]).unwrap();
+    assert!(row.trusted, "信任列表里的 ID 要标出来：{}", lines[1]);
 }
 
 #[test]

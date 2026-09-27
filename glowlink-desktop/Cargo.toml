@@ -23,6 +23,8 @@ gpui_ce_platform = { version = "0.1.0", features = ["font-kit"] }
 # GPUI 的问题（字体/渲染）会把原因直接打进日志，所以必须真装一个 logger：
 # 没有它 `RUST_LOG=info` 是空转，"先看 stderr" 这条排查规则就落不了地。
 env_logger = "0.11"
+# gpui 与本地模块都用 `log` 输出（env_logger 只是把它接到 stderr）
+log = "0.4"
 
 # —— 自绘窗口控制：把 macOS 的系统红绿灯真正藏掉 ——
 # gpui-ce 的 `TitlebarOptions` 只能挪位置（`traffic_light_position`），没有 hidden 开关，

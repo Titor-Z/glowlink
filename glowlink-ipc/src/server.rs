@@ -29,6 +29,14 @@ pub trait IpcHost: Send + Sync {
     /// 当前已知设备。
     fn devices(&self) -> Vec<Device>;
 
+    /// 这个设备 ID（就是它的身份指纹）是否在信任列表里。
+    ///
+    /// 信任列表归守护进程管（配对成功就是它写的一笔），所以由它回答；
+    /// 默认实现返回 `false`：不知道就不算信任——猜「已信任」等于替用户省掉核对。
+    fn is_trusted(&self, _device_id: &str) -> bool {
+        false
+    }
+
     /// 按名称或 ID 查设备。
     fn find(&self, key: &str) -> Option<Device>;
 
@@ -90,7 +98,9 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
             let devices = host.devices();
             let mut lines = vec![format!("OK {}", devices.len())];
             for device in &devices {
-                lines.push(DeviceRow::from_device(device).to_line());
+                let mut row = DeviceRow::from_device(device);
+                row.trusted = host.is_trusted(row.id.as_str());
+                lines.push(row.to_line());
             }
             (lines, true)
         }

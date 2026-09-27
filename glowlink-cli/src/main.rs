@@ -1030,6 +1030,11 @@ impl IpcHost for DaemonShared {
         self.devices.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    fn is_trusted(&self, device_id: &str) -> bool {
+        // 设备 ID 就是它的身份指纹（两侧同一套派生），信任列表按指纹存
+        self.pairing.is_trusted(device_id)
+    }
+
     fn find(&self, key: &str) -> Option<glowlink_core::Device> {
         self.devices
             .lock()

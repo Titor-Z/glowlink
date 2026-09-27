@@ -11,33 +11,53 @@ use gpui::{
     Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
 };
 
+use std::sync::Arc;
+use std::time::Duration;
+
+use crate::controller::{DeviceSource, DeviceView};
 use crate::model::layout::{self, NodeSize};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::view::{node, titlebar};
 
+/// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
+/// 这里只比内存快照——渲染路径里不做任何 IO。
+const SYNC_INTERVAL: Duration = Duration::from_millis(300);
+
 /// 应用根视图。**只读快照**：不持有业务状态，数据由 `controller` 提供。
 pub struct AppRoot {
     device_name: SharedString,
     state: UiState,
-    /// 设备名（按槽位顺序），由上层从 controller 取好再塞进来。
-    devices: Vec<SharedString>,
+    /// 设备表来源（已在跑的守护进程，或预览实现）。
+    source: Arc<dyn DeviceSource>,
+    /// 当前显示的设备（快照）。
+    devices: Vec<DeviceView>,
 }
 
 impl AppRoot {
-    pub fn new(device_name: impl Into<SharedString>) -> Self {
-        AppRoot {
-            device_name: device_name.into(),
-            state: UiState::new(),
-            devices: Vec::new(),
-        }
+    pub fn new(device_name: impl Into<SharedString>, source: Arc<dyn DeviceSource>) -> Self {
+        let devices = source.devices();
+        // 初值也记一笔：排查「界面是空的」时，先分清楚是「真没设备」还是「压根没连上」
+        log::info!("设备表初值：{} 台", devices.len());
+        let mut state = UiState::new();
+        state.set_devices(devices.len());
+        AppRoot { device_name: device_name.into(), state, source, devices }
     }
 
-    /// 用一组设备刷新界面（上层取好快照再调，避免在渲染路径上 IO）。
-    pub fn set_devices(&mut self, names: Vec<String>, cx: &mut Context<Self>) {
-        self.devices = names.into_iter().map(SharedString::from).collect();
+    /// 拉一次设备快照；**真变了才返回 `true`**（调用方据此决定要不要重绘）。
+    ///
+    /// 设备表很小，比一次比每次都 `notify()` 好：后者会让窗口每秒白重绘 3 次，
+    /// 而重绘会打断正在跑的动画（呼吸圈的相位会被拖回去）。
+    pub fn sync(&mut self) -> bool {
+        let fresh = self.source.devices();
+        if fresh == self.devices {
+            return false;
+        }
+        // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
+        log::info!("设备表更新：{} 台", fresh.len());
+        self.devices = fresh;
         self.state.set_devices(self.devices.len());
-        cx.notify();
+        true
     }
 
     /// 搜索结束（进发现态）。
@@ -83,16 +103,18 @@ impl Render for AppRoot {
             |_, _, cx| cx.quit(),
         );
 
-        let devices: Vec<_> = (0..self.state.device_count())
-            .map(|index| {
+        let devices: Vec<_> = self
+            .devices
+            .iter()
+            .enumerate()
+            .map(|(index, device)| {
                 let rect = layout::Rect::from_center(layout::device_center(index), NodeSize::Device);
-                let label = self.devices[index].clone();
                 node::node(
                     &t,
                     node::NodeSpec {
                         rect,
-                        who: node::NodeWho::Device(crate::preview_kind(index)),
-                        label: &label,
+                        who: node::NodeWho::Device(device.kind),
+                        label: &device.name,
                         look: node::NodeLook::device_default(),
                         interactive: true,
                     },
@@ -164,7 +186,7 @@ fn graph_space(rect: layout::Rect) -> layout::Rect {
 }
 
 /// 打开主窗口。
-pub fn open(device_name: String, cx: &mut App) {
+pub fn open(device_name: String, source: Arc<dyn DeviceSource>, cx: &mut App) {
     let bounds = corner_bounds(cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -183,7 +205,27 @@ pub fn open(device_name: String, cx: &mut App) {
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        cx.new(|_| AppRoot::new(device_name))
+        let view = cx.new(|_| AppRoot::new(device_name, source));
+        // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
+        // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
+        let weak = view.downgrade();
+        // 用 async 闭包（rustc 1.85+ 的 `async move |cx| …`）：普通闭包返回的
+        // future 会借用 `&mut AsyncApp`，而 `spawn` 要求 future 是 `'static`。
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor().timer(SYNC_INTERVAL).await;
+                let alive = weak.update(cx, |root, cx| {
+                    if root.sync() {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        view
     })
     .expect("无法打开窗口");
 }

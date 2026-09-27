@@ -8,14 +8,24 @@ use std::time::Instant;
 
 #[test]
 fn device_row_roundtrip_preserves_every_field() {
-    let line = "甲机\tabc123def4567890\t192.168.31.37:53500\t1234\tlaptop";
+    let line = "甲机\tabc123def4567890\t192.168.31.37:53500\t1234\tlaptop\t1";
     let row = DeviceRow::from_line(line).expect("标准行必须能解析");
     assert_eq!(row.name, "甲机");
     assert_eq!(row.id, "abc123def4567890");
     assert_eq!(row.addr.to_string(), "192.168.31.37:53500");
     assert_eq!(row.age_ms, 1234);
     assert_eq!(row.kind, DeviceKind::Laptop);
+    assert!(row.trusted);
     assert_eq!(row.to_line(), line, "解析再编码必须逐字节相同");
+}
+
+#[test]
+fn device_row_without_trusted_column_reads_as_untrusted() {
+    // 信任列同样是后加的：缺了就当**未信任**。
+    // 猜「已信任」等于替用户省掉核对校验码，那是唯一不能省的一步。
+    let row = DeviceRow::from_line("甲机\tabc\t127.0.0.1:1\t1\tdesktop").unwrap();
+    assert!(!row.trusted);
+    assert!(!DeviceRow::from_line("甲机\tabc\t127.0.0.1:1\t1").unwrap().trusted);
 }
 
 #[test]

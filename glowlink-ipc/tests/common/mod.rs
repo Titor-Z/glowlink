@@ -72,11 +72,21 @@ pub struct FakeHost {
     pub pair_pending: Mutex<Vec<PairingRow>>,
     /// 用户落下的配对决定：`(编号, 用户输入的码；None = 拒绝)`。
     pub pair_decisions: Mutex<Vec<(String, Option<String>)>>,
+    /// 已信任的设备 ID（指纹）。
+    pub trusted: Mutex<Vec<String>>,
 }
 
 impl IpcHost for FakeHost {
     fn status(&self) -> State {
         sample_state()
+    }
+
+    fn is_trusted(&self, device_id: &str) -> bool {
+        self.trusted
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|id| id == device_id)
     }
 
     fn devices(&self) -> Vec<Device> {

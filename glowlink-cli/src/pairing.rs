@@ -249,6 +249,13 @@ impl PairingHub {
         &self.queue
     }
 
+    /// 这个指纹（就是设备 ID）是否已在信任列表里。
+    ///
+    /// 界面会问这句：已信任的设备拖动即可配对（免码），陌生的必须走码。
+    pub fn is_trusted(&self, fingerprint: &str) -> bool {
+        self.trust.contains(fingerprint)
+    }
+
     /// 本机发起配对：连上、握手、登记槽位后立刻返回 `(编号, 校验码)`。
     ///
     /// **立刻返回码**是有意的：界面要第一时间把它显示给人核对，

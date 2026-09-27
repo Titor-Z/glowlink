@@ -7,7 +7,7 @@
 //!
 //! 行格式（字段间是 `\t`，行首是 `OK <数量>`）：
 //! ```text
-//! DEVICES  名称 \t ID \t 地址 \t 存活毫秒 \t 类型
+//! DEVICES  名称 \t ID \t 地址 \t 存活毫秒 \t 类型 \t 是否已信任
 //! PENDING  编号 \t 来源 \t 文件名 \t 字节数 \t 指纹 \t 校验码
 //! PAIRINGS / PAIRPENDING  编号 \t 对端 \t 校验码 \t 状态 \t 剩余尝试
 //! ```
@@ -29,6 +29,11 @@ pub struct DeviceRow {
     pub age_ms: u128,
     /// 设备类型（界面用；同样放在末尾，缺了就是未知）。
     pub kind: DeviceKind,
+    /// 是否在信任列表里（界面据此决定「要不要请人核对校验码」）。
+    ///
+    /// 同样容忍缺失：没有这一列的老服务端一律当**未信任**——
+    /// 猜「已信任」等于替用户省掉核对，那正是不能省的。
+    pub trusted: bool,
 }
 
 impl DeviceRow {
@@ -39,6 +44,7 @@ impl DeviceRow {
             addr: device.addr,
             age_ms: device.last_seen.elapsed().as_millis(),
             kind: device.kind,
+            trusted: false,
         }
     }
 
@@ -55,12 +61,13 @@ impl DeviceRow {
 
     pub fn to_line(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             self.name,
             self.id,
             self.addr,
             self.age_ms,
-            self.kind.as_token()
+            self.kind.as_token(),
+            if self.trusted { 1 } else { 0 }
         )
     }
 
@@ -72,7 +79,8 @@ impl DeviceRow {
         let age_ms = parts.next()?.parse().ok()?;
         // 类型是后加的：老行没有这一列，按未知处理
         let kind = parts.next().map(DeviceKind::from_token).unwrap_or_default();
-        Some(DeviceRow { name, id, addr, age_ms, kind })
+        let trusted = parts.next().map(|v| v == "1").unwrap_or(false);
+        Some(DeviceRow { name, id, addr, age_ms, kind, trusted })
     }
 }
 

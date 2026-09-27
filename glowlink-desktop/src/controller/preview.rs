@@ -91,8 +91,18 @@ impl PreviewPairing {
 }
 
 impl PairingSource for PreviewPairing {
-    fn start(&self, _device_id: &str) -> Result<(String, String)> {
-        Ok(("001".to_string(), "518892".to_string()))
+    fn start(&self, _device_id: &str) -> Result<()> {
+        // 预览里配对是固定的：立即成功，码从 `outgoing()` 拿（与 IPC 实现同一口径）
+        Ok(())
+    }
+
+    fn outgoing(&self) -> Vec<PairingView> {
+        vec![PairingView {
+            token: "001".into(),
+            peer: "Pixel 9".into(),
+            code: "518892".into(),
+            remaining: 3,
+        }]
     }
 
     fn pending(&self) -> Vec<PairingView> {

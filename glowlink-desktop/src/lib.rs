@@ -14,16 +14,3 @@ pub mod model;
 pub mod platform;
 pub mod theme;
 pub mod view;
-
-/// 设备类型 → 槽位：预览与真机共用同一套「第几台用什么图标」的约定。
-///
-/// 真机数据来自 `controller::DeviceSource`，这里只是预览/离线渲染的兜底，
-/// 保证「第 index 台设备画成什么样」这件事只有一处定义。
-pub fn preview_kind(index: usize) -> glowlink_core::DeviceKind {
-    use glowlink_core::DeviceKind;
-    match index {
-        0 => DeviceKind::Phone,
-        1 => DeviceKind::Tablet,
-        _ => DeviceKind::Desktop,
-    }
-}
