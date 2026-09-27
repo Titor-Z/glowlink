@@ -82,8 +82,66 @@
 - 实测（本地拉回来验）：三个压缩包均可下载，Windows 那份 `file` 识别为 `PE32+ executable x86-64`，macOS x86_64 那份解压后可直接运行 `help` / `config`。
 - 版本号以 workspace `version` 为准（`glowlink help` 会打印），需与标签一致；产物名用标签名，手动触发时用 `dev-<短 sha>`。
 
+### 2026-09-27 【守护进程决策 - v1.0】on/off + 本地 IPC + 人工确认
+
+- 目标：`glowlink on` / `off` 无感常驻，`list` / `send` 不再是独立进程抢端口。
+- 守护进程以**分离进程**运行：Unix `setsid`（直接声明 libc 符号，不引依赖）、
+  Windows `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`；stdin 关掉，输出进 `~/.glowlink/daemon.log`。
+- 状态文件 `~/.glowlink/state.json` 是 CLI 找到守护进程的**唯一入口**：
+  记录版本/PID/IPC 端口/传输端口/**实际**发现端口/接收目录；
+  **临时文件 + rename 原子写**，`off` 与自退都删除，避免残留被误判成还在跑。
+  判定「在跑」的标准是「能连上并 PING 通」，不是「文件存在」。
+- IPC：回环 TCP，首选端口默认 10000（被占顺延 50）。选**面向行文本协议**而非 JSON：
+  零依赖、`nc` 可手调、日志可读；每条响应以 `END` 收尾，单行与多行响应客户端走同一条路径。
+  指令：`PING` / `STATUS` / `DEVICES` / `RESOLVE` / `PENDING` / `ACCEPT|REJECT [编号]` / `STOP`。
+  模块划分：`state.rs`（状态文件）/ `ipc.rs`（协议）/ `pending.rs`（待确认队列）/ `daemon.rs`（平台层），
+  Step 3 的加密插在 `ipc.rs` 的连接建立之后、指令分发之前。
+- **人工确认**：分离进程没有终端，问不了人。改为「登记待确认 + 阻塞等待」，
+  用户用 `glowlink accept <编号>` / `reject <编号>` 经 IPC 落决定，超时（60s）自动拒绝。
+- **多槽位而非单槽**：单槽下第二个发送方会静默挂在 TCP backlog 里（既不提示也不拒绝），体验是灾难。
+  所以每个 OFFER 各占一槽、各拿一个短编号（`001`/`002`），接收侧改为「每个连接一个线程」，
+  等待确认互不阻塞；待确认多于 1 个时 `accept` 必须带编号，避免点错对象。
+- `on --yes` 在加密与配对（Step 3）完成前**直接拒绝**，守住自动接收这条线。
+- `list` / `send` 优先走 IPC，守护进程没跑时退回直连发现（保留 Phase 1 工作流）。
+
+### 2026-09-27 【CI 降用量 - v1.0】只在打 tag 时跑
+
+- 背景：私有仓库的 Actions **按量计费**，Free 计划每月 2000 分钟，倍率 **Linux ×1 / Windows ×2 / macOS ×10**；
+  额度用尽且 `spending limit = 0` 时作业直接不启动（报 `recent account payments have failed or your spending limit needs to be increased`）。
+- 本次实际烧掉的量：一次死锁的 macOS job 挂了 34 分 12 秒，×10 ≈ **342 分钟额度**（当月 1/6）；
+  加上 3 次 push（macOS+Windows）≈ 40 分钟，本次会话合计约 **380 分钟 ≈ 月额度 19%**。
+- 决策：`build.yml` 改为**只在 `v*` 标签与手动触发时运行**，删掉 `push: main` 与 `pull_request`；
+  加 `concurrency.cancel-in-progress`、`timeout-minutes: 15`、`actions/cache`（缓存 `~/.cargo` + `target`）。
+  一次发版成本 ≈ macOS(1.2分×10) + Windows(1.2分×2) ≈ **15 分钟额度**，月额度约可发版 130 次。
+
+### 2026-09-27 【测试运行决策 - v1.0】单文件 / 单函数，不跑全量
+
+- 问题：`cargo test --workspace` 会编译并链接**所有**测试目标，在低配机器上很重；
+  而 cargo 本来就有 Jest 那种粒度（`--test <文件>` / 子串过滤 / `--exact <用例>`），是**调用方式**用错了。
+- 三档流程：
+  1. 平时改代码 → `cargo check --all-targets`（不链接、秒级，只拦类型/借用错误）；
+  2. 改了某模块逻辑 → `./scripts/t.sh <测试文件> [过滤词]`（只编一个目标，再直接执行二进制）；
+  3. 涉及并发/时序/网络协议 → 同上，但跑完整个那一个测试文件；
+  4. 发版 → 打 tag，CI 在 macOS + Windows 上跑全量。
+- 铁律：**碰并发/时序就必须本地跑那一个测试文件**。`cargo check` 看的是类型，看不见运行时会死锁。
+
 ## CHANGELOG
 > 这里存放项目更新历史记录
+
+### 2026-09-27 v0.1.0-step2 — 守护进程 + 本地 IPC + on/off（tag `v0.1.0-step2`）
+
+- 新增 `glowlink on` / `off` / `accept [编号]` / `reject [编号]`；守护进程以分离进程常驻。
+- 新增 `state.rs`（状态文件，临时文件 + rename 原子写）、`ipc.rs`（回环行协议）、
+  `pending.rs`（token + 队列 + 超时自动拒绝）、`daemon.rs`（平台层）、`view/daemon.rs`（无终端的人工确认）。
+- 新增内部子命令 `__daemon`（由 `on` 拉起，不面向用户）。
+- `list` / `send` 优先走 IPC，守护进程没跑时退回直连发现；顺带解决多进程抢发现端口。
+- 新增 `scripts/t.sh`：单文件/单函数测试入口。
+- 测试：`tests/{state,ipc,pending,daemon_view}.rs` 共 41 个用例（本地逐文件跑过），
+  另有 Phase 1 遗留用例；测试用例数过多，为控制私有仓库 CI 额度，全量只在打 tag 时跑。
+- 真机验收：两个发送方同时挂起 → `PENDING` 列表（`#001`/`#002`）→ `accept 001` / `reject 002`
+  → 甲文件 sha1 收发一致、乙收到「传输被拒绝」；无编号/乱编号均被拒。
+- 修复：IPC 与发现循环共用锁导致查询被饿死；状态文件写了首选端口而非实际端口；
+  远程错误叠三层前缀；待确认落决定后未立即从视图消失。
 
 ### 2026-09-27 v0.1.5 — CI 发布链路打通（仓库私有）
 
@@ -173,6 +231,26 @@
 - **Artifact 存储配额是账号级共享的硬限**：私有仓库共 500MB，超了就 `Failed to CreateArtifact: Artifact storage quota has been hit`（6-12 小时才重算）。
   - 影响：`upload-artifact` 全线不可用，连“中转给 release job”都不行（中转也得先上传）。
   - 规避：让各平台 job **直接**发布 Release 资产（不计入该额度），彻底绕开 Artifact。
+
+- **`cargo check` 全绿 ≠ 能跑**：本次 `cargo check --all-targets` 全过，CI 上 `cargo test` 却挂死 34 分钟。
+  原因是我在回环用例里 `server.join()` 之前没关客户端，而服务端是「读到对端关闭才退出」的循环。
+  类型系统没有任何理由拦它。
+- **测试死锁在 CI 上会被平台倍率放大**：macOS 10× ⇒ 34 分 12 秒 = 342 分钟额度。
+  `timeout-minutes` 是必加项，不能指望作业自己退出。
+- **待确认队列「落决定」必须立即从对外视图消失**：只把条目标记成已决定、等接收线程醒来再摘除，
+  会让 `STATUS`/`PENDING` 在几毫秒内仍把它算作待确认，甚至误报「有 2 个待确认请求」。
+  对外视图（`list`/`count`/`decide`）一律只看**未落决定**的条目。
+- **同一把锁不能跨「阻塞等收包」**：守护进程最初让 IPC 线程与发现主循环共用一把锁，
+  而 `tick()` 持锁在 `poll` 里阻塞等收包 500ms ⇒ IPC 查询被彻底饿死（`STATUS`/`DEVICES` 直接超时）。
+  改为发现循环独占控制器、只把**设备快照**发到共享锁里。用 `sample <pid>` 抓线程栈才定位到。
+- **状态文件里的端口要写“实际绑定的”，不是“首选的”**：顺延后写首选端口，客户端会连到错误的端口。
+- **`ERR` 回原文，不要回 `GlowError` 的 Display**：服务端回 Display、客户端再包一层，
+  用户会看到 `错误：协议错误：用法错误：有 2 个待确认请求…` 三层前缀。已加 `GlowError::Remote` 原样展示。
+- **测试改 `HOME` 必须串行化**：`HOME` 是进程级环境变量，而测试默认并行跑，
+  不串行就会互相把 `HOME` 改到别的目录，造出「写 A 读 B」的假故障。
+- **后台子进程会拖住调用方的输出管道**：真机验收里后台跑的 CLI 会继承管道，
+  让调用方一直等它（表现为「命令超时」而不是「代码挂住」）。
+  改用 python `start_new_session=True` 起独立会话，结论落文件。
 
 ## 其他
 [why.md](./why.md) 存放的是项目的产品设计书，**冻结不改**；开发进展、决策、踩坑一律写在本文件（TAOLUN / CHANGELOG / 认知纠正）。
