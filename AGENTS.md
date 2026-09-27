@@ -11,6 +11,19 @@
 - TAOLUN 存放我们每次对话的重心的总结
 
 
+## 测试与 CI 运行规范：
+- 测试一源文件一份（`tests/<源文件名>.rs`），一个文件只测一个源文件，不合并。
+- **本地一律走单文件/单函数入口，禁止 `cargo test --workspace`**（它会编译并链接所有测试目标，
+  在低配机器上很重；全量只留给发版 CI）。
+  - 类型检查：`cargo check --all-targets`（不链接，秒级）
+  - 单个文件：`./scripts/t.sh <测试文件名>`
+  - 单个用例：`./scripts/t.sh <测试文件名> <名字子串>`；精确匹配加 `--exact <用例名>`；只列名加 `--list`
+  - **涉及并发、时序、网络协议的改动：必须把那一个测试文件跑完**——
+    `cargo check` 看的是类型，看不见运行时会死锁（本次已栽过）。
+- CI 只在打 `v*` 标签与手动触发时运行：仓库私有，Actions 按量计费（Linux ×1 / Windows ×2 / macOS ×10）。
+  日常提交不跑 CI；**不要为了「顺手验一下」推 tag**（一次发版约 15 分钟额度）。
+- 未经确认不推送远端（尤其额度见底时）；推送前先问。
+
 ## TAOLUN
 > 这里存放讨论记录
 
@@ -118,6 +131,7 @@
 
 - 问题：`cargo test --workspace` 会编译并链接**所有**测试目标，在低配机器上很重；
   而 cargo 本来就有 Jest 那种粒度（`--test <文件>` / 子串过滤 / `--exact <用例>`），是**调用方式**用错了。
+- **本地与 CI 走同一套单文件入口**（本地也只用 `scripts/t.sh`，不再全量跑）。
 - 三档流程：
   1. 平时改代码 → `cargo check --all-targets`（不链接、秒级，只拦类型/借用错误）；
   2. 改了某模块逻辑 → `./scripts/t.sh <测试文件> [过滤词]`（只编一个目标，再直接执行二进制）；
@@ -135,7 +149,9 @@
   `pending.rs`（token + 队列 + 超时自动拒绝）、`daemon.rs`（平台层）、`view/daemon.rs`（无终端的人工确认）。
 - 新增内部子命令 `__daemon`（由 `on` 拉起，不面向用户）。
 - `list` / `send` 优先走 IPC，守护进程没跑时退回直连发现；顺带解决多进程抢发现端口。
-- 新增 `scripts/t.sh`：单文件/单函数测试入口。
+- 新增 `scripts/t.sh`：单文件/单函数测试入口；本地测试一律用它（不进二进制，不违反零依赖）。
+- CI 触发改为**只在打 tag / 手动触发**（私有仓库 Actions 按量计费），并加 `timeout-minutes: 15`、
+  `concurrency` 取消重复运行、`actions/cache` 缓存 Cargo 与 `target`。
 - 测试：`tests/{state,ipc,pending,daemon_view}.rs` 共 41 个用例（本地逐文件跑过），
   另有 Phase 1 遗留用例；测试用例数过多，为控制私有仓库 CI 额度，全量只在打 tag 时跑。
 - 真机验收：两个发送方同时挂起 → `PENDING` 列表（`#001`/`#002`）→ `accept 001` / `reject 002`
@@ -251,6 +267,20 @@
 - **后台子进程会拖住调用方的输出管道**：真机验收里后台跑的 CLI 会继承管道，
   让调用方一直等它（表现为「命令超时」而不是「代码挂住」）。
   改用 python `start_new_session=True` 起独立会话，结论落文件。
+
+- **GitHub Actions 免费额度只对 public 仓库**：私有仓库是**按分钟计费**的
+  （Free 计划 2000 分钟/月，倍率 Linux ×1 / Windows ×2 / **macOS ×10**）。
+  额度用尽且 `spending limit = 0` 时，作业**不会启动**，报
+  `recent account payments have failed or your spending limit needs to be increased`。
+  这不是「排队」，别再等它。
+- **读计费数字需要带 billing 权限的 token**：只有 `repo` 权限时 `/user/settings/billing/actions` 直接 404，
+  想知道确切用量只能去网页 Settings → Billing and plans。
+- **`git checkout <路径>` 恢复的是「已提交」的版本，不是「我改之前」的版本**：
+  我把 AGENTS.md 改坏后先提交、再 `git checkout AGENTS.md`，结果把坏版本又恢复了一遍。
+  要回到某个好状态必须显式给提交：`git checkout <好提交> -- <路径>`。
+- **分区结构的文档不能直接 `>>` 追加**：内容会落到最后一个分区（`## 其他`）后面，
+  还会造出重复的 `## 认知纠正` 标题。必须用分区标题当锚点插入，插入后用
+  `grep -n "^## "` 自检每个分区只出现一次。
 
 ## 其他
 [why.md](./why.md) 存放的是项目的产品设计书，**冻结不改**；开发进展、决策、踩坑一律写在本文件（TAOLUN / CHANGELOG / 认知纠正）。
