@@ -18,16 +18,23 @@ fn main() {
 
     let name = glowlink_core::DeviceIdentity::global().name.clone();
 
-    // 装配点：有守护进程就用真数据，没有就退回预览
-    // （界面照样起得来，便于离线比对设计稿）。
+    // 装配点（依赖注入）：有守护进程就用真数据；没有就**显示空表**。
+    //
+    // 「连不上就回落预览假数据」曾经很方便（离线比对设计稿），但它把假设备
+    // 当真设备画了出来——用户看到 `Pixel 9` / `iPad mini` 会以为附近真有这些机器。
+    // 所以预览改成显式开关：`GLOWLINK_PREVIEW=1`，只给设计比对用。
     let source: Arc<dyn DeviceSource> = match IpcSource::attach() {
         Some(ipc) => {
             log::info!("已连上守护进程，设备表来自 IPC");
             ipc
         }
-        None => {
-            log::info!("守护进程没在跑，设备表用预览数据（先 `glowlink on` 可看真设备）");
+        None if std::env::var_os("GLOWLINK_PREVIEW").is_some() => {
+            log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
             Arc::new(PreviewSource::discovered())
+        }
+        None => {
+            log::info!("守护进程没在跑：设备表为空（先 `glowlink on` 才能看到设备）");
+            Arc::new(PreviewSource::empty())
         }
     };
 
