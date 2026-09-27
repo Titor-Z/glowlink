@@ -4,7 +4,8 @@
 //! 只能靠肉眼发现。所以几何全部抽成纯函数，在这里钉死。
 
 use glowlink_desktop::model::layout::{
-    self, place_devices, place_devices_free, self_center, snap_to_device, snaps_to_center,
+    self, place_devices, place_devices_free, resolve_contacts, self_center, snap_to_device,
+    snaps_to_center,
     NodeSize, Pinned, Point, Rect, Seed, CENTER_CLEAR, DEVICE_RADIUS, GAP, MIN_DIST,
 };
 use glowlink_desktop::theme;
@@ -249,4 +250,56 @@ fn a_seeded_node_keeps_its_spot_when_that_spot_is_legal() {
     let seeds = [Seed { id: "alpha".into(), point: home }];
     let placement = place_devices(&ids, &[], &seeds);
     assert_eq!(placement.centers[0], home);
+}
+
+#[test]
+fn contact_only_pushes_what_is_actually_touching() {
+    // 用户真机的抱怨：「都没遇到就碰」。所以推开量必须**恰好是重叠量**——
+    // 相切（圆心距 = 半径和）时一点都不许动，再近 1px 才开始推。
+    // 一次只放一枚节点：多枚一起放时几何互相牵扯，测出来的东西说不清。
+    let radius = DEVICE_RADIUS;
+    let obstacle = (Point { x: 100.0, y: 100.0 }, radius);
+    let along = |distance: f32| Point { x: 100.0 + distance, y: 100.0 };
+
+    // 1) 没碰到：一点都不许动
+    let far = vec![along(2.0 * radius + 40.0)];
+    assert_eq!(resolve_contacts(&far, radius, &[obstacle]), far, "没碰到的绝不许动");
+
+    // 2) 正好相切：也不算碰
+    let tangent = vec![along(2.0 * radius)];
+    assert_eq!(resolve_contacts(&tangent, radius, &[obstacle]), tangent, "相切不算碰");
+
+    // 3) 重叠 10px：推到恰好相切（不多推）
+    let overlapping = vec![along(2.0 * radius - 10.0)];
+    let after = resolve_contacts(&overlapping, radius, &[obstacle]);
+    let gap = distance(after[0], obstacle.0);
+    assert!((gap - 2.0 * radius).abs() < 0.01, "推开后应恰好相切：{gap:.2}px");
+    assert!(after[0].x > overlapping[0].x, "往远离障碍物的方向推");
+}
+
+#[test]
+fn a_pushed_node_passes_it_on_to_its_neighbour() {
+    // 被推的又挤到别人：链条要传下去（但只传接触链，不是全场重排）
+    let radius = DEVICE_RADIUS;
+    let obstacle = (Point { x: 100.0, y: 100.0 }, radius);
+    let rest = vec![
+        Point { x: 100.0 + radius + 4.0, y: 100.0 },  // 被障碍物压到
+        Point { x: 100.0 + 3.0 * radius + 4.0, y: 100.0 }, // 被它挤到
+        Point { x: 260.0, y: 380.0 },                  // 远处的旁观者
+    ];
+    let after = resolve_contacts(&rest, radius, &[obstacle]);
+    assert_eq!(after[2], rest[2], "远处的旁观者不该动");
+    assert!(distance(after[0], after[1]) >= 2.0 * radius - 0.5, "被推的两枚不该叠在一起");
+}
+
+#[test]
+fn contact_resolution_is_deterministic() {
+    // 同一输入必须同一输出：否则每帧重算会自己抖起来
+    let radius = DEVICE_RADIUS;
+    let obstacle = (Point { x: 120.0, y: 90.0 }, radius);
+    let rest = vec![Point { x: 130.0, y: 100.0 }, Point { x: 160.0, y: 96.0 }];
+    assert_eq!(
+        resolve_contacts(&rest, radius, &[obstacle]),
+        resolve_contacts(&rest, radius, &[obstacle])
+    );
 }

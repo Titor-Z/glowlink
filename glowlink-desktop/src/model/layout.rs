@@ -265,6 +265,54 @@ pub fn snaps_to_center(point: Point) -> bool {
     dist2(point, self_center()) <= radius * radius
 }
 
+/// 只把**真正重叠**的节点推开（局部、不重新求解全局布局）。
+///
+/// 拖动时用：被拖的那枚是不可推动的障碍物，只有它**真的压到**谁才推谁，
+/// 推开量恰好等于重叠量（不留额外的缝——「碰到」就是半径相切，不能提前预警）。
+///
+/// 为什么不把拖影塞进 [`relax`]：那是**全局重新求解平衡点**，
+/// 会让远处的节点也一起挪（用户真机看到的现象：「都没遇到就碰，而且碰还都碰」）。
+/// 这里只做局部的接触响应，输入连续、输出也连续。
+///
+/// 迭代几轮是为了把「被推的又挤到别人」传下去（链条），仍是从当前坐标接着算。
+pub fn resolve_contacts(
+    rest: &[Point],
+    radius: f32,
+    obstacles: &[(Point, f32)],
+) -> Vec<Point> {
+    const PASSES: usize = 3;
+    let mut points = rest.to_vec();
+    for _ in 0..PASSES {
+        for point in points.iter_mut() {
+            for (obstacle, obstacle_radius) in obstacles {
+                let need = radius + obstacle_radius;
+                if let Some((nx, ny, amount)) = separation(*point, *obstacle, need) {
+                    // 障碍物（指针拖着的那个）推不动：位移全给节点
+                    *point = Point { x: point.x - nx * amount, y: point.y - ny * amount };
+                }
+            }
+        }
+        // 被推的节点之间也要说实话：各让一半
+        for i in 0..points.len() {
+            for j in (i + 1)..points.len() {
+                let need = radius * 2.0;
+                if let Some((nx, ny, amount)) = separation(points[i], points[j], need) {
+                    points[i] = Point { x: points[i].x - nx * amount / 2.0, y: points[i].y - ny * amount / 2.0 };
+                    points[j] = Point { x: points[j].x + nx * amount / 2.0, y: points[j].y + ny * amount / 2.0 };
+                }
+            }
+        }
+        // 推出去的不能出图区（边界靠 [橡皮筋] 留给下一步，这里先保证不越界）
+        let (x0, x1) = bound_x();
+        let (y0, y1) = bound_y();
+        for point in points.iter_mut() {
+            point.x = point.x.clamp(x0, x1);
+            point.y = point.y.clamp(y0, y1);
+        }
+    }
+    points
+}
+
 /// 两点距离（px）。
 pub fn distance(a: Point, b: Point) -> f32 {
     dist2(a, b).sqrt()

@@ -70,6 +70,8 @@ pub struct AppRoot {
     shown: Vec<(String, layout::Point)>,
     /// 上一次为拖动而重排布局时的指针位置（节流用）。
     last_relayout: Option<layout::Point>,
+    /// 拖动时被**推开**的节点（按设备 ID 记当前落点）。
+    contacts: Vec<(String, layout::Point)>,
     /// 染色层是否曾经出现过（没出现过就压根不渲染——否则首帧会闪一下）。
     tint_shown: bool,
     /// 每次「进入命中」递增：过渡动画的 id 靠它每次都换新，才会重播。
@@ -140,6 +142,7 @@ impl AppRoot {
             move_seq: 0,
             shown: Vec::new(),
             last_relayout: None,
+            contacts: Vec::new(),
             tint_shown: false,
             tint_seq: 0,
             tint_tone: theme::NODE_SELF,
@@ -183,7 +186,40 @@ impl AppRoot {
         let (placement, placed_ids) = self.layout_for(&self.devices);
         self.placement = placement;
         self.placed_ids = placed_ids;
+        self.apply_contacts();
         self.track_moves();
+    }
+
+    /// 拖动时：把**真正被压到**的节点推开（局部、连续，不重新求解全局布局）。
+    ///
+    /// 为什么不做全局重排：那是「求平衡点」，会让远处的节点也跟着挪，
+    /// 表现就是「都没遇到就碰、而且碰还都碰」。接触响应只该发生在接触的那几枚上。
+    fn apply_contacts(&mut self) {
+        self.contacts.clear();
+        let Some(ghost) = self.drag_at else {
+            return;
+        };
+        // 拖影比原件大一点（抓起时放大），接触判定要按它的实际尺寸来
+        let ghost_radius = layout::DEVICE_RADIUS * crate::model::drag::GHOST_SCALE;
+        let resting: Vec<layout::Point> = self.placement.centers.clone();
+        let pushed = layout::resolve_contacts(
+            &resting,
+            layout::DEVICE_RADIUS,
+            &[(ghost, ghost_radius)],
+        );
+        for (index, device) in self.devices.iter().enumerate() {
+            let (Some(rest), Some(now)) = (resting.get(index), pushed.get(index)) else {
+                continue;
+            };
+            if layout::distance(*rest, *now) > 0.5 {
+                self.contacts.push((device.id.clone(), *now));
+            }
+        }
+    }
+
+    /// 这台设备此刻被推开到了哪儿（`None` = 它没被碰到）。
+    fn contact_point(&self, id: &str) -> Option<layout::Point> {
+        self.contacts.iter().find(|(cid, _)| cid == id).map(|(_, p)| *p)
     }
 
     /// 拖动时这次重算要不要做（指针走了够远才算，免得每个像素都重排）。
@@ -332,11 +368,7 @@ impl AppRoot {
             .filter(|d| !self.is_connected(&d.id))
             .map(|d| d.id.as_str())
             .collect();
-        let mut pinned = connect::pinned_points(&self.connections);
-        // 正在拖的那枚 = 会动的障碍物：别人得绕开它（「碰到轻轻弹开」的来源）
-        if let Some(point) = self.drag_at {
-            pinned.push(layout::Pinned { point, radius: layout::DEVICE_RADIUS });
-        }
+        let pinned = connect::pinned_points(&self.connections);
         (
             layout::place_devices(&floating, &pinned, &self.seeds),
             devices.iter().map(|d| d.id.clone()).collect(),
@@ -497,12 +529,15 @@ impl Render for AppRoot {
             .map(|(index, device)| {
                 let connected = self.is_connected(&device.id);
                 // 已连接的：位置钉在连接环上；其余（含断开后就地留下的）：散布算法给
+                let contact = self.contact_point(&device.id);
                 let center = self.ring_point(&device.id).unwrap_or_else(|| {
-                    self.placement
-                        .centers
-                        .get(index)
-                        .copied()
-                        .unwrap_or_else(layout::self_center)
+                    contact.unwrap_or_else(|| {
+                        self.placement
+                            .centers
+                            .get(index)
+                            .copied()
+                            .unwrap_or_else(layout::self_center)
+                    })
                 });
                 let size = if connected {
                     theme::NODE_DEVICE_SIZE * connect::CONNECTED_SCALE
