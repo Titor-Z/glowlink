@@ -80,10 +80,19 @@ fn devices_never_overlap_the_center_or_each_other() {
                 to_center >= CENTER_CLEAR - 0.5,
                 "{count} 台时第 {index} 台压到了中心盘：{to_center:.1}px"
             );
-            // 盘（半径 26）+ 设备名都要留在窗口内
-            assert!(center.x > 26.0 && center.x < theme::WINDOW_W - 26.0, "x 越界：{center:?}");
-            assert!(center.y > theme::TITLEBAR_H + 26.0, "y 顶到标题栏：{center:?}");
-            assert!(center.y < theme::WINDOW_H - 26.0, "y 越出窗口底：{center:?}");
+            // 盘 + 设备名 + 漂浮余量都要留在**节点图**里（不是「留在窗口里」就够）：
+            // 伸进拖拽区会被那一层盖住（用户真机看到过）
+            let half = theme::NODE_DEVICE_SIZE / 2.0;
+            assert!(center.x - 44.0 > 0.0, "名字左边出窗：{center:?}");
+            assert!(center.x + 44.0 < theme::WINDOW_W, "名字右边出窗：{center:?}");
+            assert!(
+                center.y - half - 4.0 > theme::TITLEBAR_H,
+                "盘顶进标题栏：{center:?}"
+            );
+            assert!(
+                center.y + half + 18.0 + 4.0 < theme::TITLEBAR_H + theme::GRAPH_H,
+                "盘或名字伸进拖拽区：{center:?}"
+            );
 
             for other in placement.centers.iter().skip(index + 1) {
                 let gap = distance(*center, *other);

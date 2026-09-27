@@ -51,9 +51,34 @@ pub const CENTER_CLEAR: f32 = 92.0;
 pub const MIN_DIST: f32 = 60.0;
 /// 种子点最远的生成半径（最终还要受窗口边界约束）。
 const SPAWN_MAX: f32 = 200.0;
-/// 设备盘圆心允许的范围（已留出半径 26 + 2px 余量；下边多留是给设备名）。
-const BOUND_X: (f32, f32) = (30.0, 290.0);
-const BOUND_Y: (f32, f32) = (56.0, 396.0);
+/// 设备名的最大半宽（10px 字号下约 8 个汉字 / 16 个字母）：名字盒比盘宽得多，
+/// 按盘来留边距的话长名字会横穿出窗口。
+const LABEL_HALF: f32 = 44.0;
+/// 盘下方留给名字的高度：6px 间隙 + 12px 字高。
+const LABEL_BELOW: f32 = 18.0;
+/// 漂浮的纵向幅度（与 `view::node` 的 `FLOAT_AMP_Y` 同源思路，取整一点）。
+const DRIFT_MARGIN: f32 = 4.0;
+
+/// 设备盘圆心允许的范围（**全窗坐标**）。
+///
+/// 上下左右都得留够，否则节点会「胖」到隔壁去：
+/// - 上：标题栏底边（44）之下，盘不能顶进标题栏
+/// - 下：节点图底边（44 + 396 = 440）之上，**盘与名字都不能伸进拖拽区**
+///   （曾经的 bug：中心 y 可以到 396，盘底 + 名字 + 漂浮直接压到拖拽框上）
+/// - 左右：留出名字的半宽，长名字不会横穿出窗口
+fn bound_x() -> (f32, f32) {
+    let half = theme::NODE_DEVICE_SIZE / 2.0;
+    let margin = LABEL_HALF.max(half) + DRIFT_MARGIN;
+    (margin, theme::WINDOW_W - margin)
+}
+
+fn bound_y() -> (f32, f32) {
+    let half = theme::NODE_DEVICE_SIZE / 2.0;
+    let top = theme::TITLEBAR_H + half + DRIFT_MARGIN;
+    let graph_bottom = theme::TITLEBAR_H + theme::GRAPH_H;
+    let bottom = graph_bottom - half - LABEL_BELOW - DRIFT_MARGIN;
+    (top, bottom)
+}
 /// 排斥迭代次数：几百次对十几枚节点仍是瞬时（只在设备集合变化时算一次），
 /// 但必须**定死次数**才可复现（不做「收敛了才停」，那会让不同设备数跑出不同精度）。
 const RELAX_STEPS: usize = 400;
@@ -135,8 +160,10 @@ fn relax(points: &mut [Point]) {
                 *point = Point { x: center.x + nx * CENTER_CLEAR, y: center.y + ny * CENTER_CLEAR };
             }
             // 最外一圈靠边界夹住（窗口只有 320×500，没有“再往外”的余地）
-            point.x = point.x.clamp(BOUND_X.0, BOUND_X.1);
-            point.y = point.y.clamp(BOUND_Y.0, BOUND_Y.1);
+            let (x0, x1) = bound_x();
+            let (y0, y1) = bound_y();
+            point.x = point.x.clamp(x0, x1);
+            point.y = point.y.clamp(y0, y1);
         }
     }
 }
