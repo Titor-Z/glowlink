@@ -88,7 +88,7 @@ fn run() -> Result<()> {
     let config = config::load()?;
     // `<命令> --help` / `-h`：一律给这条命令自己的说明
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
-        return cmd_help(&config, &args);
+        return cmd_help(&args);
     }
 
     match args.first().map(String::as_str) {
@@ -112,7 +112,7 @@ fn run() -> Result<()> {
                 cmd_panel()
             }
         }
-        Some("help") => cmd_help(&config, &args[1..]),
+        Some("help") => cmd_help(&args[1..]),
         Some("--version") | Some("-V") => {
             println!("glowlink {VERSION}");
             Ok(())
@@ -322,7 +322,7 @@ fn cmd_ui(config: &Config, args: &[String]) -> Result<()> {
 /// `glowlink help [命令]` 与 `glowlink <命令> --help` 的实现。
 ///
 /// 不认识的命令名按用法错误处理（退出码 2）并指路总览——比默默打总览更容易发现问题。
-fn cmd_help(config: &Config, args: &[String]) -> Result<()> {
+fn cmd_help(args: &[String]) -> Result<()> {
     // 过滤掉开关：`glowlink help send --yes` 也应当给 send 的说明
     let name = args.iter().find(|arg| !arg.starts_with('-'));
     let Some(name) = name else {
