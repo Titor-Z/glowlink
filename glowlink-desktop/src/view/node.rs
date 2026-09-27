@@ -300,6 +300,10 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
 
     let base = div()
         .absolute()
+        // 先给一个静态坐标：动画每帧会覆盖它，但不能没有——
+        // 没有的话在「动画未参与/被 reduce_motion 冻结」的那一帧会跑到 (0,0)。
+        .left(px(spec.rect.x))
+        .top(px(spec.rect.y))
         .w(px(diameter))
         .h(px(diameter))
         .children(halo)
@@ -360,8 +364,13 @@ pub fn node(t: &Theme, spec: NodeSpec<'_>) -> impl IntoElement {
         );
 
     if spec.who.is_self() {
-        // 本机是图面的锚点，**不漂**——漂浮只属于「周围的设备」
-        return base.into_any_element();
+        // 本机是图面的锚点，**不漂**——漂浮只属于「周围的设备」。
+        // 注意坐标必须在这里显式给：下面那支是靠动画回调每帧设 left/top 的，
+        // 本机不走动画，漏了就落在绝对的 (0,0)，也就是左上角。
+        return base
+            .left(px(spec.rect.x))
+            .top(px(spec.rect.y))
+            .into_any_element();
     }
 
     // 漂浮：以槽位为中心的慢椭圆（错相由 `layout::float_phase` 给）
