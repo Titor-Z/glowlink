@@ -181,6 +181,11 @@ pub fn snaps_to_center(point: Point) -> bool {
     dist2(point, self_center()) <= radius * radius
 }
 
+/// 到中心盘圆心的距离（px）。日志与调试用——数字比「吸/不吸」更能说明问题。
+pub fn distance_to_center(point: Point) -> f32 {
+    dist2(point, self_center()).sqrt()
+}
+
 /// 拖动时该吸附到哪台设备（就近吸附，超过半径就松手回弹）。
 ///
 /// `centers` 是当前布局（由 [`place_devices`] 算得），`radius` 由调用方给

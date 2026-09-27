@@ -350,8 +350,10 @@ impl Render for AppRoot {
                 // **这个回调在元素内外都会触发**（gpui 按拖动起点投递），
                 // 所以指针位置能一直跟着更新——落点判定就靠它
                 .on_drag_move(cx.listener(
-                    |this, event: &DragMoveEvent<DeviceDrag>, _window, cx| {
-                        let point = window_point(event.bounds.origin, event.event.position);
+                    |this, event: &DragMoveEvent<DeviceDrag>, window, cx| {
+                        // **位置一律问窗口**（窗口坐标），不去拼「元素原点 + 相对位置」：
+                        // 那个相对量到底相对谁，只有框架知道；拼错了就是「怎么拖都不亮」。
+                        let point = window_point(window.mouse_position());
                         // 先看**上一帧的落点**在不在命中区：只有「刚进来」才换动画 id
                         let was_over = this.over_center();
                         let dragging = Some(event.drag(cx).id.clone());
@@ -362,6 +364,13 @@ impl Render for AppRoot {
                             if let Some(tone) = this.dragged_tone_of(&event.drag(cx).id) {
                                 this.tint_tone = tone;
                             }
+                            // 进/出吸附区各记一行：出问题时这两行能直接说明「判定到底发生没有」
+                            log::info!(
+                                "进入吸附区（距中心 {:.0}px）",
+                                layout::distance_to_center(point)
+                            );
+                        } else if !now_over && was_over {
+                            log::info!("离开吸附区");
                         }
                         // 再次按住 = 打断回弹：否则那份「飞回原位」的一次性动画
                         // 还在每帧摆位置，跟拖动抢同一个坐标
@@ -535,10 +544,18 @@ impl Render for AppRoot {
                             .h(px(crate::model::drag::SNAP_RADIUS * 2.0))
                             .rounded(px(crate::model::drag::SNAP_RADIUS))
                             .on_drop(cx.listener(
-                                |this, drag: &DeviceDrag, _window, cx| {
-                                    // 命中区是圆，而落点区是方：这里再用圆判定一次
-                                    let inside =
-                                        this.drag_at.map(layout::snaps_to_center).unwrap_or(false);
+                                |this, drag: &DeviceDrag, window, cx| {
+                                    // 判定用**松手那一刻**的指针位置（任务书要求），
+                                    // 落点区是方、判定是圆，所以这里必须再算一次
+                                    let point = window_point(window.mouse_position());
+                                    let inside = layout::snaps_to_center(point);
+                                    log::info!(
+                                        "松手判定：({:.0}, {:.0}) 距中心 {:.0}px → {}",
+                                        point.x,
+                                        point.y,
+                                        layout::distance_to_center(point),
+                                        if inside { "吸附" } else { "回弹" }
+                                    );
                                     if inside {
                                         // 命中：位置本来就没动过，淡入回原位即可
                                         this.dragging = None;
@@ -561,11 +578,11 @@ impl Render for AppRoot {
     }
 }
 
-/// 拖动事件里的指针位置 → **全窗坐标**。
+/// 指针位置（`Pixels`）→ 模型用的 `f32` 点。
 ///
-/// `DragMoveEvent` 给的是「相对被拖元素」的位置，所以要加上那个元素的窗口坐标。
-fn window_point(origin: gpui::Point<gpui::Pixels>, position: gpui::Point<gpui::Pixels>) -> layout::Point {
-    layout::Point { x: origin.x.as_f32() + position.x.as_f32(), y: origin.y.as_f32() + position.y.as_f32() }
+/// 位置来源只有一个：`Window::mouse_position()`（**窗口坐标**）。
+fn window_point(position: gpui::Point<gpui::Pixels>) -> layout::Point {
+    layout::Point { x: position.x.as_f32(), y: position.y.as_f32() }
 }
 
 /// 全窗坐标 → 节点图内坐标（减掉标题栏高度）。
