@@ -1,18 +1,22 @@
 # 萤光 GlowLink
 
-跨平台近场文件传输（Phase 1：CLI 概念验证）。局域网内设备自动互相发现，点对点直传文件，不经云端。
+跨平台近场文件传输。局域网内设备自动互相发现，点对点直传文件，不经云端。
+传输已启用**端到端加密**（X25519 + ChaCha20-Poly1305），首次配对核对 6 位校验码，之后免确认。
 
-闭源、零第三方依赖：协议、CRC32 校验、环形缓冲背压、配置解析全部手写，只用 Rust 标准库。
+除密码学依赖（RustCrypto 系）外零第三方依赖：协议帧、CRC32 校验、环形缓冲背压、配置解析全部手写。
 
 ## 下载与运行
 
 从 [Releases](../../releases) 下载对应平台的压缩包（Windows 选 `windows-x86_64`），解压后：
 
 ```bash
-# 接收方：常驻等待，默认需要按 y 确认，--yes 自动接收
+# 后台常驻（推荐）：收到文件时等你确认；加 --yes 则对已信任设备免确认
+./glowlink on --dir ./received
+
+# 前台常驻：交互式，直接在终端里按 y 确认（Ctrl-C 退出）
 ./glowlink serve --dir ./received
 
-# 任一台：扫描局域网内的设备
+# 扫描局域网内的设备（守护进程在跑时结果来自守护进程）
 ./glowlink list
 
 # 发送：按设备名或 ID 发送（可多个文件）
@@ -20,9 +24,30 @@
 
 # 直连：绕过发现层，适合跨网段或调试
 ./glowlink send --peer 192.168.1.23:52878 文件.zip
+
+# 查看/取消已配对设备
+./glowlink trust
+./glowlink trust forget 客厅的Mac
+
+# 停止后台守护进程
+./glowlink off
 ```
 
 Windows 上二进制名为 `glowlink.exe`，用法相同。首次运行会弹出防火墙提示，**必须允许**（需要接收入站 TCP 连接与 UDP 发现报文）。
+
+### 首次配对
+
+第一次和某台设备互传时，两端屏幕都会出现同一个 **6 位校验码**，核对一致后确认即可：
+
+```
+[等待确认 #001] 192.168.1.23 想发来「报告.pdf」（12.4 MB）
+             设备指纹 37ba779c450001b9  校验码 **482913**（请与发送方屏幕核对）
+             确认：glowlink accept 001 / glowlink reject 001
+```
+
+确认后该设备进入信任列表（`~/.glowlink/trusted.txt`），此后不再核对校验码。
+**免确认自动接收**需要守护进程带 `--yes` 启动，且只对已信任设备生效
+（陌生设备即使开了 `--yes` 也必须人工确认）。
 
 ### macOS 解压后无法运行
 
@@ -33,6 +58,13 @@ chmod +x glowlink
 xattr -dr com.apple.quarantine glowlink
 ```
 
+## 两台机器怎么连
+
+1. **接同一个 Wi-Fi / 路由器**（最简单）。
+2. **没有路由器**：让 Windows 开「移动热点」，另一台加入该热点。
+   注意 Windows 需要先连上某个网络（哪怕没有外网）才能开启移动热点。
+3. 都不行时用 `--peer ip:端口` 直连，接收端的传输端口由 `on` / `serve` 启动时打印。
+
 ## 配置文件
 
 同目录下的 `glowlink.toml` 是工程默认配置，可直接修改。优先级：
@@ -41,22 +73,30 @@ xattr -dr com.apple.quarantine glowlink
 内置默认 < ./glowlink.toml < ~/.config/glowlink/config.toml（可用 $GLOWLINK_CONFIG 指定）< 命令行开关
 ```
 
-可改的项：`discovery_port`、`transfer_port`、`receive_dir`、`query_interval_secs`、`device_timeout_secs`、`scan_timeout_secs`、`connect_timeout_secs`、`chunk_size_kib`、`ring_capacity_kib`。用 `glowlink config` 查看当前生效值与配置文件位置。
+可改的项：`discovery_port`、`transfer_port`、`receive_dir`、`query_interval_secs`、
+`device_timeout_secs`、`scan_timeout_secs`、`connect_timeout_secs`、`pending_timeout_secs`、
+`chunk_size_kib`、`ring_capacity_kib`。用 `glowlink config` 查看当前生效值与配置文件位置。
 
 ## 注意事项
 
 - **必须在同一子网**：发现依赖 UDP 广播，路由器的客户端隔离（AP isolation）、跨网段、VPN 都会让它失效，这种情况下请用 `--peer` 直连。
 - **两端发现端口要一致**：默认 `9267`。
-- **尚无加密**：任何人都能向你的机器发起传输，唯一的闸门是接收端的确认提示。**不要用它传敏感文件**。
+- **未配对设备无法传输**：传输全程加密，且接收端要人工确认或该设备已在信任列表里。
+- **加密实现未经第三方审计**：用的是成熟库（RustCrypto），但整体协议没有经过专业审计，请自行判断风险。
 - 设备名取自主机名，可用 `GLOWLINK_NAME=自定义名` 固定。
+- 密钥与信任列表在 `~/.glowlink/`：`identity.txt`（设备身份私钥，Unix 上 0600）、
+  `trusted.txt`（已配对设备，可直接手改，删一行即取消该设备的免确认）。
+  删除 `identity.txt` 等于把这台机器变成一台新设备（需要重新配对）。
 
 ## 当前进度
 
 | 阶段 | 内容 | 状态 |
 | :--- | :--- | :--- |
 | Phase 1 | Rust CLI：发现 + 传输 + 背压 + 校验 | 已完成 |
-| Phase 2 | 桌面端 GPUI 小窗口 | 未开始 |
-| Phase 3 | Android App 与分享菜单 | 未开始 |
-| Phase 4 | 端到端加密、配对信任、Wi-Fi Direct 自组网 | 未开始 |
+| Phase 2 | 守护进程 + 本地 IPC + `on`/`off` | 已完成 |
+| Phase 3 | 端到端加密、配对信任、免确认自动接收 | 已完成 |
+| Phase 4 | 桌面端 GPUI 小窗口 | 未开始 |
+| Phase 5 | Android App 与分享菜单 | 未开始 |
+| Phase 6 | Wi-Fi Direct 自组网 | 未开始 |
 
 开发规范、决策记录与踩坑总结见 [AGENTS.md](./AGENTS.md)；产品设计书见 [why.md](./why.md)。
