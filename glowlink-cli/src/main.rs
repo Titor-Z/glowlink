@@ -19,6 +19,7 @@ use glowlink_cli::keys::{load_or_create_identity, TrustFile};
 use glowlink_cli::pending::{PendingOffer, PendingQueue};
 use glowlink_cli::state::{self, State};
 use glowlink_cli::view::cli::human_size;
+use glowlink_cli::view::{panel, style};
 use glowlink_cli::DaemonView;
 use glowlink_cli::CliView;
 use glowlink_core::controller::transfer::TransferListener;
@@ -33,11 +34,23 @@ use glowlink_core::{
 
 fn main() {
     reset_sigpipe();
-    if let Err(e) = run() {
-        eprintln!("错误：{e}");
-        std::process::exit(1);
+    match run() {
+        Ok(()) => {}
+        // 用法错误自己就是完整的一句话（含命令名与用法），不再套「错误：用法错误：」两层
+        Err(GlowError::Usage(message)) => {
+            eprintln!("{}", style().error(&message));
+            std::process::exit(EXIT_USAGE);
+        }
+        Err(e) => {
+            eprintln!("{}", style().error(&format!("错误：{e}")));
+            std::process::exit(EXIT_FAILURE);
+        }
     }
 }
+
+/// 退出码：0 成功、1 通用错误、2 用法错误（脚本可据此判断）。
+const EXIT_FAILURE: i32 = 1;
+const EXIT_USAGE: i32 = 2;
 
 /// 恢复 SIGPIPE 的默认行为，让 `glowlink list | head` 这类下游提前关管道时静默退出。
 ///
@@ -81,12 +94,76 @@ fn run() -> Result<()> {
         Some("reject") => cmd_decide(false, &args[1..]),
         Some("send") => cmd_send(&config, &args[1..]),
         Some("config") => cmd_config(&config),
-        Some("help") | None => {
-            print_help();
+        // `glowlink` 回车给「第一屏」：状态 + 最常用的几件事
+        None => cmd_panel(),
+        Some("help") | Some("--help") | Some("-h") => {
+            println!("{}", panel::help_text(VERSION, config.discovery_port));
             Ok(())
         }
-        Some(other) => Err(GlowError::Usage(format!("未知命令：{other}"))),
+        Some("--version") | Some("-V") => {
+            println!("glowlink {VERSION}");
+            Ok(())
+        }
+        Some(other) => Err(GlowError::Usage(format!(
+            "glowlink: 未知命令「{other}」\n\n可用命令见 glowlink --help"
+        ))),
     }
+}
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// 打印一条提示语：`[警告]` 走黄、`[信息]`/`[提示]` 走青、其余原样。
+///
+/// 前缀本身就在文案里（核心库也产出这种文案），所以这里只负责上色，不改文本。
+fn print_notice(line: &str) {
+    if line.is_empty() {
+        return;
+    }
+    println!(
+        "{}",
+        style().colorize(glowlink_cli::view::Level::from_prefix(line), line)
+    );
+}
+
+/// 敲 `glowlink` 回车：只回答「现在什么状态 + 最常做的事」。
+fn cmd_panel() -> Result<()> {
+    let identity = DeviceIdentity::global();
+    // 先绑定到局部变量：面板要借用 receive_dir，临时值活不到打印那一刻
+    let running = daemon::running_state();
+    let daemon_status = match running.as_ref() {
+        Some(state) => {
+            // 待确认数取不到也不该让面板失败：查不到就不显示这一项
+            let pending = ipc::IpcClient::connect(&state)
+                .ok()
+                .and_then(|mut client| client.call_first("STATUS").ok())
+                .and_then(|line| {
+                    ipc::ok_payload(&line)
+                        .split(' ')
+                        .nth(1)
+                        .and_then(|n| n.parse::<usize>().ok())
+                });
+            Some(panel::DaemonStatus {
+                pid: state.pid,
+                receive_dir: &state.receive_dir,
+                pending,
+            })
+        }
+        None => None,
+    };
+
+    let panel = panel::status_panel(
+        VERSION,
+        &identity.name,
+        &truncate(&identity.id, 8),
+        daemon_status.as_ref(),
+    );
+    // 只把标题加粗：颜色是装饰，去掉后信息一字不少
+    let mut lines = panel.lines();
+    if let Some(title) = lines.next() {
+        println!("{}", style().strong(title));
+    }
+    println!("{}", lines.collect::<Vec<_>>().join("\n"));
+    Ok(())
 }
 
 fn cmd_config(config: &Config) -> Result<()> {
@@ -121,9 +198,13 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
         query_interval(config),
     );
 
-    println!("本机：{}（{}）", identity.name, truncate(&identity.id, 8));
+    println!(
+        "本机：{}（{}）",
+        style().strong(&identity.name),
+        truncate(&identity.id, 8)
+    );
     if discovery.degraded() {
-        println!("{}", degraded_notice(discovery_port));
+        print_notice(&degraded_notice(discovery_port));
     }
 
     if !watch {
@@ -138,7 +219,9 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
     // --watch：持续刷新，直到 Ctrl-C。
     if !io::stdout().is_terminal() {
         return Err(GlowError::Usage(
-            "--watch 需要终端环境；重定向输出请改用普通的 list".into(),
+            "glowlink list: --watch 需要终端环境（输出被重定向了）\n\n\
+             提示：脚本里请用不带 --watch 的 glowlink list。"
+                .into(),
         ));
     }
     println!("持续监听中，Ctrl-C 退出。\n");
@@ -151,13 +234,17 @@ fn cmd_list(config: &Config, args: &[String]) -> Result<()> {
 /// 经守护进程查询：设备表由守护进程长期累积，比现场扫一轮更快也更全。
 fn list_via_daemon(state: &State, timeout: Duration, watch: bool) -> Result<()> {
     let identity = DeviceIdentity::global().clone();
-    println!("本机：{}（{}）", identity.name, truncate(&identity.id, 8));
     println!(
+        "本机：{}（{}）",
+        style().strong(&identity.name),
+        truncate(&identity.id, 8)
+    );
+    print_notice(&format!(
         "[信息] 结果来自守护进程（PID {}，IPC 端口 {}），接收目录 {}。",
         state.pid,
         state.ipc_port,
         state.receive_dir.display()
-    );
+    ));
 
     let mut client = ipc::IpcClient::connect(state)?;
     if !watch {
@@ -169,7 +256,9 @@ fn list_via_daemon(state: &State, timeout: Duration, watch: bool) -> Result<()> 
 
     if !io::stdout().is_terminal() {
         return Err(GlowError::Usage(
-            "--watch 需要终端环境；重定向输出请改用普通的 list".into(),
+            "glowlink list: --watch 需要终端环境（输出被重定向了）\n\n\
+             提示：脚本里请用不带 --watch 的 glowlink list。"
+                .into(),
         ));
     }
     println!("持续监听中，Ctrl-C 退出。\n");
@@ -227,7 +316,8 @@ fn print_pending(client: &mut ipc::IpcClient) -> Result<()> {
             format!("设备指纹 {fingerprint}  校验码 **{code}**（请与发送方屏幕核对）")
         };
         println!(
-            "[等待确认 #{token}] {peer} 想发来「{name}」（{}）",
+            "[等待确认 {}] {peer} 想发来「{name}」（{}）",
+            style().strong(&format!("#{token}")),
             human_size(size)
         );
         if !trust_hint.is_empty() {
@@ -261,14 +351,16 @@ fn degraded_notice(port: u16) -> String {
         },
         // 真收到了非协议应答：确实是别的程序
         Ok(PortOwner::Stranger) => format!(
-            "[警告] 端口 {port} 被其他程序占用，建议使用 --discovery-port 切换端口。"
+            "[信息] 端口 {port} 被其它程序占用，本次改用临时端口：仍能发现设备，\
+             但对端无法主动找到本机。可用 --discovery-port 换一个端口。"
         ),
         // 无人应答但绑不上：内核残留绑定或防火墙，不能说成“被其它程序占用”
         Ok(PortOwner::Stale) => format!(
-            "[警告] 端口 {port} 绑定异常（可能是内核残留或防火墙拦截），建议使用 --discovery-port 切换端口。"
+            "[信息] 端口 {port} 被残留占用（需重启系统释放），本次改用临时端口：\
+             仍能发现设备，但对端无法主动找到本机。"
         ),
         Ok(PortOwner::Free) => String::new(),
-        Err(e) => format!("[警告] 端口 {port} 占用情况探测失败：{e}"),
+        Err(e) => format!("[信息] 端口 {port} 的占用情况探测失败：{e}"),
     }
 }
 
@@ -307,7 +399,7 @@ fn print_devices_live(devices: &[glowlink_core::Device]) {
 }
 
 fn device_table_header() -> String {
-    format!("{:<20} {:<10} {:<22} {}", "名称", "ID", "地址", "最后出现")
+    style().dim(&format!("{:<20} {:<10} {:<22} {}", "名称", "ID", "地址", "最后出现"))
 }
 
 /// 数据窗口固定为 18 列：留 2 列给省略号，避免中文名撞坏表格。
@@ -315,9 +407,10 @@ fn device_row(device: &glowlink_core::Device, fresh: bool) -> String {
     let name = truncate(&device.name, 18);
     let age = device.last_seen.elapsed().as_secs();
     let marker = if fresh && age < 2 { "●" } else { " " };
+    // 名称是用户要找的东西，加粗（去掉颜色后仍是原来的文本）
+    let label = style().strong(&format!("{name:<19}"));
     format!(
-        "{marker}{:<19} {:<10} {:<22} {}s",
-        name,
+        "{marker}{label} {:<10} {:<22} {}s",
         device.short_id(),
         device.addr,
         age
@@ -350,7 +443,7 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
     // 新端口此刻正被自己持有，重探只会把自己误判成“绑定异常”。
     let decision = glowlink_core::model::probe::decide_port(discovery_port)?;
     if let Some(notice) = decision.notice() {
-        println!("{notice}");
+        print_notice(&notice);
     }
     let transport = factory.from_bound_socket(decision)?;
     let mut discovery = DiscoveryController::new(
@@ -404,8 +497,11 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
                         let view = CliView::with_session(auto_accept, session, trust);
                         let label = peer.ip().to_string();
                         match transfer.receive_file(&mut secure, &dir, &label, &view) {
-                            Ok(path) => println!("\n已接收：{}", path.display()),
-                            Err(e) => eprintln!("\n接收失败：{e}"),
+                            Ok(path) => println!(
+                                "\n{}",
+                                style().ok(&format!("已接收：{}", path.display()))
+                            ),
+                            Err(e) => eprintln!("{}", style().error(&format!("\n接收失败：{e}"))),
                         }
                     });
                 }
@@ -419,6 +515,13 @@ fn cmd_serve(config: &Config, args: &[String]) -> Result<()> {
     }
 }
 
+/// `send` 的用法说明（缺参数与缺文件时共用，避免两处文案漂移）。
+const SEND_USAGE: &str = "glowlink send: 缺少参数\n\n\
+     用法：\n\
+     \x20 glowlink send <设备名|设备ID> <文件>…\n\
+     \x20 glowlink send --peer ip:端口 <文件>…\n\n\
+     提示：先用 glowlink list 看看附近有哪些设备。";
+
 fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
     let timeout = search_timeout(config, args);
     let discovery_port = discovery_port(config, args)?;
@@ -430,15 +533,12 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
         (None, &positional[..])
     } else {
         if positional.len() < 2 {
-            return Err(GlowError::Usage(
-                "用法：glowlink send <设备名|设备ID> <文件>… 或 glowlink send --peer ip:端口 <文件>…"
-                    .into(),
-            ));
+            return Err(GlowError::Usage(SEND_USAGE.into()));
         }
         (Some(positional[0].clone()), &positional[1..])
     };
     if file_args.is_empty() {
-        return Err(GlowError::Usage("至少需要一个待发送的文件".into()));
+        return Err(GlowError::Usage(SEND_USAGE.into()));
     }
     let files: Vec<PathBuf> = file_args.iter().map(PathBuf::from).collect();
 
@@ -448,7 +548,11 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
         // 绕过发现层，直接单播连接，便于本机联调与跨网段排查。
         Some(value) => value
             .parse::<SocketAddr>()
-            .map_err(|_| GlowError::Usage(format!("--peer 需要 ip:端口，收到「{value}」")))?,
+            .map_err(|_| {
+                GlowError::Usage(format!(
+                    "glowlink send: --peer 需要写成 ip:端口，收到「{value}」"
+                ))
+            })?,
         None => {
             let peer_key = peer_key.expect("非直连模式必有设备名");
             // 守护进程在跑就直接向它要地址：省一轮扫描，也不和它抢发现端口。
@@ -513,7 +617,10 @@ fn cmd_send(config: &Config, args: &[String]) -> Result<()> {
         }
         let view = CliView::new(true);
         let sent = transfer.send_file(&mut secure, file, &view)?;
-        println!("\n已发送：{}（{}）", file.display(), human_size(sent));
+        println!(
+            "\n{}",
+            style().ok(&format!("已发送：{}（{}）", file.display(), human_size(sent)))
+        );
     }
     Ok(())
 }
@@ -562,7 +669,7 @@ fn cmd_on(_config: &Config, args: &[String]) -> Result<()> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Err(GlowError::Usage(format!(
-        "守护进程未能就绪（PID {}）。日志：{}",
+        "glowlink on: 守护进程未能就绪（PID {}）\n\n日志：{}",
         child.id(),
         state::log_path().display()
     )))
@@ -641,7 +748,11 @@ fn cmd_trust(args: &[String]) -> Result<()> {
         }
         Some("forget") => {
             let key = positional.get(1).ok_or_else(|| {
-                GlowError::Usage("用法：glowlink trust forget <指纹|名称>".into())
+                GlowError::Usage(
+                    "glowlink trust: 缺少要取消的设备\n\n\
+                     用法：glowlink trust forget <指纹|名称>"
+                        .into(),
+                )
             })?;
             // 指纹和名称都允许，用户手上可能只有其中一个
             let target = trust
@@ -657,7 +768,8 @@ fn cmd_trust(args: &[String]) -> Result<()> {
             Ok(())
         }
         Some(other) => Err(GlowError::Usage(format!(
-            "未知子命令「{other}」；用法：glowlink trust [forget <指纹|名称>]"
+            "glowlink trust: 未知子命令「{other}」\n\n\
+             用法：glowlink trust [forget <指纹|名称>]"
         ))),
     }
 }
@@ -681,7 +793,11 @@ fn relative_time(paired_at: u64) -> String {
 /// 为守护进程里挂起的接收请求落决定；有多个请求时必须给编号。
 fn cmd_decide(accept: bool, args: &[String]) -> Result<()> {
     let state = daemon::running_state().ok_or_else(|| {
-        GlowError::Usage("守护进程未在运行；接收确认只对守护进程有效。".into())
+        GlowError::Usage(
+            "glowlink accept / reject: 后台服务未在运行\n\n\
+             提示：先 glowlink on 启动后台服务；前台接收请用 glowlink serve。"
+                .into(),
+        )
     })?;
     let token = positional_args(args).first().cloned();
     let command = match (&token, accept) {
@@ -919,33 +1035,3 @@ fn discovery_port(config: &Config, args: &[String]) -> Result<u16> {
     Ok(flag_u16(args, "--discovery-port")?.unwrap_or(config.discovery_port))
 }
 
-fn print_help() {
-    println!(
-        "萤光 GlowLink {}\n\
-         \n\
-         用法：\n\
-         \x20 glowlink list  [--discovery-port 端口] [--timeout 秒] [--watch]\n\
-         \x20                                           扫描局域网内的设备（--watch 持续刷新）\n\
-         \x20 glowlink serve [--port 传输端口] [--discovery-port 端口] [--dir 目录] [--yes]\n\
-         \x20                                           常驻接收方（端口默认自动分配）\n\
-         \x20 glowlink send  <设备名|设备ID> <文件>… [--timeout 秒]\n\
-         \x20 glowlink send  --peer ip:端口 <文件>…\n\
-         \x20                                           直连发送，绕过发现层\n\
-         \x20 glowlink config                          显示生效配置与配置文件位置\n\n\
-         守护进程：\n\
-         \x20 glowlink on   [--dir 目录] [--yes] [--ipc-port 端口]\n\
-         \x20                                           后台常驻；--yes 仅对已信任设备免确认\n\
-         \x20 glowlink accept [编号] | reject [编号]   确认/拒绝待接收的文件（编号见 list）\n\
-         \x20 glowlink trust [forget 指纹|名称]        查看/取消已配对设备的免确认\n\
-         \x20 glowlink off                           停止守护进程\n\n\
-         配置文件：{}（工程默认）→ ~/.config/glowlink/config.toml（用户覆盖）\n\
-         也可用 $GLOWLINK_CONFIG 指定用户配置文件路径。\n\
-         发现端口默认 {}；被占用时自动顺延到相邻端口。\n\
-         守护进程在跑时，list / send 自动改走本地 IPC。\n\
-         传输已启用端到端加密（X25519 + ChaCha20-Poly1305）；\n\
-         首次配对时请核对两端显示的 6 位校验码，确认后该设备进入信任列表。\n",
-        env!("CARGO_PKG_VERSION"),
-        config::PROJECT_CONFIG,
-        Config::default().discovery_port
-    );
-}

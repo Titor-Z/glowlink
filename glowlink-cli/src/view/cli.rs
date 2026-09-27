@@ -10,6 +10,7 @@ use glowlink_core::controller::transfer::TransferView;
 use glowlink_core::patterns::secure::SessionSlot;
 
 use crate::keys::TrustFile;
+use crate::view::style;
 
 /// 进度条宽度（字符数）。
 const BAR_WIDTH: usize = 24;
@@ -225,7 +226,9 @@ fn bar(done: u64, total: u64) -> String {
         }
     };
     let filled = filled.min(BAR_WIDTH);
-    format!("{}{}", "█".repeat(filled), "░".repeat(BAR_WIDTH - filled))
+    let bar = format!("{}{}", "█".repeat(filled), "░".repeat(BAR_WIDTH - filled));
+    // 上色只是装饰：管道里（非 TTY）拿到的是同一串字符，宽度也不变
+    style().ok(&bar)
 }
 
 pub fn human_size(bytes: u64) -> String {
