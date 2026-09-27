@@ -10,6 +10,8 @@ pub enum GlowError {
     NotFound(String),
     Usage(String),
     Config(String),
+    /// 对端（守护进程）返回的错误：直接展示原文，不再叠加本机前缀。
+    Remote(String),
 }
 
 impl fmt::Display for GlowError {
@@ -21,6 +23,7 @@ impl fmt::Display for GlowError {
             GlowError::NotFound(m) => write!(f, "未找到设备：{m}"),
             GlowError::Usage(m) => write!(f, "用法错误：{m}"),
             GlowError::Config(m) => write!(f, "配置错误：{m}"),
+            GlowError::Remote(m) => write!(f, "{m}"),
         }
     }
 }
