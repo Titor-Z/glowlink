@@ -7,8 +7,10 @@
 //! Windows = DWM 组合属性），窗内再叠 `backdrop_filter` 做卡片玻璃。
 
 use gpui::{
-    div, prelude::*, px, App, Context, DragMoveEvent, IntoElement, MouseButton, ParentElement,
-    Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions,
+    div, prelude::*, px, AnimationExt, App, Context, DragMoveEvent, ElementId, IntoElement,
+    MouseButton,
+    ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions,
 };
 
 use std::sync::Arc;
@@ -57,6 +59,18 @@ pub struct AppRoot {
     drag_at: Option<layout::Point>,
     /// 本机发起、正在等的配对（编号 + 对端 + 码 + 状态）。
     pair: Option<PairingCard>,
+    /// 松手没落到中心盘的那台：从哪个位置飞回原位。`seq` 让每次回弹都重播动画。
+    returning: Option<Returning>,
+    /// 回弹序号（只增不减）：动画 id 靠它区分「这一次」和「上一次」。
+    return_seq: u64,
+}
+
+/// 一次「飞回原位」的记录。
+#[derive(Clone, Debug, PartialEq)]
+struct Returning {
+    id: String,
+    from: layout::Point,
+    seq: u64,
 }
 
 /// 界面要显示的配对卡内容。
@@ -101,7 +115,31 @@ impl AppRoot {
             dragging: None,
             drag_at: None,
             pair: None,
+            returning: None,
+            return_seq: 0,
         }
+    }
+
+    /// 正在被拖的那台设备的辉光色（没有拖动时 `None`）。
+    fn dragged_tone(&self) -> Option<gpui::Rgba> {
+        let id = self.dragging.as_deref()?;
+        self.devices
+            .iter()
+            .find(|device| device.id == id)
+            .map(|device| theme::device_tone(device.kind))
+    }
+
+    /// 松手：没落到中心盘上就让它从落点飞回原位。
+    ///
+    /// 位置**永远回原位**，不留在拖到的地方：位置是由设备 ID 派生的
+    /// （`layout::place_devices`），留在半路会与别人重叠、也让「哪个位置是哪台」
+    /// 的记忆失效。飞回去而不是跳回去，是为了让人看清「它回到哪儿了」。
+    fn settle_drag(&mut self) {
+        if let (Some(id), Some(from)) = (self.dragging.take(), self.drag_at.take()) {
+            self.return_seq += 1;
+            self.returning = Some(Returning { id, from, seq: self.return_seq });
+        }
+        self.drag_at = None;
     }
 
     /// 拖动的落点是否在本机盘上（**全窗坐标**）。
@@ -205,6 +243,8 @@ impl AppRoot {
 impl Render for AppRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::DARK;
+        // 动画回调要求 `'static`：捕获的是这个「按值的一份」，不是 `t` 的借用
+        let t_theme = Theme::DARK;
         let cx_handle = cx.entity().clone();
 
         // 服务开关（预览模式下不显示）：开 = 品牌蓝 + 滑块在右，关 = 次白墨色 + 滑块在左。
@@ -290,12 +330,7 @@ impl Render for AppRoot {
                         rect,
                         who: node::NodeWho::Device(device.kind),
                         label: &device.name,
-                        look: if being_dragged {
-                            // 被拖走的那枚压暗待在原地：焦点交给拖影，但位置不丢
-                            node::NodeLook::device_dragging()
-                        } else {
-                            node::NodeLook::device_default()
-                        },
+                        look: node::NodeLook::device_default(),
                         scale: 1.0,
                     },
                 )
@@ -317,8 +352,41 @@ impl Render for AppRoot {
                         }
                     },
                 ));
-                // 漂浮放在最后：`with_animation` 会换掉元素类型，接不上拖动/点击
-                node::drifting(visual, rect, phase).into_any_element()
+                // 拖动中原件**淡出**（不是压暗留着——留着看着就像「没拖动」）
+                let faded = visual.with_animation(
+                    ElementId::Name(format!("fade-{}-{}", device.id, being_dragged).into()),
+                    gpui::Animation::new(Duration::from_millis(crate::model::drag::FADE_MS)),
+                    move |el, delta| el.opacity(if being_dragged { 1.0 - delta } else { delta }),
+                );
+                // 位置：平常漂浮；松手没命中时从**落点**飞回原位（不是啪地跳回去）。
+                // 一次性动画，id 里带序号——序号不变的话第二次回弹不会重播。
+                match self.returning.as_ref().filter(|ret| ret.id == device.id) {
+                    Some(ret) => {
+                        let from = ret.from;
+                        node::positioned(
+                            faded,
+                            ElementId::Name(format!("return-{}-{}", device.id, ret.seq).into()),
+                            gpui::Animation::new(Duration::from_millis(
+                                crate::model::drag::RETURN_MS,
+                            ))
+                            .with_easing(gpui::ease_out_quint()),
+                            move |delta| {
+                                (
+                                    from.x + (rect.x - from.x) * delta,
+                                    from.y + (rect.y - from.y) * delta,
+                                )
+                            },
+                        )
+                        .into_any_element()
+                    }
+                    None => node::positioned(
+                        faded,
+                        node::drift_id(rect),
+                        node::drift_animation(),
+                        move |delta| node::drift_offset(rect, phase, delta),
+                    )
+                    .into_any_element(),
+                }
             })
             .collect();
 
@@ -333,8 +401,7 @@ impl Render for AppRoot {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     if this.drag_at.is_some() || this.dragging.is_some() {
-                        this.drag_at = None;
-                        this.dragging = None;
+                        this.settle_drag();
                         cx.notify();
                     }
                 }),
@@ -376,21 +443,43 @@ impl Render for AppRoot {
                     .h(px(theme::GRAPH_H))
                     .w_full()
                     .when(show_devices, |el| el.children(devices))
-                    .child(node::node(
-                        &t,
-                        node::NodeSpec {
-                            rect: graph_space(self_rect),
-                            who: node::NodeWho::SelfNode,
-                            label: &self.device_name.to_string(),
-                            // 有设备正拖到头上就高亮：这是「松手会不会生效」的唯一提示
-                            look: if self.over_center() {
-                                node::NodeLook::self_target()
-                            } else {
-                                node::NodeLook::self_node()
+                    // 中心盘：命中时**染上被拖那台的辉光色**并加强（不是只换个环）。
+                    // 过渡靠 `with_animation` 一次性按状态重播（id 里带命中与否）——
+                    // gpui 没有 CSS transition，这是等价做法。
+                    .child({
+                        let highlighted = self.over_center();
+                        let dragged_tone = self.dragged_tone();
+                        let name = self.device_name.clone();
+                        let rect = graph_space(self_rect);
+                        div().absolute().left(px(0.0)).top(px(0.0)).with_animation(
+                            ElementId::Name(
+                                format!(
+                                    "center-tint-{}-{}",
+                                    highlighted,
+                                    dragged_tone.map(|_| 1).unwrap_or(0)
+                                )
+                                .into(),
+                            ),
+                            gpui::Animation::new(Duration::from_millis(
+                                crate::model::drag::CENTER_TINT_MS,
+                            ))
+                            .with_easing(gpui::ease_out_quint()),
+                            move |el, delta| {
+                                let t = if highlighted { delta } else { 1.0 - delta };
+                                let tone = dragged_tone.unwrap_or(theme::NODE_SELF);
+                                el.child(node::node(
+                                    &t_theme,
+                                    node::NodeSpec {
+                                        rect,
+                                        who: node::NodeWho::SelfNode,
+                                        label: &name.to_string(),
+                                        look: node::NodeLook::self_node_blended(t, tone),
+                                        scale: 1.0,
+                                    },
+                                ))
                             },
-                            scale: 1.0,
-                        },
-                    ))
+                        )
+                    })
                     // 中心盘的落点区：84px 的盘本身（不含呼吸光圈）。
                     // 设计稿那句「落在中心 84px 内才生效」就是它。
                     .child(
@@ -407,10 +496,13 @@ impl Render for AppRoot {
                                     // 命中区是圆，而落点区是方：这里再用圆判定一次
                                     let inside =
                                         this.drag_at.map(layout::hits_center).unwrap_or(false);
-                                    this.drag_at = None;
-                                    this.dragging = None;
                                     if inside {
+                                        // 命中：位置本来就没动过，淡入回原位即可
+                                        this.dragging = None;
+                                        this.drag_at = None;
                                         this.start_pairing(drag);
+                                    } else {
+                                        this.settle_drag();
                                     }
                                     cx.notify();
                                 },

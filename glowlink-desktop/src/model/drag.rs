@@ -8,6 +8,14 @@ use glowlink_ipc::row::PairingState;
 
 /// 拖动时被拖节点的放大比例（设计稿「轻微放大」，不夸张）。
 pub const GHOST_SCALE: f32 = 1.08;
+/// 抓起的瞬间从这里长到 [`GHOST_SCALE`]：一步到位会显得很硬。
+pub const GHOST_SCALE_MIN: f32 = 1.0;
+/// 松手没落到中心盘时，飞回原位的时长。
+pub const RETURN_MS: u64 = 280;
+/// 节点淡出/淡入的时长（拖动开始时原件淡出、松手后淡入）。
+pub const FADE_MS: u64 = 140;
+/// 中心盘「被拖过来」的过渡时长（色与强度一起插值）。
+pub const CENTER_TINT_MS: u64 = 220;
 
 /// 拖影的三要素。`id` 是设备 ID（身份指纹），落点判定后靠它发起配对。
 #[derive(Clone, Debug, PartialEq, Eq)]

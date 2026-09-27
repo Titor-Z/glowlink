@@ -7,13 +7,13 @@
 //! 不要拿投影冒充（投影有偏移，看起来像"浮起"而不是"发光"）。
 
 use gpui::{
-    div, prelude::*, px, Animation, AnimationElement, AnimationExt, BoxShadow, Context, Div, ElementId,
-    FontWeight,
+    div, prelude::*, px, Animation, AnimationExt, BoxShadow, Context, Div, ElementId, FontWeight,
     IntoElement, Render, Rgba, SharedString, Stateful, Styled, Window,
 };
 
 use std::time::Duration;
 
+use crate::model::drag::{GHOST_SCALE, GHOST_SCALE_MIN};
 use crate::model::layout::{NodeSize, Rect};
 use crate::theme::{self, Theme};
 
@@ -48,29 +48,40 @@ fn drift() -> Animation {
     Animation::new(Duration::from_millis(FLOAT_PERIOD_MS)).repeat()
 }
 
-/// 给设备节点加上漂浮（本机不加：它是图面的锚点）。
+/// 把子元素放进一个绝对定位的容器里，每帧按 `pos(delta)` 摆位置。
 ///
-/// 放在 `node()` **之外**：这样调用方可以先接上拖动/点击（那些要 `cx`），
-/// 再套动画——`with_animation` 返回的是另一个类型，接不上就成了死角。
-pub fn drifting<E: IntoElement + Styled + 'static>(
-    el: E,
-    rect: Rect,
-    phase: f32,
-) -> AnimationElement<E> {
-    let (x, y) = (rect.x, rect.y);
-    el.with_animation(drift_id(rect), drift(), move |el, delta| {
-        let theta = (delta + phase) * std::f32::consts::PI * 2.0;
-        el.left(px(x + FLOAT_AMP_X * theta.sin()))
-            .top(px(y + FLOAT_AMP_Y * theta.cos()))
+/// 这是本文件唯一允许「动画改位置」的地方：`with_animation` 只能改它**自己**的样式，
+/// 而它的回调是 `Fn`（不能把子元素移进去），所以必须是
+/// 「先 `.child(...)` 建容器，再 `.with_animation(...)` 动容器」这个顺序。
+pub fn positioned<E: IntoElement + 'static>(
+    child: E,
+    id: ElementId,
+    animation: Animation,
+    pos: impl Fn(f32) -> (f32, f32) + 'static,
+) -> impl IntoElement {
+    div().absolute().child(child).with_animation(id, animation, move |el, delta| {
+        let (x, y) = pos(delta);
+        el.left(px(x)).top(px(y))
     })
 }
 
-/// 漂浮圈的动画 id（与呼吸圈、各节点都不能撞）。
-fn drift_id(rect: Rect) -> ElementId {
+/// 漂浮动画（本机不套：它是图面的锚点）。
+pub fn drift_animation() -> Animation {
+    drift()
+}
+
+/// 漂浮动画的 id（与呼吸圈、各节点都不能撞）。
+pub fn drift_id(rect: Rect) -> ElementId {
     ElementId::NamedInteger(
         SharedString::new_static("drift"),
         ((rect.x as u64) << 32) | rect.y as u64,
     )
+}
+
+/// 第 `delta` 帧的漂浮位置：以原位为中心的慢椭圆（错相由 `layout::place_devices` 给）。
+pub fn drift_offset(rect: Rect, phase: f32, delta: f32) -> (f32, f32) {
+    let theta = (delta + phase) * std::f32::consts::PI * 2.0;
+    (rect.x + FLOAT_AMP_X * theta.sin(), rect.y + FLOAT_AMP_Y * theta.cos())
 }
 
 /// 呼吸圈的动画 id：同一帧里可能有多个圈（本机 + 拖拽目标），必须各不相同。
@@ -127,6 +138,11 @@ pub struct NodeLook {
     pub halo: bool,
     /// 盘相对节点的内缩（本机 6px，设备 4px）。
     pub disc_inset: f32,
+    /// 覆盖辉光色。
+    ///
+    /// 只有一种用法：把设备拖到本机头上时，中心盘染成**那台设备的色**——
+    /// 「正在把哪一台拖过来」不用另开颜色通道，用现有的四个语义色就说清了。
+    pub tone_override: Option<Rgba>,
 }
 
 impl NodeLook {
@@ -139,6 +155,7 @@ impl NodeLook {
             disc_tint: 0.0,
             halo: false,
             disc_inset: 4.0,
+            tone_override: None,
         }
     }
 
@@ -171,19 +188,20 @@ impl NodeLook {
         }
     }
 
-    /// 有设备正被拖到本机头上：环拉满、辉光加强（设计稿「中心盘高亮（环满 tone）」）。
-    pub fn self_target() -> Self {
+    /// 本机盘被「某台设备正拖过来」时的样子：由 `t`（0→1 过渡值）插值得到。
+    ///
+    /// `tone` 是被拖那台的辉光色：越接近命中，中心盘越染上它的色。
+    /// 除了「环拉满 + 辉光加强」，**色的变化**才是「松手就会连上它」的直觉提示。
+    pub fn self_node_blended(t: f32, tone: Rgba) -> Self {
+        let base = Self::self_node();
         NodeLook {
-            ring_alpha: 1.0,
-            glow_radius: 30.0,
-            glow_alpha: 0.5,
-            ..Self::self_node()
+            ring_alpha: base.ring_alpha + (1.0 - base.ring_alpha) * t,
+            glow_radius: base.glow_radius + (30.0 - base.glow_radius) * t,
+            glow_alpha: base.glow_alpha + (0.5 - base.glow_alpha) * t,
+            disc_tint: 0.16 * t,
+            tone_override: Some(mix(theme::NODE_SELF, tone, t)),
+            ..base
         }
-    }
-
-    /// 正被拖动的那个节点：压暗待在原地，视觉焦点交给拖影。
-    pub fn device_dragging() -> Self {
-        NodeLook { ring_alpha: 0.3, glow_alpha: 0.1, ..Self::device_default() }
     }
 
     /// 本机中心盘：环 2px、内缩 6px、常驻呼吸。
@@ -195,8 +213,20 @@ impl NodeLook {
             disc_tint: 0.0,
             halo: true,
             disc_inset: 6.0,
+            tone_override: None,
         }
     }
+}
+
+/// 两个色之间线性插值（`t` = 0 取 `a`，1 取 `b`）。
+pub fn mix(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    let t = t.clamp(0.0, 1.0);
+    Rgba::new(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        a.alpha + (b.alpha - a.alpha) * t,
+    )
 }
 
 fn with_alpha(color: Rgba, alpha: f32) -> Rgba {
@@ -289,7 +319,7 @@ pub struct NodeSpec<'a> {
 /// 都要求它；而漂浮动画改由调用方用 [`drifting`] 套上——两者顺序不能反。
 pub fn node(t: &Theme, spec: NodeSpec<'_>) -> Stateful<Div> {
     let node_size = spec.who.node_size();
-    let tone = spec.who.tone();
+    let tone = spec.look.tone_override.unwrap_or_else(|| spec.who.tone());
     let diameter = node_size.diameter() * spec.scale;
     let radius = diameter / 2.0;
     let disc_size = diameter - spec.look.disc_inset * 2.0;
@@ -415,15 +445,30 @@ pub struct DragGhost {
 impl Render for DragGhost {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::DARK;
-        div().absolute().left(px(0.0)).top(px(0.0)).child(node(
-            &t,
-            NodeSpec {
-                rect: Rect { x: 0.0, y: 0.0, size: 0.0 },
-                who: NodeWho::Device(self.kind),
-                label: &self.name,
-                look: NodeLook::device_default(),
-                scale: crate::model::drag::GHOST_SCALE,
-            },
-        ))
+        let (name, kind) = (self.name.clone(), self.kind);
+        div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .with_animation(
+                ElementId::Name("ghost-appear".into()),
+                // 一次性 140ms：抓起时轻轻放大一下。id 固定，所以只播一次——
+                // 每次 Render 都重播的话，就是每帧重启动画（看着像卡住）
+                Animation::new(Duration::from_millis(140))
+                    .with_easing(gpui::ease_out_quint()),
+                move |el, delta| {
+                    let scale = GHOST_SCALE_MIN + (GHOST_SCALE - GHOST_SCALE_MIN) * delta;
+                    el.opacity(0.65 + 0.35 * delta).child(node(
+                        &t,
+                        NodeSpec {
+                            rect: Rect { x: 0.0, y: 0.0, size: 0.0 },
+                            who: NodeWho::Device(kind),
+                            label: &name,
+                            look: NodeLook::device_default(),
+                            scale,
+                        },
+                    ))
+                },
+            )
     }
 }
