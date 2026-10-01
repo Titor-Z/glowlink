@@ -129,3 +129,55 @@ fn the_empty_note_tells_the_truth_about_the_service() {
     assert!(!spinning);
 }
 
+#[test]
+fn the_copy_talks_about_this_machine_not_the_other_one() {
+    // 用户拍板：空态与提示只说**用户在这台机器上看得见的事**。
+    // 早先写的是「让对方也打开 GlowLink」「先打开另一台设备的 GlowLink」——
+    // 那是把内部实现（要有个进程在跑）翻译成了一句冲着对端发的指令。
+    use glowlink_desktop::model::drop::{DropState, Zone, CONNECT_HINT, NO_DEVICES};
+    use glowlink_desktop::model::state::{note_text, EmptyNote, ServiceState};
+
+    let banned = ["让对方", "另一台设备", "另一台机器", "打开 GlowLink"];
+    let mut all: Vec<String> = [
+        EmptyNote::Searching,
+        EmptyNote::NoDevices,
+        EmptyNote::ServiceOff,
+        EmptyNote::Starting,
+    ]
+    .into_iter()
+    .map(|note| note_text(note).to_string())
+    .collect();
+    for service in [ServiceState::Off, ServiceState::Starting, ServiceState::On] {
+        for (devices, connected) in [(0usize, 0usize), (1, 0), (2, 2)] {
+            let zone = Zone {
+                service,
+                device_count: devices,
+                connected,
+                only: None,
+                selected: None,
+            };
+            all.push(DropState::Idle.note(zone));
+            all.push(DropState::Over.note(zone));
+        }
+    }
+    for text in &all {
+        for word in banned {
+            assert!(
+                !text.contains(word),
+                "这句在指使对端：「{text}」（命中「{word}」）"
+            );
+        }
+    }
+    // 具体说法也钉住：状态句只说状态，动作句说收益
+    assert_eq!(note_text(EmptyNote::NoDevices), NO_DEVICES);
+    assert_eq!(note_text(EmptyNote::ServiceOff), "已暂停查找设备");
+    let unconnected = Zone {
+        service: ServiceState::On,
+        device_count: 1,
+        connected: 0,
+        only: None,
+        selected: None,
+    };
+    assert_eq!(DropState::Idle.note(unconnected), CONNECT_HINT);
+    assert_eq!(CONNECT_HINT, "把设备拖到中间即可发送");
+}

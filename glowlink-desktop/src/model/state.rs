@@ -74,12 +74,17 @@ pub fn empty_state(
 }
 
 /// 空态那句话。
+///
+/// **只描述状态，不指使别人**（用户拍板）：早先写的是「让对方也打开 GlowLink」，
+/// 那是把内部实现（要有个进程在跑）翻译成一句冲着别人说的话 —— 用户看到的应该是
+/// 「附近没有设备」，而不是一条给对端下的指令。怎么做，由拖拽区那句常驻文案去说。
 pub fn note_text(note: EmptyNote) -> &'static str {
     match note {
-        EmptyNote::Searching => "正在搜索附近设备…",
-        EmptyNote::NoDevices => "附近还没有设备 · 让对方也打开 GlowLink",
-        EmptyNote::ServiceOff => "服务已关闭 · 打开右上角的开关",
-        EmptyNote::Starting => "正在启动服务…",
+        EmptyNote::Searching => "正在查找附近的设备…",
+        EmptyNote::NoDevices => "附近没有设备",
+        // 不用「服务已关闭」：那是我们的词（守护进程）。用户开的是「找设备」这件事
+        EmptyNote::ServiceOff => "已暂停查找设备",
+        EmptyNote::Starting => "正在启动…",
     }
 }
 

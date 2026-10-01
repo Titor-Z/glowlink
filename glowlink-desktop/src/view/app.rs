@@ -602,7 +602,7 @@ impl AppRoot {
             }
         };
         let Some(transfers) = self.transfers.clone() else {
-            self.deny_drop("后台服务没在跑");
+            self.deny_drop("现在不能发送");
             return;
         };
         let names: Vec<String> = paths

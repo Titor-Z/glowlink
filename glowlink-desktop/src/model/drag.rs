@@ -18,14 +18,18 @@ pub struct DeviceDrag {
     pub kind: DeviceKind,
 }
 
-/// 配对卡上的那句状态说明。
+/// **发起侧**配对卡（出示码的那张）上的状态说明。
+///
+/// 口吻一律站在这台机器上（谁看这张卡）：码是**对方**要输的，
+/// 所以 `WaitingUser` 说的是「人家那边正在输」，不是「你在这台输」——
+/// 同一句提示服务两个角色，必然至少对一个是错的（这个坑踩过）。
 ///
 /// **失败不用新颜色**（设计稿硬约束）：状态全部靠文案区分，
 /// 码本身永远是同一个 22px 等宽样式。
 pub fn pair_state_note(state: PairingState) -> &'static str {
     match state {
         PairingState::WaitingPeer => "等待对方允许",
-        PairingState::WaitingUser => "请在此设备上输入此码",
+        PairingState::WaitingUser => "对方正在输入此码",
         PairingState::Paired => "已配对，下次免核对",
         PairingState::Denied => "对方拒绝了配对",
         PairingState::Abandoned => "已放弃配对",

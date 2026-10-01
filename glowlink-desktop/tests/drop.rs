@@ -9,10 +9,11 @@ use glowlink_desktop::model::state::ServiceState;
 #[test]
 fn the_zone_note_always_says_what_can_happen_now() {
     use glowlink_desktop::model::drop::Zone;
-    // 一台都没有：说清前置条件（不是「拖拽文件到这里」那种必然被拒的邀请）
+    // 一台都没有：说清**现状**（不是「拖拽文件到这里」那种必然被拒的邀请，
+    // 也不是「去打开另一台设备」那种冲着对端发的指令）
     let empty = Zone { service: ServiceState::On, device_count: 0, connected: 0, selected: None, only: None };
-    assert_eq!(DropState::Idle.note(empty), "先打开另一台设备的 GlowLink");
-    assert_eq!(DropState::Over.note(empty), "先打开另一台设备的 GlowLink");
+    assert_eq!(DropState::Idle.note(empty), "附近没有设备");
+    assert_eq!(DropState::Over.note(empty), "附近没有设备");
 
     // 多台、没选：**提前**说「先选择一台设备」（用户拍板：别等丢进去才拒）
     let many = Zone { service: ServiceState::On, device_count: 3, connected: 3, selected: None, only: None };
@@ -58,18 +59,18 @@ fn several_devices_require_an_explicit_pick() {
 
 #[test]
 fn no_devices_at_all_says_so() {
-    // 「附近还没有设备」和「先选择一台设备」是两回事：
+    // 「附近没有设备」和「先选择一台设备」是两回事：
     // 前者用户去开对端，后者用户点一下就行
-    assert_eq!(accept_target(&[], &[], None), Err("附近还没有设备"));
-    assert_eq!(accept_target(&[], &[], Some("甲机")), Err("附近还没有设备"));
+    assert_eq!(accept_target(&[], &[], None), Err("附近没有设备"));
+    assert_eq!(accept_target(&[], &[], Some("甲机")), Err("附近没有设备"));
 }
 
 #[test]
 fn a_stale_selection_is_not_silently_replaced() {
     // 选中的设备刚好下线时**不许换一台发出去**：用户以为发给了甲、实际发给了乙，
     // 是最难发现的那种错。宁可拒收并说清楚。
-    assert_eq!(accept_target(&["乙机"], &["乙机"], Some("甲机")), Err("选中的设备已不在了"));
-    assert_eq!(accept_target(&["甲机", "乙机"], &["甲机", "乙机"], Some("丙机")), Err("选中的设备已不在了"));
+    assert_eq!(accept_target(&["乙机"], &["乙机"], Some("甲机")), Err("那台设备已不在了"));
+    assert_eq!(accept_target(&["甲机", "乙机"], &["甲机", "乙机"], Some("丙机")), Err("那台设备已不在了"));
 }
 
 #[test]
@@ -78,9 +79,9 @@ fn the_zone_says_the_service_is_off_before_anything_else() {
     use glowlink_desktop::model::state::ServiceState;
     // 服务关着的时候，说什么「几台设备 / 发给谁」都是空话：先说要紧的
     let off = Zone { service: ServiceState::Off, device_count: 0, ..Default::default() };
-    assert_eq!(DropState::Idle.note(off), "服务已关闭 · 打开右上角的开关");
+    assert_eq!(DropState::Idle.note(off), "已暂停查找设备");
     let starting = Zone { service: ServiceState::Starting, device_count: 0, ..Default::default() };
-    assert_eq!(DropState::Idle.note(starting), "正在启动服务…");
+    assert_eq!(DropState::Idle.note(starting), "正在启动…");
     // 服务在跑才轮到设备那几句话
     let on = Zone {
         service: ServiceState::On,
@@ -96,7 +97,7 @@ fn the_zone_says_the_service_is_off_before_anything_else() {
 fn sending_requires_a_connection() {
     // 用户拍板的流程规则：**发现 ≠ 可以发**。刚看见的陌生设备还没配对，
     // 拖拽区不能写「拖到此处 → 它」——那是承诺一件流程不允许的事。
-    use glowlink_desktop::model::drop::{accept_target, DropState, Zone, CONNECT_FIRST};
+    use glowlink_desktop::model::drop::{accept_target, DropState, Zone, CONNECT_FIRST, CONNECT_HINT};
     use glowlink_desktop::model::state::ServiceState;
 
     // 有一台设备，但没连：拒收，且说清要做什么
@@ -108,7 +109,7 @@ fn sending_requires_a_connection() {
 
     // 文案同一条规矩：有设备但没连接 → 「先把设备拖到中间连接」
     let seen = Zone { service: ServiceState::On, device_count: 1, connected: 0, ..Default::default() };
-    assert_eq!(DropState::Idle.note(seen), CONNECT_FIRST);
+    assert_eq!(DropState::Idle.note(seen), CONNECT_HINT);
     // 已连接一台 → 才写「拖到此处 → 甲机」
     let linked = Zone {
         service: ServiceState::On,
@@ -125,7 +126,7 @@ fn sending_requires_a_connection() {
 
 #[test]
 fn a_selected_but_unconnected_device_is_not_a_target() {
-    use glowlink_desktop::model::drop::{accept_target, DropState, Zone, CONNECT_FIRST};
+    use glowlink_desktop::model::drop::{accept_target, DropState, Zone, CONNECT_FIRST, CONNECT_HINT};
     use glowlink_desktop::model::state::ServiceState;
     // 选中了甲（已连）、乙没连：目标仍是甲；乙不参与
     assert_eq!(accept_target(&["a", "b"], &["a"], Some("b")), Err(CONNECT_FIRST));
@@ -141,5 +142,5 @@ fn a_selected_but_unconnected_device_is_not_a_target() {
         only: None,
         selected: Some("乙机"),
     };
-    assert_eq!(DropState::Idle.note(z), CONNECT_FIRST);
+    assert_eq!(DropState::Idle.note(z), CONNECT_HINT);
 }
