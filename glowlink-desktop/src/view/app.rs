@@ -505,13 +505,20 @@ impl AppRoot {
             .ok_or("选中的设备已不在了")
     }
 
-    /// 拖拽区要显示的目标名（没选就是 `None`）。
-    fn drop_target_name(&self) -> Option<&str> {
-        let id = self.selected.as_deref()?;
-        self.devices
-            .iter()
-            .find(|device| device.id == id)
-            .map(|device| device.name.as_str())
+    /// 拖拽区文案要的现状：几台、选了哪台、唯一那台是谁。
+    fn zone(&self) -> drop::Zone<'_> {
+        let selected = self.selected.as_deref().and_then(|id| {
+            self.devices
+                .iter()
+                .find(|device| device.id == id)
+                .map(|device| device.name.as_str())
+        });
+        let only = if self.devices.len() == 1 {
+            Some(self.devices[0].name.as_str())
+        } else {
+            None
+        };
+        drop::Zone { device_count: self.devices.len(), selected, only }
     }
 
     /// 拒收：改文案 + 抖一下，1.8s 后自己回到常态（设计稿）。
@@ -1597,8 +1604,7 @@ impl Render for AppRoot {
             .child(dropzone::dropzone(
                 &t,
                 self.drop,
-                self.drop_target_name(),
-                !self.devices.is_empty(),
+                self.zone(),
                 cx.listener(|this, _, _, cx| {
                     this.pick_files();
                     cx.notify();

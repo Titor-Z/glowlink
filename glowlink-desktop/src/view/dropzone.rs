@@ -10,7 +10,7 @@ use gpui::{
     FontWeight, IntoElement, SharedString, Styled,
 };
 
-use crate::model::drop::DropState;
+use crate::model::drop::{DropState, Zone};
 use crate::theme::{self, Theme};
 
 /// 拒收时的抖动时长（设计稿 `shake 0.36s`）。
@@ -34,8 +34,7 @@ fn shake_offset(delta: f32) -> f32 {
 pub fn dropzone(
     t: &Theme,
     state: DropState,
-    target: Option<&str>,
-    has_devices: bool,
+    zone: Zone<'_>,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let (border, ink, bg) = match state {
@@ -50,7 +49,7 @@ pub fn dropzone(
     // 要走 `ParentElement`，而 hover / cursor 又只认「可交互元素」——两边各让一步，
     // 顺序就成了：先 child，再 id 与交互样式。
     let base = div()
-        .child(SharedString::from(state.note(target, has_devices)))
+        .child(SharedString::from(state.note(zone)))
         // 要 id 才算「可交互元素」，hover / cursor 这类交互样式都挂在它上面
         .id("dropzone")
         .flex_none()

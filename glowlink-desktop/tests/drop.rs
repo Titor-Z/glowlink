@@ -6,19 +6,36 @@
 use glowlink_desktop::model::drop::{accept_target, DropState};
 
 #[test]
-fn idle_text_follows_the_selection() {
-    // 设计稿（glowlink.js）：没选 → 「拖拽文件到这里」；选了 → 「拖到此处 → 甲机」
-    assert_eq!(DropState::Idle.note(None, true), "拖拽文件到这里");
-    assert_eq!(DropState::Idle.note(Some("甲机"), true), "拖到此处 → 甲机");
-    // 悬停中说的是同一句话：拖入本身不改变「发给谁」
-    assert_eq!(DropState::Over.note(Some("甲机"), true), "拖到此处 → 甲机");
+fn the_zone_note_always_says_what_can_happen_now() {
+    use glowlink_desktop::model::drop::Zone;
+    // 一台都没有：说清前置条件（不是「拖拽文件到这里」那种必然被拒的邀请）
+    let empty = Zone { device_count: 0, selected: None, only: None };
+    assert_eq!(DropState::Idle.note(empty), "先打开另一台设备的 GlowLink");
+    assert_eq!(DropState::Over.note(empty), "先打开另一台设备的 GlowLink");
+
+    // 多台、没选：**提前**说「先选择一台设备」（用户拍板：别等丢进去才拒）
+    let many = Zone { device_count: 3, selected: None, only: None };
+    assert_eq!(DropState::Idle.note(many), "先选择一台设备");
+    assert_eq!(DropState::Over.note(many), "先选择一台设备");
+
+    // 只有一台：**免选**，它就是目标——把「发给谁」摆在明面上
+    let single = Zone { device_count: 1, selected: None, only: Some("甲机") };
+    assert_eq!(single.target(), Some("甲机"));
+    assert_eq!(DropState::Idle.note(single), "拖到此处 → 甲机");
+
+    // 选中了：显示目标名（多台时也一样）；悬停不改变「发给谁」
+    let picked = Zone { device_count: 3, selected: Some("乙机"), only: None };
+    assert_eq!(DropState::Idle.note(picked), "拖到此处 → 乙机");
+    assert_eq!(DropState::Over.note(picked), "拖到此处 → 乙机");
 }
 
 #[test]
 fn denied_text_never_shows_a_target() {
+    use glowlink_desktop::model::drop::Zone;
     // 被拒的原因是「还没选」——写上目标名会让人以为已经选好了
     let denied = DropState::Denied("先选择一台设备");
-    assert_eq!(denied.note(Some("甲机"), true), "先选择一台设备");
+    let picked = Zone { device_count: 3, selected: Some("甲机"), only: None };
+    assert_eq!(denied.note(picked), "先选择一台设备");
     assert!(denied.is_denied());
     assert!(!DropState::Over.is_denied(), "悬停不是失败");
     assert!(!DropState::Idle.is_denied());
@@ -54,18 +71,3 @@ fn a_stale_selection_is_not_silently_replaced() {
     assert_eq!(accept_target(&["甲机", "乙机"], Some("丙机")), Err("选中的设备已不在了"));
 }
 
-#[test]
-fn with_no_devices_the_zone_says_what_to_do() {
-    // 「拖拽文件到这里」在没有设备时是**邀请一个必然被拒的动作**
-    // （丢进去才告诉你「附近还没有设备」）。前置条件要提前可见。
-    assert_eq!(
-        DropState::Idle.note(None, false),
-        "先打开另一台设备的 GlowLink"
-    );
-    assert_eq!(
-        DropState::Over.note(None, false),
-        "先打开另一台设备的 GlowLink"
-    );
-    // 有设备、没选：仍是设计稿的原文（丢进去才拒）
-    assert_eq!(DropState::Idle.note(None, true), "拖拽文件到这里");
-}

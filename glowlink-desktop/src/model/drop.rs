@@ -18,27 +18,30 @@ pub enum DropState {
 impl DropState {
     /// 提示文案。
     ///
-    /// `target` 是**已选中的目标设备名**；`None` 表示还没选。
-    ///
-    /// 三句话都照抄设计稿（`glowlink.js`）：
-    /// 「拖拽文件到这里」/「拖到此处 → 甲机」/「先选择一台设备」。
-    /// 注意拒绝时**不显示目标名**：那时的问题不是「发给谁」而是「还没选」，
-    /// 写上目标名反而让人以为已经选好了。
-    pub fn note(self, target: Option<&str>, has_devices: bool) -> String {
+    /// 三条规矩（都是「前置条件提前可见」的推论）：
+    /// - **一台设备都没有**：写「先打开另一台设备的 GlowLink」——这时候写
+    ///   「拖拽文件到这里」是邀请一个必然被拒的动作，用户得白丢一次才知道；
+    /// - **多台、没选**：直接写「先选择一台设备」（用户拍板：提前说，别等丢进去才拒）；
+    /// - **有明确目标**（已选，或只有一台——一台免选）：写「拖到此处 → 甲机」，
+    ///   把「会发给谁」摆在明面上。
+    pub fn note(self, zone: Zone<'_>) -> String {
         match self {
+            // 拒收时**不显示目标名**：那时的问题不是「发给谁」而是「还没选」，
+            // 写上目标名反而让人以为已经选好了
             DropState::Denied(reason) => reason.to_string(),
-            // 附近一台设备都没有：这时候写「拖拽文件到这里」是**邀请一个必然被拒的动作**
-            // （丢进去才告诉你「附近还没有设备」）。前置条件要提前可见，用户少白试一次。
-            DropState::Idle | DropState::Over if !has_devices => {
-                "先打开另一台设备的 GlowLink".to_string()
+            DropState::Idle | DropState::Over => {
+                if zone.device_count == 0 {
+                    "先打开另一台设备的 GlowLink".to_string()
+                } else if let Some(name) = zone.target() {
+                    format!("拖到此处 → {name}")
+                } else if zone.device_count > 1 {
+                    "先选择一台设备".to_string()
+                } else {
+                    "拖拽文件到这里".to_string()
+                }
             }
-            DropState::Idle | DropState::Over => match target {
-                Some(name) => format!("拖到此处 → {name}"),
-                None => "拖拽文件到这里".to_string(),
-            },
         }
     }
-
     /// 是不是「一次失败的投放」——界面据此决定要不要抖一下。
     pub fn is_denied(self) -> bool {
         matches!(self, DropState::Denied(_))
@@ -71,5 +74,23 @@ pub fn accept_target(
         // 没选：只有一台就免选（用户拍板的语义），多台要求先点选（设计稿文案）
         None if device_ids.len() == 1 => Ok(device_ids[0].to_string()),
         None => Err("先选择一台设备"),
+    }
+}
+
+/// 拖拽区文案要知道的现状（一行三个事实，免得参数列表越加越长）。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Zone<'a> {
+    /// 附近有几台设备。
+    pub device_count: usize,
+    /// 已选中的那台的名字。
+    pub selected: Option<&'a str>,
+    /// 附近唯一那台的名字（一台**免选**：它就是目标）。
+    pub only: Option<&'a str>,
+}
+
+impl<'a> Zone<'a> {
+    /// 这批文件实际会发给谁（没选时，只有一台也算有目标）。
+    pub fn target(&self) -> Option<&'a str> {
+        self.selected.or(self.only)
     }
 }
