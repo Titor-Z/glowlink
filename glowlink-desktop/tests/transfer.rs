@@ -247,3 +247,21 @@ fn canceling_a_batch_targets_every_unfinished_row_of_that_peer() {
     // 只掐「发给这台、还没结束」的：别的设备不动，已经结束的也不动
     assert_eq!(targets, vec!["一.mov", "二.mov"]);
 }
+
+#[test]
+fn the_pending_hint_points_at_the_other_screen() {
+    use glowlink_desktop::model::transfer::PENDING_HINT;
+    // 码是用来「两边对一下」的：提示必须说清跟**谁的**屏幕对
+    assert!(PENDING_HINT.contains("发送方"), "{PENDING_HINT}");
+    assert!(PENDING_HINT.contains("校验码"), "{PENDING_HINT}");
+}
+
+#[test]
+fn a_queue_note_only_appears_when_someone_else_is_waiting() {
+    use glowlink_desktop::model::transfer::pending_queue_note;
+    // 只有一个时写「另有 0 个」是废话；有两个时要说清「处理完还有」
+    assert_eq!(pending_queue_note(1), None);
+    assert_eq!(pending_queue_note(0), None);
+    assert_eq!(pending_queue_note(2).as_deref(), Some("另有 1 个请求在等"));
+    assert_eq!(pending_queue_note(4).as_deref(), Some("另有 3 个请求在等"));
+}

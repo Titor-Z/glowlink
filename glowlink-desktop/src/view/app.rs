@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::controller::{
-    DeviceSource, DeviceView, IpcSource, PairingSource, PairingView, TransferRow, TransferSource,
-    TransferState,
+    DeviceSource, DeviceView, IpcSource, PairingSource, PairingView, PendingView, TransferRow,
+    TransferSource, TransferState,
 };
 use crate::model::connect::{self, Connection};
 use crate::model::drag::{self, DeviceDrag};
@@ -29,7 +29,7 @@ use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::{self, DropState};
-use crate::view::{dropzone, node, paircard, progress, titlebar};
+use crate::view::{dropzone, node, paircard, pending as pending_card, progress, titlebar};
 
 /// 拒收态保持多久（设计稿：抖一下 + 提示 1.8s，然后自己回到常态）。
 const DENY_HOLD: Duration = Duration::from_millis(1800);
@@ -94,6 +94,11 @@ pub struct AppRoot {
     send_errors: Arc<Mutex<Vec<String>>>,
     /// 正在显示的这一批（一次投放 = 一批，守护进程按顺序发）。
     batch: Option<transfer::Batch>,
+    /// 别人要发文件给你、等你拍板的那些请求（守护进程的 `PENDING` 表）。
+    /// 界面只显示**第一条**：一次只强调一件事，处理完下一条自然浮上来。
+    pending: Option<PendingView>,
+    /// 待确认请求总数（多于 1 时卡片要补一句「另有 N 个」）。
+    pending_total: usize,
     /// 已选中的目标设备名（点设备节点选中；一台设备时不必选）。
     selected: Option<String>,
     /// 配对能力（预览模式下没有）。
@@ -216,6 +221,8 @@ impl AppRoot {
             picked: Arc::new(Mutex::new(Vec::new())),
             send_errors: Arc::new(Mutex::new(Vec::new())),
             batch: None,
+            pending: None,
+            pending_total: 0,
             selected: None,
             pairing,
             transfers,
@@ -582,6 +589,42 @@ impl AppRoot {
         });
     }
 
+    /// 接受一个待确认的接收请求（码已经由人核对过）。
+    ///
+    /// 接受之后就交给守护进程了：它会登记成一条传输，界面的传输卡随之出现。
+    pub fn accept_receive(&mut self) {
+        let Some(pending) = self.pending.clone() else {
+            return;
+        };
+        let Some(transfers) = self.transfers.clone() else {
+            return;
+        };
+        log::info!(
+            "接受接收 #{0}：来自「{1}」的 {2}（校验码 {3}）",
+            pending.token,
+            pending.peer,
+            pending.name,
+            pending.code
+        );
+        if let Err(e) = transfers.decide(&pending.token, true) {
+            log::info!("接受失败：{e}");
+            return;
+        }
+        // 先收起卡片：下一轮快照里这条请求就没了，传输卡会紧接着出现
+        self.pending = None;
+    }
+
+    /// 拒绝一个待确认的接收请求（卡片上的「拒绝」或 ✕）。
+    pub fn reject_receive(&mut self, token: String) {
+        if let Some(transfers) = self.transfers.clone() {
+            log::info!("拒绝接收 #{token}");
+            if let Err(e) = transfers.decide(&token, false) {
+                log::info!("拒绝失败：{e}");
+            }
+        }
+        self.pending = None;
+    }
+
     /// 卡片上的 ✕：在传 ⇒ **取消这一批**；已结束 ⇒ 收起卡片。
     pub fn close_transfer_card(&mut self) {
         let Some(row) = self.transfer.clone() else {
@@ -942,6 +985,17 @@ impl AppRoot {
         // 接收侧的请求要先**取出来**再判断（`PAIRPENDING` 不属于上面那三样）：
         // 守卫只看设备表/服务/传输，设备表没变就直接早退的话，
         // 新来的配对请求永远轮不到处理——界面看着像没反应（这个坑刚踩过）。
+        // 别人发来的待确认（接收侧）：与配对请求一样，是**新增的外来状态**，
+        // 必须一起进守卫，否则「设备表没变」时它永远轮不到处理。
+        let pending_rows: Vec<PendingView> = self
+            .transfers
+            .as_ref()
+            .map(|source| source.pending())
+            .unwrap_or_default();
+        let pending_next = pending_rows.first().cloned();
+        let pending_changed = pending_next.as_ref().map(|row| row.token.clone())
+            != self.pending.as_ref().map(|row| row.token.clone())
+            || pending_rows.len() != self.pending_total;
         let incoming = self
             .pairing
             .as_ref()
@@ -971,10 +1025,11 @@ impl AppRoot {
             && !incoming_changed
             && !outgoing_changed
             && !pair_changed
+            && !pending_changed
         {
             return false;
         }
-        let mut changed = transfer_changed || pair_changed;
+        let mut changed = transfer_changed || pair_changed || pending_changed;
         if pair_changed {
             self.pair = next_pair;
         }
@@ -1039,6 +1094,20 @@ impl AppRoot {
                 }
                 (None, None) => {}
             }
+        }
+
+        if pending_changed {
+            if let Some(row) = pending_next.as_ref() {
+                log::info!(
+                    "待确认 #{0}：来自「{1}」的 {2}（校验码 {3}）",
+                    row.token,
+                    row.peer,
+                    row.name,
+                    row.code
+                );
+            }
+            self.pending = pending_next;
+            self.pending_total = pending_rows.len();
         }
 
         // 后台线程交回来的东西：先取走（只有它们会让界面有反应）
@@ -1507,7 +1576,9 @@ impl Render for AppRoot {
             // 两张卡占**同一个槽位**（同一个 `view::card` 外壳），所以同时出现时
             // 配对卡优先——配对是等人拍板的事，传输卡让它一步回去（「一次只强调一件事」）。
             // 槽位只有一个，优先级：**等人的请求**（接收侧）> 出示码（发起侧）> 传输卡
-            .when(self.pair.is_none() && self.pair_request.is_none(), |el| {
+            // 槽位优先级：**等人拍板的**（接收确认 / 配对请求）> 出示码 > 状态报告（传输卡）
+            .when(self.pair_request.is_none() && self.pending.is_none(), |el| {
+                el.when(self.pair.is_none(), |el| {
                 el.when_some(transfer_card, |el, (row, numbers, label)| {
                     let fraction = progress_fraction;
                     el.child(progress::card(
@@ -1519,6 +1590,12 @@ impl Render for AppRoot {
                         cx,
                     ))
                 })
+                })
+            })
+            // 接收侧待确认：别人在等你拍板，优先级仅次于配对请求（都要人动手）
+            .when_some(self.pending.clone(), |el, pending| {
+                let total = self.pending_total;
+                el.child(pending_card::card(&t, &pending, total, cx))
             })
             .when_some(self.pair_request.clone(), |el, request| {
                 el.child(paircard::request_card(

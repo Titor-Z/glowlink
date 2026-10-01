@@ -8,5 +8,6 @@ pub mod card;
 pub mod dropzone;
 pub mod node;
 pub mod paircard;
+pub mod pending;
 pub mod progress;
 pub mod titlebar;
