@@ -7,6 +7,7 @@ use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
 
 fn row(done: u64, total: u64, state: TransferState) -> TransferRow {
     TransferRow {
+        code: String::new(),
         token: "001".into(),
         direction: TransferDirection::Receive,
         name: "大文件.bin".into(),
@@ -156,4 +157,26 @@ fn the_pulse_alternates_between_the_two_ends() {
         let (x, y) = (pulse(a), pulse(b));
         assert!((x.0 - y.0).abs() < 0.001 && (x.1 - y.1).abs() < 0.001, "周期性：{a} vs {b}");
     }
+}
+
+#[test]
+fn a_queued_file_says_waiting_not_zero_percent() {
+    use glowlink_desktop::model::transfer::numbers;
+    use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
+    // 排队中的文件：一个字节都还没动，写「0%」会被读成「刚开始就卡住了」
+    let row = TransferRow {
+        token: "002".into(),
+        direction: TransferDirection::Send,
+        name: "第二部.mov".into(),
+        peer: "甲机".into(),
+        done: 0,
+        total: 6_000_000,
+        state: TransferState::Queued,
+        note: String::new(),
+        code: String::new(),
+    };
+    let card = numbers(&row, 0.0);
+    assert_eq!(card.percent, "等待中");
+    assert!(!card.meta.contains("0 B"), "排队中不该出现「0 B / …」这种进度读数：{}", card.meta);
+    assert_eq!(card.fraction, 0.0, "条是空的（还没开始）");
 }

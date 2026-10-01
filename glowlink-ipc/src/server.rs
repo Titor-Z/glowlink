@@ -237,11 +237,9 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
         "SEND" => match arg.split_once(char::is_whitespace) {
             Some((device_id, path)) if !path.trim().is_empty() => {
                 match host.send_file(device_id, path.trim()) {
-                    // 校验码与 PAIR 同一套形式：界面拿到就显示
-                    Ok(ticket) => (
-                        vec![format!("OK {} {}", ticket.token, ticket.code)],
-                        true,
-                    ),
+                    // 只回编号：这次发送**只入了队**，校验码要等它真的轮到、
+                    // 握完手才有——那时它会出现在该编号的 `TRANSFERS` 行里。
+                    Ok(ticket) => (vec![format!("OK {}", ticket.token)], true),
                     Err(e) => (vec![error_reply(&e)], true),
                 }
             }

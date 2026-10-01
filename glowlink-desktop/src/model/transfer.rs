@@ -111,6 +111,8 @@ pub fn numbers(row: &TransferRow, speed: f64) -> CardNumbers {
         TransferDirection::Receive => "接收",
     };
     let percent = match row.state {
+        // 排队中：还没有任何字节在动，写 0% 会让人以为「开始就卡住了」
+        TransferState::Queued => "等待中".to_string(),
         TransferState::Running => format!("{}%", format::percent(row.done, row.total)),
         TransferState::Done => "已完成".to_string(),
         TransferState::Rejected => "被拒绝".to_string(),
@@ -121,6 +123,8 @@ pub fn numbers(row: &TransferRow, speed: f64) -> CardNumbers {
     // **不写方向**（卡片本来就只放一条传输，方向由发起方自己心里清楚），
     // 也不写速度（剩余时间已经是速度的结论，两个一起放是重复）。
     let meta = match row.state {
+        // 排队中：只说排到了第几个（数字要准——它确实还没开始动）
+        TransferState::Queued => "前面的文件传完就开始".to_string(),
         TransferState::Running => {
             let mut text = format!(
                 "{} / {}",
@@ -133,17 +137,11 @@ pub fn numbers(row: &TransferRow, speed: f64) -> CardNumbers {
             text
         }
         TransferState::Done => format!("{} · {direction}完成", format::human_size(row.total)),
-        TransferState::Canceled => "已取消".to_string(),
-        TransferState::Rejected => {
+        // 结束态一律**如实转述守护进程给的原因**（「磁盘没空间」与「对方说不要」
+        // 对用户是两件事，不能被抹成同一句「未完成」）
+        TransferState::Rejected | TransferState::Failed | TransferState::Canceled => {
             if row.note.is_empty() {
-                "对方拒绝了这次传输".to_string()
-            } else {
-                row.note.clone()
-            }
-        }
-        TransferState::Failed => {
-            if row.note.is_empty() {
-                "传输失败".to_string()
+                format!("{} · 未完成", format::human_size(row.total))
             } else {
                 row.note.clone()
             }

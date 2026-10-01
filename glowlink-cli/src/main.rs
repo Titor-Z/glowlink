@@ -8,7 +8,7 @@ use std::io::{self, IsTerminal, Write};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glowlink_cli::args::{flag_secs, flag_u16, flag_value, has_flag, positional_args, truncate};
@@ -18,13 +18,14 @@ use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::codec;
 use glowlink_ipc::daemon;
 use glowlink_ipc::row::{
-    DeviceRow, PairingRow, PendingRow, SendTicket, TransferDirection, TransferRow,
+    DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow,
 };
 use glowlink_ipc::server::{self as ipc_server, IpcHost};
 use glowlink_ipc::state;
 use glowlink_cli::keys::{install_device_id, load_or_create_identity, TrustFile};
 use glowlink_cli::pairing::PairingHub;
 use glowlink_cli::pending::PendingQueue;
+use glowlink_cli::sendqueue;
 use glowlink_cli::transfers::{Job, Transfers};
 use glowlink_ipc::state::State;
 use glowlink_cli::view::cli::human_size;
@@ -994,8 +995,9 @@ impl SendWorker {
         path: &std::path::Path,
         peer_name: &str,
         job: &Job,
-        ready: &mpsc::Sender<Result<String>>,
     ) -> Result<()> {
+        // 轮到这个文件了（前面那个已经传完）：从「等待中」转成「正在传」
+        job.mark_running();
         let factory = NativeTransportFactory;
         let stream = factory.connect(addr, self.connect_timeout)?;
         let session: SessionSlot = session_slot();
@@ -1009,7 +1011,9 @@ impl SendWorker {
         // 校验码必须**在传文件之前**交给调用方：接收侧要拿它核对，
         // 发送侧屏幕上没有码，核对就成了空话（这个坑踩过一次）。
         let code = secure.session_info().map(|info| info.code.clone()).unwrap_or_default();
-        let _ = ready.send(Ok(code.clone()));
+        // 码记进**这一行**（不是 `SEND` 的回执）：批次是排队的，第 3 个文件的码
+        // 要等它真的轮到才有，界面从 `TRANSFERS` 里拿。
+        job.set_code(code.clone());
         state::append_log(&format!(
             "正在向 {peer_name} 发送「{}」（校验码 {code}）",
             path.display()
@@ -1092,6 +1096,9 @@ struct DaemonShared {
     pairing: Arc<PairingHub>,
     /// 传输登记表：界面靠它画进度。
     transfers: Arc<Transfers>,
+    /// 发送队列：`SEND` 只入队，工作线程按顺序一个文件一个文件地发。
+    /// 住在这里（而不是界面里）＝「窗口关掉，剩下的照样发出去」。
+    send_queue: sendqueue::SharedQueue,
     /// 发送要用的长期身份与信任列表（与接收侧同一份）。
     identity: Arc<Identity>,
     trust: Arc<TrustFile>,
@@ -1189,46 +1196,22 @@ impl IpcHost for DaemonShared {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| path.display().to_string());
 
-        // 先登记再开线程：界面立刻能看到「正在传」，而不是等第一块数据才冒出来
-        let job = self.transfers.start(
-            TransferDirection::Send,
-            name.clone(),
-            device.name.clone(),
-            meta.len(),
-        );
-        let (ready_tx, ready_rx) = mpsc::channel::<Result<String>>();
-        let worker = SendWorker {
-            identity: Arc::clone(&self.identity),
-            trust: Arc::clone(&self.trust),
-            chunk_size: self.chunk_size,
-            ring_capacity: self.ring_capacity,
-            connect_timeout: self.connect_timeout,
-        };
-        let job_for_thread = job.clone();
-        let peer_name = device.name.clone();
-        let peer_for_reply = peer_name.clone();
-        let addr = device.addr;
-        let ticket_tx = ready_tx.clone();
-        std::thread::spawn(move || {
-            if let Err(e) =
-                worker.send(addr, &path, &peer_name, &job_for_thread, &ticket_tx)
-            {
-                job_for_thread.fail(e.to_string());
-                // 握手前就失败的话调用方还在等 ready：必须把它叫醒
-                let _ = ticket_tx.send(Err(e));
-            }
+        // 登记 + 入队，**立刻**返回：队列跑在守护进程里，界面不必等
+        // （窗口关掉，后面几个文件照样会发出去）。
+        let job = self.transfers.start_queued(name, device.name.clone(), meta.len());
+        let token = job.token();
+        self.send_queue.push(sendqueue::Item {
+            addr: device.addr,
+            peer: device.name.clone(),
+            path,
+            job,
         });
-
-        // 等握手结果（连接 + 握手都是几百毫秒级）；超时留得比 connect_timeout 宽，
-        // 否则网络慢一点就报超时，而线程其实还在跑、界面上的卡片却已经消失。
-        match ready_rx.recv_timeout(self.connect_timeout + Duration::from_secs(10)) {
-            Ok(Ok(code)) => Ok(SendTicket { token: job.token(), code }),
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                job.fail("等待对端握手超时");
-                Err(GlowError::Protocol(format!("与「{peer_for_reply}」握手超时")))
-            }
-        }
+        state::append_log(&format!(
+            "已排入发送队列 #{token}（队列 {} 个，对端 {}）",
+            self.send_queue.len(),
+            device.name
+        ));
+        Ok(SendTicket { token })
     }
 }
 
@@ -1311,6 +1294,7 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         pending: Arc::new(PendingQueue::new()),
         pairing,
         transfers: Arc::new(Transfers::new()),
+        send_queue: Arc::new(sendqueue::SendQueue::new()),
         identity: Arc::clone(&identity_key),
         trust: Arc::clone(&trust),
         chunk_size: config.chunk_size(),
@@ -1319,6 +1303,36 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         auto_accept,
         stop: AtomicBool::new(false),
     });
+
+    // 发送工作线程：**一条**，按队列顺序发（同一时刻只有一个文件在传）。
+    // 队列里每件的连接/握手都在这里做——所以 `SEND` 能立刻返回。
+    {
+        let shared = Arc::clone(&shared);
+        std::thread::spawn(move || {
+            // 与发送同一个依赖快照（身份、信任、超时、分块大小）
+            let worker = SendWorker {
+                identity: Arc::clone(&shared.identity),
+                trust: Arc::clone(&shared.trust),
+                chunk_size: shared.chunk_size,
+                ring_capacity: shared.ring_capacity,
+                connect_timeout: shared.connect_timeout,
+            };
+            loop {
+                let item = shared.send_queue.wait();
+                // 用户在排队期间取消了它：不发，状态已经是「已取消」
+                if item.job.is_canceled() {
+                    state::append_log(&format!(
+                        "队列中的「{}」已被取消，跳过",
+                        item.path.display()
+                    ));
+                    continue;
+                }
+                if let Err(e) = worker.send(item.addr, &item.path, &item.peer, &item.job) {
+                    item.job.fail(e.to_string());
+                }
+            }
+        });
+    }
 
     // IPC 线程：TCP 回环，一条连接可连发多条指令
     {

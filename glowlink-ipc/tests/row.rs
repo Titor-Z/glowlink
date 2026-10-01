@@ -122,6 +122,7 @@ fn file_name_with_spaces_and_tabs_survives() {
 #[test]
 fn transfer_row_round_trips_through_the_wire() {
     let row = TransferRow {
+        code: String::new(),
         token: "001".into(),
         direction: TransferDirection::Send,
         name: "屏幕录制 2026.mp4".into(),
@@ -174,6 +175,7 @@ fn canceled_is_its_own_state_and_survives_a_round_trip() {
     // 「已取消」不能混进「失败」：一个是用户主动掐掉，一个是真出故障，
     // 界面文案与用户的下一步动作都不一样（前者别再重试，后者要排查）。
     let row = TransferRow {
+        code: String::new(),
         token: "004".into(),
         direction: TransferDirection::Send,
         name: "big.bin".into(),

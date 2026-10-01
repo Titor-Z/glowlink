@@ -151,7 +151,7 @@ impl IpcHost for FakeHost {
             // 网络类错误：客户端要靠这个种类还原退出码
             return Err(GlowError::NotFound(device_id.to_string()));
         }
-        Ok(SendTicket { token: "001".to_string(), code: "513904".to_string() })
+        Ok(SendTicket { token: "001".to_string() })
     }
 
     fn cancel(&self, token: &str) -> Result<String> {

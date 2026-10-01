@@ -28,6 +28,7 @@ struct Entry {
     total: u64,
     state: TransferState,
     note: String,
+    code: String,
     finished_at: Option<Instant>,
 }
 
@@ -65,6 +66,27 @@ impl Transfers {
         peer: impl Into<String>,
         total: u64,
     ) -> Job {
+        self.add(direction, name, peer, total, TransferState::Running)
+    }
+
+    /// 登记一个**已入队、还没轮到**的发送（守护进程按顺序一个文件一个文件地发）。
+    pub fn start_queued(
+        &self,
+        name: impl Into<String>,
+        peer: impl Into<String>,
+        total: u64,
+    ) -> Job {
+        self.add(TransferDirection::Send, name, peer, total, TransferState::Queued)
+    }
+
+    fn add(
+        &self,
+        direction: TransferDirection,
+        name: impl Into<String>,
+        peer: impl Into<String>,
+        total: u64,
+        state: TransferState,
+    ) -> Job {
         let token = format!("{:03}", self.counter.fetch_add(1, Ordering::SeqCst) + 1);
         let entry = Entry {
             token,
@@ -73,8 +95,9 @@ impl Transfers {
             peer: peer.into(),
             done: 0,
             total,
-            state: TransferState::Running,
+            state,
             note: String::new(),
+            code: String::new(),
             finished_at: None,
         };
         let slot = Arc::new(Slot {
@@ -96,6 +119,16 @@ impl Transfers {
             entry.token == token && entry.finished_at.is_none()
         })?;
         slot.canceled.store(true, Ordering::SeqCst);
+        // 还在排队：**立刻**落终态。它不是「等传输线程收尾」那种情况
+        // （根本没有线程在跑它），不落的话界面上会永远停在「等待中」。
+        {
+            let mut entry = slot.entry.lock().unwrap_or_else(|e| e.into_inner());
+            if entry.state == TransferState::Queued {
+                entry.state = TransferState::Canceled;
+                entry.note = "已取消".into();
+                entry.finished_at = Some(Instant::now());
+            }
+        }
         Some(token.to_string())
     }
 
@@ -120,6 +153,7 @@ impl Transfers {
                     total: entry.total,
                     state: entry.state,
                     note: entry.note.clone(),
+                    code: entry.code.clone(),
                 }
             })
             .collect()
@@ -146,6 +180,26 @@ impl Job {
         if total > 0 {
             entry.total = total;
         }
+    }
+
+    /// 轮到这个文件了：从「等待中」转成「正在传」。
+    ///
+    /// 排在它前面的文件已经传完，用户要能看出**现在动的是哪一个**。
+    pub fn mark_running(&self) {
+        let mut entry = self.slot.entry.lock().unwrap_or_else(|e| e.into_inner());
+        if entry.finished_at.is_some() {
+            return;
+        }
+        entry.state = TransferState::Running;
+    }
+
+    /// 记下本次握手的校验码（发送方要显示给人核对）。
+    pub fn set_code(&self, code: impl Into<String>) {
+        let mut entry = self.slot.entry.lock().unwrap_or_else(|e| e.into_inner());
+        if entry.finished_at.is_some() {
+            return;
+        }
+        entry.code = code.into();
     }
 
     pub fn finish(&self) {

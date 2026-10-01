@@ -278,12 +278,13 @@ fn pair_decide_with_unknown_token_is_refused() {
 }
 
 #[test]
-fn send_passes_device_and_path_and_returns_token_with_code() {
+fn send_passes_device_and_path_and_returns_the_token() {
     let host = FakeHost::default();
     let (lines, keep_open) = handle_line(&host, "SEND a21cfb23e10383e7 /tmp/报告 final.pdf");
     assert!(keep_open);
-    // 校验码要和编号一起回：界面要立刻显示码给人核对（不能等传完）
-    assert_eq!(lines[0], "OK 001 513904");
+    // 只回编号：分发只是**入队**，码要等这个文件真的轮到、握完手才有
+    // （那时它出现在该编号的 `TRANSFERS` 行里）
+    assert_eq!(lines[0], "OK 001");
     let sent = host.sent.lock().unwrap().clone();
     assert_eq!(sent.len(), 1);
     // 路径带空格：只切第一个空白，其余原样
@@ -315,6 +316,7 @@ fn send_reports_the_error_kind_so_exit_codes_survive_ipc() {
 fn transfers_lists_rows_with_the_count_line_first() {
     let host = FakeHost::default();
     host.transfers.lock().unwrap().push(TransferRow {
+        code: "513904".into(),
         token: "001".into(),
         direction: TransferDirection::Send,
         name: "a.bin".into(),
@@ -335,6 +337,7 @@ fn transfers_lists_rows_with_the_count_line_first() {
 fn cancel_stops_a_running_transfer_and_says_so() {
     let host = FakeHost::default();
     host.transfers.lock().unwrap().push(TransferRow {
+        code: "513904".into(),
         token: "007".into(),
         direction: TransferDirection::Send,
         name: "big.bin".into(),

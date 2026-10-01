@@ -13,6 +13,7 @@ pub mod exit;
 pub mod keys;
 pub mod pairing;
 pub mod pending;
+pub mod sendqueue;
 pub mod transfers;
 pub mod view;
 

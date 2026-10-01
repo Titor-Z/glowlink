@@ -85,13 +85,13 @@ impl DeviceRow {
     }
 }
 
-/// `SEND` 成功后的回执：编号（后续轮询 `TRANSFERS` 用）+ 6 位校验码。
+/// `SEND` 的回执：编号（后续轮询 `TRANSFERS` 用）。
 ///
-/// 校验码**在发文件之前就返回**：接收方要拿它核对，发送方屏幕上必须先有。
+/// **不含校验码**：批次是排队执行的，码要等这个文件真的轮到、握完手才有，
+/// 那时它会出现在该编号的 `TRANSFERS` 行里（第 9 列）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SendTicket {
     pub token: String,
-    pub code: String,
 }
 
 /// 传输的方向。
@@ -122,6 +122,11 @@ impl TransferDirection {
 /// 一次传输的状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransferState {
+    /// 已入队、还没轮到它（守护进程按顺序一个文件一个文件地发）。
+    ///
+    /// 单独一档而不是「假装正在跑」：排队中与正在传的**进度**完全不同
+    /// （前者还没开始，数字不会动），界面文案也不一样（「等待中」vs「正在发送」）。
+    Queued,
     Running,
     Done,
     /// 失败（磁盘、网络、协议）：`note` 里有原因。
@@ -135,6 +140,7 @@ pub enum TransferState {
 impl TransferState {
     pub fn as_token(self) -> &'static str {
         match self {
+            TransferState::Queued => "queued",
             TransferState::Running => "running",
             TransferState::Done => "done",
             TransferState::Failed => "failed",
@@ -145,6 +151,7 @@ impl TransferState {
 
     pub fn from_token(token: &str) -> Self {
         match token {
+            "queued" => TransferState::Queued,
             "done" => TransferState::Done,
             "failed" => TransferState::Failed,
             "rejected" => TransferState::Rejected,
@@ -170,11 +177,17 @@ pub struct TransferRow {
     pub state: TransferState,
     /// 失败原因等补充说明；正常时为空。
     pub note: String,
+    /// 本次握手的 6 位校验码（发送方要显示给人核对）。
+    ///
+    /// 它**不在** `SEND` 的回执里了：批次是排队执行的，第 3 个文件握手时
+    /// 界面早就该把码显示出来——所以码跟着**行**走，谁在跑谁能看到。
+    /// 空串表示「还没有码」（排队中、或接收侧的行）。
+    pub code: String,
 }
 
 impl TransferRow {
     pub fn to_line(&self) -> String {
-        format!(
+        let head = format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             self.token,
             self.direction.as_token(),
@@ -184,7 +197,13 @@ impl TransferRow {
             self.total,
             self.state.as_token(),
             self.note
-        )
+        );
+        // 码为空就不写第 9 列：老客户端（只认 8 列）照样能读
+        if self.code.is_empty() {
+            head
+        } else {
+            format!("{head}\t{}", self.code)
+        }
     }
 
     /// 前 7 列缺了就是坏行；`note` 可缺（老服务端不带它）。
@@ -198,7 +217,9 @@ impl TransferRow {
         let total = parts.next()?.parse().ok()?;
         let state = TransferState::from_token(parts.next()?);
         let note = parts.next().unwrap_or("").to_string();
-        Some(TransferRow { token, direction, name, peer, done, total, state, note })
+        // 第 9 列（校验码）可缺：老服务端只发 8 列
+        let code = parts.next().unwrap_or("").to_string();
+        Some(TransferRow { token, direction, name, peer, done, total, state, note, code })
     }
 }
 

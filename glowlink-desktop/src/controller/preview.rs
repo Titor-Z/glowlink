@@ -145,6 +145,7 @@ impl PreviewTransfer {
     pub fn halfway() -> Self {
         PreviewTransfer {
             transfers: vec![TransferRow {
+                code: "513904".into(),
                 token: "001".into(),
                 direction: TransferDirection::Send,
                 name: "屏幕录制 2026-09-15 040220.mp4".into(),
@@ -161,6 +162,7 @@ impl PreviewTransfer {
     pub fn finished_receive() -> Self {
         PreviewTransfer {
             transfers: vec![TransferRow {
+                code: "513904".into(),
                 token: "002".into(),
                 direction: TransferDirection::Receive,
                 name: "设计交付包.zip".into(),
