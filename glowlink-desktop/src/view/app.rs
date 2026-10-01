@@ -1322,10 +1322,12 @@ impl Render for AppRoot {
 
         // 标题栏右侧三个：隐私浮层 · 收进托盘 · 关闭。
         // 关闭是**自绘的窗口控制**（系统红绿灯已经藏掉，见 `crate::platform`）。
+        // 盾牌 = 隐私浮层的入口（"我们的特色"就写在那儿：无云端 / 无中转 / 无账号 / 无日志）。
+        // 浮层本身还没做（DESIGN.md「隐私浮层」）；在那之前这颗按钮只负责把图标亮出来。
         let privacy = titlebar::icon_button(
             "privacy",
             &t,
-            "icons/lock.svg",
+            "icons/shield.svg",
             t.text_secondary,
             None,
             theme::IconHover::Neutral,

@@ -13,6 +13,10 @@
 //! 3. `stroke-linecap/linejoin="round"`、`fill="none"`（实心滑块是唯一例外）；
 //! 4. 墨迹**别撑满画布**：设备图标的外轮廓高约 12～13px/18px，
 //!    尺寸档位再由 `theme::ICON_*` 按外轮廓宽度补偿，两边别各改一次。
+//!
+//! 标题栏那颗盾牌（`shield.svg`）= **隐私浮层的入口**（无云端 / 无中转 / 无账号 / 无日志）。
+//! 它按 14 画布 + 1.3 描边画，与同排的开关、托盘、✕ 分量对齐：
+//! 实测（同一套栅格化口径）墨占画布 13.2%，落在开关 11.5% 与托盘 3.4%、断链 16.8% 之间。
 
 use std::borrow::Cow;
 
@@ -27,7 +31,7 @@ const ICONS: &[(&str, &[u8])] = &[
     ("icons/close.svg", include_bytes!("../assets/icons/close.svg")),
     ("icons/desktop.svg", include_bytes!("../assets/icons/desktop.svg")),
     ("icons/laptop.svg", include_bytes!("../assets/icons/laptop.svg")),
-    ("icons/lock.svg", include_bytes!("../assets/icons/lock.svg")),
+    ("icons/shield.svg", include_bytes!("../assets/icons/shield.svg")),
     ("icons/monitor.svg", include_bytes!("../assets/icons/monitor.svg")),
     ("icons/phone.svg", include_bytes!("../assets/icons/phone.svg")),
     ("icons/tablet.svg", include_bytes!("../assets/icons/tablet.svg")),
