@@ -75,3 +75,18 @@ fn transfer_and_pairing_need_a_target() {
     state.end_pairing();
     assert_eq!(state.phase(), Phase::Discover, "配对结束回到发现态");
 }
+
+#[test]
+fn the_empty_note_stops_pretending_after_a_while() {
+    use glowlink_desktop::model::state::{search_note, still_looking, SEARCH_PATIENCE};
+    use std::time::Duration;
+    // 一直转 = 演给用户看；「搜了 10 秒还没有」就该如实说没有
+    assert_eq!(search_note(Duration::from_secs(0)), "正在搜索附近设备…");
+    assert_eq!(
+        search_note(SEARCH_PATIENCE - Duration::from_millis(1)),
+        "正在搜索附近设备…"
+    );
+    assert_eq!(search_note(SEARCH_PATIENCE), "附近还没有设备");
+    assert!(still_looking(Duration::from_millis(500)));
+    assert!(!still_looking(SEARCH_PATIENCE));
+}

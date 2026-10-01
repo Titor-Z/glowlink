@@ -9,7 +9,7 @@
 //! 「请与**发送方**屏幕上的校验码核对」——同一句话服务两个角色必然对一个是错的。
 
 use gpui::{
-    div, prelude::*, px, Context, Div, FontWeight, ParentElement, SharedString, Stateful, Styled,
+    div, px, Context, Div, FontWeight, ParentElement, SharedString, Stateful, Styled,
 };
 
 use crate::controller::PendingView;

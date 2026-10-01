@@ -10,4 +10,5 @@ pub mod node;
 pub mod paircard;
 pub mod pending;
 pub mod progress;
+pub mod spinner;
 pub mod titlebar;

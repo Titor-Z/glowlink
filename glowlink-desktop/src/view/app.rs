@@ -26,10 +26,12 @@ use crate::model::motion::{Ghost, Motion};
 use crate::model::paircode::CodeInput;
 use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::transfer::{self, SpeedMeter};
-use crate::model::state::{Phase, UiState};
+use crate::model::state::{self, Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::{self, DropState};
-use crate::view::{dropzone, node, paircard, pending as pending_card, progress, titlebar};
+use crate::view::{
+    dropzone, node, paircard, pending as pending_card, progress, spinner, titlebar,
+};
 
 /// 拒收态保持多久（设计稿：抖一下 + 提示 1.8s，然后自己回到常态）。
 const DENY_HOLD: Duration = Duration::from_millis(1800);
@@ -165,6 +167,12 @@ pub struct AppRoot {
     halo: f32,
     /// 品牌辉光的相位（`0..1`）：和呼吸一样由界面时钟推进。
     brand_phase: f32,
+    /// 空态 spinner 的相位（`0..1`）与「开始搜索的时刻」。
+    ///
+    /// 搜久了就不再转（[`state::still_looking`]）：一直转等于演给用户看，
+    /// 而且每帧都在动就要一直吃 60fps 的重绘。
+    spin: f32,
+    search_since: std::time::Instant,
     /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
     halo_fast: f32,
     /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
@@ -249,6 +257,8 @@ impl AppRoot {
             tint_tone: theme::NODE_SELF,
             halo: 0.0,
             brand_phase: 0.0,
+            spin: 0.0,
+            search_since: std::time::Instant::now(),
             halo_fast: 0.0,
             flowing_peer: None,
             connections: Vec::new(),
@@ -764,6 +774,11 @@ impl AppRoot {
         self.halo = (self.halo + dt / node::HALO_PERIOD_SECS).fract();
         self.brand_phase =
             (self.brand_phase + dt / titlebar::BRAND_PERIOD_SECS).fract();
+        self.spin = (self.spin + dt / spinner::SPINNER_PERIOD_SECS).fract();
+        // 从「发现态」掉回「搜索中」时重新计时：那是一次新的搜索，不是旧的延续
+        if !self.state.phase().shows_searching() {
+            self.search_since = std::time::Instant::now();
+        }
         // 交替高亮：只有真在传的时候跳（传完就停在静止态）
         self.pulse = (self.pulse + dt / transfer::PULSE_PERIOD_SECS).fract();
         self.halo_fast = (self.halo_fast + dt / HALO_FAST_SECS).fract();
@@ -771,7 +786,11 @@ impl AppRoot {
             Some(row) if row.state == TransferState::Running => Some(row.peer.clone()),
             _ => None,
         };
-        let busy = self.dragging.is_some() || !self.tint.is_settled() || !self.motion.is_settled();
+        // spinner 在转也算「有东西在动」：那时候必须走快档，否则 20fps 的转圈看着像卡
+        let busy = self.dragging.is_some()
+            || !self.tint.is_settled()
+            || !self.motion.is_settled()
+            || (self.state.phase().shows_searching() && state::still_looking(self.search_since.elapsed()));
         if busy {
             TICK_FAST
         } else {
@@ -1562,6 +1581,14 @@ impl Render for AppRoot {
                     // 设备气泡（画在中心盘之后 = 之上；重叠由物理保证不会发生）
                     .when(show_devices, |el| el.children(devices)),
             )
+            // 空态：只有自机 + spinner + 「正在搜索附近设备…」（设计稿 `.empty-note`）
+            .when(self.state.phase().shows_searching(), |el| {
+                el.child(spinner::empty_note(
+                    &t,
+                    self.spin,
+                    self.search_since.elapsed(),
+                ))
+            })
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(
                 &t,

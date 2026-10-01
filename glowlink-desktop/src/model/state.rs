@@ -7,6 +7,8 @@
 //!
 //! 零 IO、零 GPUI，全部可单测。
 
+use std::time::Duration;
+
 /// 界面状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -146,4 +148,24 @@ impl UiState {
             self.phase = Phase::Discover;
         }
     }
+}
+
+/// 搜了多少秒之后就**不再假装还在搜**。
+///
+/// 「搜索中」超过这个时长，事实就是「附近没有设备」——继续转 spinner 是演给用户看，
+/// 而且会一直吃 60fps 的重绘（空转 spinner 也是每帧都在动）。
+pub const SEARCH_PATIENCE: Duration = Duration::from_secs(10);
+
+/// 空态那句话：刚开始是「正在搜索」，久了就如实说没有。
+pub fn search_note(waited: Duration) -> &'static str {
+    if still_looking(waited) {
+        "正在搜索附近设备…"
+    } else {
+        "附近还没有设备"
+    }
+}
+
+/// spinner 还转不转（不转的时候 tick 降到慢档，省掉每帧重绘）。
+pub fn still_looking(waited: Duration) -> bool {
+    waited < SEARCH_PATIENCE
 }
