@@ -170,6 +170,19 @@ fn the_copy_talks_about_this_machine_not_the_other_one() {
     }
     // 具体说法也钉住：状态句只说状态，动作句说收益
     assert_eq!(note_text(EmptyNote::NoDevices), NO_DEVICES);
+    // 拖拽区不复读空态那句：它说的是「这个框现在的能耐」，不是搜索结论
+    let no_device_zone = Zone {
+        service: ServiceState::On,
+        device_count: 0,
+        connected: 0,
+        only: None,
+        selected: None,
+    };
+    assert_ne!(
+        DropState::Idle.note(no_device_zone),
+        note_text(EmptyNote::NoDevices),
+        "拖拽区与空态说了同一句话 = 同一个信息说两遍"
+    );
     assert_eq!(note_text(EmptyNote::ServiceOff), "已暂停查找设备");
     let unconnected = Zone {
         service: ServiceState::On,

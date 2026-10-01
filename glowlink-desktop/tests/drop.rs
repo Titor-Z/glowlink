@@ -12,8 +12,8 @@ fn the_zone_note_always_says_what_can_happen_now() {
     // 一台都没有：说清**现状**（不是「拖拽文件到这里」那种必然被拒的邀请，
     // 也不是「去打开另一台设备」那种冲着对端发的指令）
     let empty = Zone { service: ServiceState::On, device_count: 0, connected: 0, selected: None, only: None };
-    assert_eq!(DropState::Idle.note(empty), "附近没有设备");
-    assert_eq!(DropState::Over.note(empty), "附近没有设备");
+    assert_eq!(DropState::Idle.note(empty), "暂无可发送的设备");
+    assert_eq!(DropState::Over.note(empty), "暂无可发送的设备");
 
     // 多台、没选：**提前**说「先选择一台设备」（用户拍板：别等丢进去才拒）
     let many = Zone { service: ServiceState::On, device_count: 3, connected: 3, selected: None, only: None };
