@@ -17,8 +17,17 @@ use crate::theme::{self, Theme};
 pub const CARD_BOTTOM: f32 = theme::DROPZONE_INSET + theme::DROPZONE_H + 12.0;
 /// 左右边距（= 拖拽区的内缩：同一列才对齐）。
 pub const CARD_INSET: f32 = theme::DROPZONE_INSET;
-/// 磨砂玻璃的模糊半径（设计稿：卡片底 20px backdrop blur）。
-const CARD_BLUR: f32 = 20.0;
+/// 磨砂玻璃的模糊半径（设计稿 `--card-blur: 20px`）。
+pub const CARD_BLUR: f32 = 20.0;
+/// 卡片描边（设计稿 `border: 1px solid var(--win-border)`）。
+///
+/// **没有这 1px 就不像玻璃**：半透明底 + 模糊 + 投影之上，还要一道能「接住光」的细边，
+/// 卡片才像一片有厚度的玻璃压在上面，而不是一块糊上去的灰。浅色主题同一处在做同一件事。
+pub const CARD_BORDER: f32 = 1.0;
+/// 投影模糊半径（设计稿 `0 8px 28px`）。
+pub const CARD_SHADOW_BLUR: f32 = 28.0;
+/// 投影下移量（设计稿 `0 8px 28px`）。
+pub const CARD_SHADOW_Y: f32 = 8.0;
 /// 关闭按钮直径。
 pub const CLOSE_SIZE: f32 = 20.0;
 
@@ -40,12 +49,14 @@ pub fn chrome(
         .p(px(16.0))
         .rounded(px(theme::RADIUS_CARD))
         .bg(t.card_bg)
-        // 磨砂玻璃：底下是玻璃窗，这里再叠一层模糊，卡片才像「浮在窗上的另一片玻璃」
+        // 磨砂玻璃三件套（设计稿 `.xfer` / `.privacy`）：半透明底 + backdrop 模糊 + **1px 描边**
         .backdrop_filter(vec![gpui::Filter::Blur(px(CARD_BLUR))])
+        .border(px(CARD_BORDER))
+        .border_color(theme::hsla(t.window_border))
         .shadow(vec![gpui::BoxShadow {
             color: theme::hsla(t.card_shadow),
-            offset: gpui::point(px(0.0), px(8.0)),
-            blur_radius: px(24.0),
+            offset: gpui::point(px(0.0), px(CARD_SHADOW_Y)),
+            blur_radius: px(CARD_SHADOW_BLUR),
             spread_radius: px(0.0),
             inset: false,
         }])

@@ -35,3 +35,18 @@ fn the_close_button_gets_reserved_room_in_the_title_row() {
         card::CLOSE_SIZE
     );
 }
+
+#[test]
+fn the_card_keeps_the_frosted_glass_recipe() {
+    // 磨砂玻璃拟物 = 半透明底 + backdrop 模糊 + **1px 描边** + 投影（设计稿 `.xfer` / `.privacy`）
+    // 少任何一件都会「像一块糊上去的灰」——尤其那 1px 描边，最容易在重构里被顺手删掉。
+    assert_eq!(card::CARD_BLUR, 20.0, "设计稿 --card-blur: 20px");
+    assert_eq!(card::CARD_BORDER, 1.0, "设计稿 border: 1px solid var(--win-border)");
+    assert_eq!(card::CARD_SHADOW_Y, 8.0, "设计稿 0 8px 28px");
+    assert_eq!(card::CARD_SHADOW_BLUR, 28.0, "设计稿 0 8px 28px");
+    // 底色必须**半透明**：不透明就没有玻璃可言（0.7 / 0.78 都是设计稿给的）
+    for theme in [glowlink_desktop::theme::Theme::DARK, glowlink_desktop::theme::Theme::LIGHT] {
+        let alpha = theme.card_bg.alpha;
+        assert!(alpha > 0.0 && alpha < 1.0, "卡片底色透明度 {alpha} 不是玻璃");
+    }
+}
