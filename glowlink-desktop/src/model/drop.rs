@@ -30,6 +30,16 @@ impl DropState {
             // 写上目标名反而让人以为已经选好了
             DropState::Denied(reason) => reason.to_string(),
             DropState::Idle | DropState::Over => {
+                // 服务关着：**先说要紧的**——没有服务，设备与文件都无从谈起
+                match zone.service {
+                    crate::model::state::ServiceState::Off => {
+                        return "服务已关闭 · 打开右上角的开关".to_string();
+                    }
+                    crate::model::state::ServiceState::Starting => {
+                        return "正在启动服务…".to_string();
+                    }
+                    crate::model::state::ServiceState::On => {}
+                }
                 if zone.device_count == 0 {
                     "先打开另一台设备的 GlowLink".to_string()
                 } else if let Some(name) = zone.target() {
@@ -77,9 +87,11 @@ pub fn accept_target(
     }
 }
 
-/// 拖拽区文案要知道的现状（一行三个事实，免得参数列表越加越长）。
+/// 拖拽区文案要知道的现状（一行几个事实，免得参数列表越加越长）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Zone<'a> {
+    /// 后台服务现在是什么状态（关着的时候，说什么设备都是空话）。
+    pub service: crate::model::state::ServiceState,
     /// 附近有几台设备。
     pub device_count: usize,
     /// 已选中的那台的名字。

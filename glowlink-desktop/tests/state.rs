@@ -77,20 +77,55 @@ fn transfer_and_pairing_need_a_target() {
 }
 
 #[test]
-fn the_empty_note_stops_pretending_after_a_while() {
-    use glowlink_desktop::model::state::{search_note, still_looking, SEARCH_PATIENCE};
+fn the_empty_note_reports_then_retires() {
+    use glowlink_desktop::model::state::{
+        empty_state, EmptyNote, ServiceState, RESULT_NOTE_HOLD, SEARCH_PATIENCE,
+    };
     use std::time::Duration;
-    // 一直转 = 演给用户看；「搜了 10 秒还没有」就该如实说没有
-    assert_eq!(search_note(Duration::from_secs(0)), "正在搜索附近设备…");
+    let on = ServiceState::On;
+
+    // 刚开：正在搜 + **转**
+    let (note, spinning) = empty_state(on, 0, Duration::from_secs(0)).expect("应显示");
+    assert_eq!(note, EmptyNote::Searching);
+    assert!(spinning, "这时候转圈是对的：确实在做事");
+
+    // 搜满耐心：出结论，**停转**
+    let (note, spinning) =
+        empty_state(on, 0, SEARCH_PATIENCE).expect("应显示结论");
+    assert_eq!(note, EmptyNote::NoDevices);
+    assert!(!spinning, "静止的结论不该还在转");
+
+    // 结论留一小会儿之后**收起**：常驻说明在拖拽区，中央别一直唠叨
     assert_eq!(
-        search_note(SEARCH_PATIENCE - Duration::from_millis(1)),
-        "正在搜索附近设备…"
+        empty_state(on, 0, SEARCH_PATIENCE + RESULT_NOTE_HOLD),
+        None
     );
-    assert_eq!(
-        search_note(SEARCH_PATIENCE),
-        "附近还没有设备 · 让对方也打开 GlowLink",
-        "只报结论不够：还要告诉用户下一步能做什么"
-    );
-    assert!(still_looking(Duration::from_millis(500)));
-    assert!(!still_looking(SEARCH_PATIENCE));
+    assert_eq!(empty_state(on, 0, Duration::from_secs(600)), None);
+
+    // 有设备：图上就有东西，不需要提示挡在中间
+    assert_eq!(empty_state(on, 3, Duration::from_secs(0)), None);
 }
+
+#[test]
+fn the_empty_note_tells_the_truth_about_the_service() {
+    use glowlink_desktop::model::state::{
+        empty_state, EmptyNote, ServiceState, SERVICE_NOTE_HOLD,
+    };
+    use std::time::Duration;
+    // 服务关着还说「正在搜索附近设备」是假话——没有任何东西在搜
+    let (note, spinning) =
+        empty_state(ServiceState::Off, 0, Duration::from_secs(1)).expect("应显示");
+    assert_eq!(note, EmptyNote::ServiceOff);
+    assert!(!spinning, "没在搜就不许转圈");
+    // 「服务已关闭」也是**过渡报告**：看一眼就够，开关就在上面
+    assert_eq!(
+        empty_state(ServiceState::Off, 0, SERVICE_NOTE_HOLD),
+        None
+    );
+    // 拉起服务那几百毫秒：说「正在启动」，不许说「已关闭」
+    let (note, spinning) =
+        empty_state(ServiceState::Starting, 0, Duration::from_secs(0)).expect("应显示");
+    assert_eq!(note, EmptyNote::Starting);
+    assert!(!spinning);
+}
+

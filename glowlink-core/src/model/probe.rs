@@ -19,14 +19,20 @@ use crate::model::ports::{candidate_at, is_port_conflict, DISCOVERY_PORT_SPAN};
 
 /// 单次握手的等待时长。
 ///
-/// 必须**大于**对方发现线程的一轮收包窗口（`query_interval_secs`，默认 1s）：
-/// 对方在 `poll` 里阻塞收包，窗口之间的间隙里到达的报文会被内核丢弃，
-/// 等待太短会在窗口缝隙里连续扑空，把自己人误判成残留占用。
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(600);
+/// 对方发现线程在 `poll` 里阻塞收包（一轮窗口 = `query_interval_secs / 2`，
+/// 默认 500ms），窗口缝隙里到达的报文会被内核丢弃 —— 所以靠**多次重发**覆盖窗口，
+/// 而不是靠把单次等待拉长。
+///
+/// 实测口径（本机回环）：探头发出后活着的守护进程是**亚毫秒级**应答，
+/// 所以等待时长只决定「**没人应答时**要空等多久」。端口空闲是最常见的情况
+/// （服务没在跑时就是这样），原先 4×(600+250) = **3.15 秒**全花在这上面，
+/// 用户点开开关后的「怎么还没动静」就是这么来的。现在 3 次 ×350ms + 2×200ms
+/// 最坏 **1.45 秒**，而三次重发仍横跨 400ms ≥ 一个收包窗口，覆盖没有变差。
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(350);
 /// 重试次数：UDP 可能丢包，多试几次降低误判。
-const ATTEMPTS: usize = 4;
+const ATTEMPTS: usize = 3;
 /// 两次尝试之间的最小间隔：错开对方的收包窗口，避免连续扑在同一缝隙里。
-const RETRY_GAP: Duration = Duration::from_millis(250);
+const RETRY_GAP: Duration = Duration::from_millis(200);
 
 /// 探测结果。
 ///

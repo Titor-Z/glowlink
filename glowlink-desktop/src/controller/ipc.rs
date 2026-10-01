@@ -52,6 +52,8 @@ enum ServiceRequest {
 struct Snapshot {
     /// 守护进程在跑吗（「能 PING 通」才算，不是「状态文件存在」）。
     running: bool,
+    /// 正在拉起守护进程（那几百毫秒里 `running` 还是 false，界面别急着说「已关闭」）。
+    starting: bool,
     devices: Vec<DeviceView>,
     pending: Vec<PendingView>,
     /// 本机发起、等对方输码的配对槽位（码要显示给人核对）。
@@ -106,7 +108,21 @@ impl IpcSource {
         thread::spawn(move || loop {
             // 先处理启停与指令，再抓表：本轮的改动下一轮就能看到，界面感觉是「点完就动」
             for request in service.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
-                if let Err(e) = run_service_request(request) {
+                // 拉起要几百毫秒到几秒：这段时间标成「正在启动」，
+                // 界面才不会在用户刚点开开关时说「服务已关闭」（说反话）。
+                let starting = matches!(request, ServiceRequest::Start);
+                if starting {
+                    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.starting = true;
+                    version.fetch_add(1, Ordering::SeqCst);
+                }
+                let outcome = run_service_request(request);
+                {
+                    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    guard.starting = false;
+                    version.fetch_add(1, Ordering::SeqCst);
+                }
+                if let Err(e) = outcome {
                     fail(&shared, &version, e.to_string());
                 }
             }
@@ -148,6 +164,11 @@ impl IpcSource {
     /// 守护进程现在在跑吗。
     pub fn running(&self) -> bool {
         self.shared.lock().unwrap_or_else(|e| e.into_inner()).running
+    }
+
+    /// 正在拉起服务吗（给「正在启动服务…」那句话用）。
+    pub fn starting(&self) -> bool {
+        self.shared.lock().unwrap_or_else(|e| e.into_inner()).starting
     }
 
     /// 最近一次抓取失败的原因（成功时为 `None`）。
@@ -244,6 +265,7 @@ fn fetch() -> Result<Snapshot> {
     let transfers = client.call("TRANSFERS")?;
     Ok(Snapshot {
         running: true,
+        starting: false,
         devices: devices.iter().skip(1).filter_map(|l| DeviceRow::from_line(l)).map(device_view).collect(),
         pending: pending.iter().skip(1).filter_map(|l| PendingRow::from_line(l)).map(pending_view).collect(),
         pairing_outgoing: pairing_outgoing

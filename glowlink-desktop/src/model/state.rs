@@ -9,6 +9,80 @@
 
 use std::time::Duration;
 
+/// 后台服务对界面而言的三态。
+///
+/// 为什么需要 `Starting`：拉起守护进程要几百毫秒到几秒（进程 + 绑端口 + 拉起发现），
+/// 这段时间「开关」还是关的；界面若据此说「服务已关闭」，就是在说反话。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ServiceState {
+    /// 没在跑（默认：界面不该假设有服务）。
+    #[default]
+    Off,
+    Starting,
+    On,
+}
+
+/// 空态那一行显示什么（`None` = 什么都不显示）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptyNote {
+    /// 正在搜（spinner 转）。
+    Searching,
+    /// 搜过了，附近没有（**报完就退场**，见下面的「多久收起」）。
+    NoDevices,
+    /// 服务没开（这时候说「正在搜索」是假话）。
+    ServiceOff,
+    /// 正在拉起服务。
+    Starting,
+}
+
+/// 服务没跑之后，「服务已关闭」这句留多久。
+pub const SERVICE_NOTE_HOLD: Duration = Duration::from_secs(5);
+/// 「附近还没有设备」这句在报完之后再留多久。
+///
+/// 之后**收起**：常驻的说明已经写在拖拽区（「先打开另一台设备的 GlowLink」），
+/// 空图中央再挂一句同样意思的话，就是把「提示」变成「唠叨」。
+pub const RESULT_NOTE_HOLD: Duration = Duration::from_secs(6);
+
+/// 空态现在该说什么、还转不转。
+///
+/// `waited` = 「当前这个局面」持续了多久（换局面就重新计时，见 `AppRoot::sync`）。
+pub fn empty_state(
+    service: ServiceState,
+    devices: usize,
+    waited: Duration,
+) -> Option<(EmptyNote, bool)> {
+    // 有设备：图上就有东西，不再需要一句提示挡在中间
+    if devices > 0 {
+        return None;
+    }
+    match service {
+        ServiceState::Off => {
+            (waited < SERVICE_NOTE_HOLD).then_some((EmptyNote::ServiceOff, false))
+        }
+        ServiceState::Starting => Some((EmptyNote::Starting, false)),
+        ServiceState::On => {
+            if still_looking(waited) {
+                Some((EmptyNote::Searching, true))
+            } else if waited < SEARCH_PATIENCE + RESULT_NOTE_HOLD {
+                Some((EmptyNote::NoDevices, false))
+            } else {
+                // 报完了：收起。要做什么，拖拽区一直写着
+                None
+            }
+        }
+    }
+}
+
+/// 空态那句话。
+pub fn note_text(note: EmptyNote) -> &'static str {
+    match note {
+        EmptyNote::Searching => "正在搜索附近设备…",
+        EmptyNote::NoDevices => "附近还没有设备 · 让对方也打开 GlowLink",
+        EmptyNote::ServiceOff => "服务已关闭 · 打开右上角的开关",
+        EmptyNote::Starting => "正在启动服务…",
+    }
+}
+
 /// 界面状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -150,21 +224,11 @@ impl UiState {
     }
 }
 
-/// 搜了多少秒之后就**不再假装还在搜**。
+/// 搜了多少秒之后就**不再假装还在搜**（之后进入「报完就收起」的窗口期）。
 ///
 /// 「搜索中」超过这个时长，事实就是「附近没有设备」——继续转 spinner 是演给用户看，
 /// 而且会一直吃 60fps 的重绘（空转 spinner 也是每帧都在动）。
 pub const SEARCH_PATIENCE: Duration = Duration::from_secs(10);
-
-/// 空态那句话：刚开始是「正在搜索」，久了就如实说没有。
-pub fn search_note(waited: Duration) -> &'static str {
-    if still_looking(waited) {
-        "正在搜索附近设备…"
-    } else {
-        // 只报结论不够：用户盯着这句话时唯一的疑问是「我该怎么办」
-        "附近还没有设备 · 让对方也打开 GlowLink"
-    }
-}
 
 /// spinner 还转不转（不转的时候 tick 降到慢档，省掉每帧重绘）。
 pub fn still_looking(waited: Duration) -> bool {

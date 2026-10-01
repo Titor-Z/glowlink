@@ -4,27 +4,28 @@
 
 // 判定按**设备 ID**（不是名字）：名字可以重，而「发给谁」必须唯一。
 use glowlink_desktop::model::drop::{accept_target, DropState};
+use glowlink_desktop::model::state::ServiceState;
 
 #[test]
 fn the_zone_note_always_says_what_can_happen_now() {
     use glowlink_desktop::model::drop::Zone;
     // 一台都没有：说清前置条件（不是「拖拽文件到这里」那种必然被拒的邀请）
-    let empty = Zone { device_count: 0, selected: None, only: None };
+    let empty = Zone { service: ServiceState::On, device_count: 0, selected: None, only: None };
     assert_eq!(DropState::Idle.note(empty), "先打开另一台设备的 GlowLink");
     assert_eq!(DropState::Over.note(empty), "先打开另一台设备的 GlowLink");
 
     // 多台、没选：**提前**说「先选择一台设备」（用户拍板：别等丢进去才拒）
-    let many = Zone { device_count: 3, selected: None, only: None };
+    let many = Zone { service: ServiceState::On, device_count: 3, selected: None, only: None };
     assert_eq!(DropState::Idle.note(many), "先选择一台设备");
     assert_eq!(DropState::Over.note(many), "先选择一台设备");
 
     // 只有一台：**免选**，它就是目标——把「发给谁」摆在明面上
-    let single = Zone { device_count: 1, selected: None, only: Some("甲机") };
+    let single = Zone { service: ServiceState::On, device_count: 1, selected: None, only: Some("甲机") };
     assert_eq!(single.target(), Some("甲机"));
     assert_eq!(DropState::Idle.note(single), "拖到此处 → 甲机");
 
     // 选中了：显示目标名（多台时也一样）；悬停不改变「发给谁」
-    let picked = Zone { device_count: 3, selected: Some("乙机"), only: None };
+    let picked = Zone { service: ServiceState::On, device_count: 3, selected: Some("乙机"), only: None };
     assert_eq!(DropState::Idle.note(picked), "拖到此处 → 乙机");
     assert_eq!(DropState::Over.note(picked), "拖到此处 → 乙机");
 }
@@ -34,7 +35,7 @@ fn denied_text_never_shows_a_target() {
     use glowlink_desktop::model::drop::Zone;
     // 被拒的原因是「还没选」——写上目标名会让人以为已经选好了
     let denied = DropState::Denied("先选择一台设备");
-    let picked = Zone { device_count: 3, selected: Some("甲机"), only: None };
+    let picked = Zone { service: ServiceState::On, device_count: 3, selected: Some("甲机"), only: None };
     assert_eq!(denied.note(picked), "先选择一台设备");
     assert!(denied.is_denied());
     assert!(!DropState::Over.is_denied(), "悬停不是失败");
@@ -71,3 +72,21 @@ fn a_stale_selection_is_not_silently_replaced() {
     assert_eq!(accept_target(&["甲机", "乙机"], Some("丙机")), Err("选中的设备已不在了"));
 }
 
+#[test]
+fn the_zone_says_the_service_is_off_before_anything_else() {
+    use glowlink_desktop::model::drop::Zone;
+    use glowlink_desktop::model::state::ServiceState;
+    // 服务关着的时候，说什么「几台设备 / 发给谁」都是空话：先说要紧的
+    let off = Zone { service: ServiceState::Off, device_count: 0, ..Default::default() };
+    assert_eq!(DropState::Idle.note(off), "服务已关闭 · 打开右上角的开关");
+    let starting = Zone { service: ServiceState::Starting, device_count: 0, ..Default::default() };
+    assert_eq!(DropState::Idle.note(starting), "正在启动服务…");
+    // 服务在跑才轮到设备那几句话
+    let on = Zone {
+        service: ServiceState::On,
+        device_count: 1,
+        only: Some("甲机"),
+        selected: None,
+    };
+    assert_eq!(DropState::Idle.note(on), "拖到此处 → 甲机");
+}

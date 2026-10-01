@@ -167,12 +167,15 @@ pub struct AppRoot {
     halo: f32,
     /// 品牌辉光的相位（`0..1`）：和呼吸一样由界面时钟推进。
     brand_phase: f32,
-    /// 空态 spinner 的相位（`0..1`）与「开始搜索的时刻」。
-    ///
-    /// 搜久了就不再转（[`state::still_looking`]）：一直转等于演给用户看，
-    /// 而且每帧都在动就要一直吃 60fps 的重绘。
+    /// 空态 spinner 的相位（`0..1`）。
     spin: f32,
-    search_since: std::time::Instant,
+    /// 「当前这个局面」从什么时候开始（服务状态或设备有无一变就重新计时）。
+    ///
+    /// 空态那几句话是**过渡报告**，不是常驻说明：搜 10 秒后出结论、结论再留几秒就收起
+    /// （常驻的说明在拖拽区）。所以这里记的是局面的起点，不是进程的启动时刻。
+    note_since: std::time::Instant,
+    /// 上一拍看到的局面（服务状态 + 有没有设备），用来判断「换局面了」。
+    last_situation: Option<(state::ServiceState, bool)>,
     /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
     halo_fast: f32,
     /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
@@ -258,7 +261,8 @@ impl AppRoot {
             halo: 0.0,
             brand_phase: 0.0,
             spin: 0.0,
-            search_since: std::time::Instant::now(),
+            note_since: std::time::Instant::now(),
+            last_situation: None,
             halo_fast: 0.0,
             flowing_peer: None,
             connections: Vec::new(),
@@ -505,6 +509,25 @@ impl AppRoot {
             .ok_or("选中的设备已不在了")
     }
 
+    /// 后台服务对界面而言的三态（`Starting` 那几百毫秒不能说「已关闭」）。
+    pub fn service_state(&self) -> state::ServiceState {
+        match self.service.as_ref() {
+            None => state::ServiceState::Off,
+            Some(service) if service.starting() => state::ServiceState::Starting,
+            Some(service) if service.running() => state::ServiceState::On,
+            Some(_) => state::ServiceState::Off,
+        }
+    }
+
+    /// 空态现在该说什么、还转不转（纯规则见 [`state::empty_state`]）。
+    pub fn empty_note(&self) -> Option<(state::EmptyNote, bool)> {
+        state::empty_state(
+            self.service_state(),
+            self.devices.len(),
+            self.note_since.elapsed(),
+        )
+    }
+
     /// 拖拽区文案要的现状：几台、选了哪台、唯一那台是谁。
     fn zone(&self) -> drop::Zone<'_> {
         let selected = self.selected.as_deref().and_then(|id| {
@@ -518,7 +541,12 @@ impl AppRoot {
         } else {
             None
         };
-        drop::Zone { device_count: self.devices.len(), selected, only }
+        drop::Zone {
+            device_count: self.devices.len(),
+            selected,
+            only,
+            service: self.service_state(),
+        }
     }
 
     /// 拒收：改文案 + 抖一下，1.8s 后自己回到常态（设计稿）。
@@ -782,10 +810,6 @@ impl AppRoot {
         self.brand_phase =
             (self.brand_phase + dt / titlebar::BRAND_PERIOD_SECS).fract();
         self.spin = (self.spin + dt / spinner::SPINNER_PERIOD_SECS).fract();
-        // 从「发现态」掉回「搜索中」时重新计时：那是一次新的搜索，不是旧的延续
-        if !self.state.phase().shows_searching() {
-            self.search_since = std::time::Instant::now();
-        }
         // 交替高亮：只有真在传的时候跳（传完就停在静止态）
         self.pulse = (self.pulse + dt / transfer::PULSE_PERIOD_SECS).fract();
         self.halo_fast = (self.halo_fast + dt / HALO_FAST_SECS).fract();
@@ -793,11 +817,16 @@ impl AppRoot {
             Some(row) if row.state == TransferState::Running => Some(row.peer.clone()),
             _ => None,
         };
-        // spinner 在转也算「有东西在动」：那时候必须走快档，否则 20fps 的转圈看着像卡
+        // **只有真的在转**才需要快档：静止的结论句不该继续吃 60fps 重绘
+        // （「一直提示 + 一直转」正是用户抱怨的那两件事）
+        let spinning = self
+            .empty_note()
+            .map(|(_, spinning)| spinning)
+            .unwrap_or(false);
         let busy = self.dragging.is_some()
             || !self.tint.is_settled()
             || !self.motion.is_settled()
-            || (self.state.phase().shows_searching() && state::still_looking(self.search_since.elapsed()));
+            || spinning;
         if busy {
             TICK_FAST
         } else {
@@ -1183,6 +1212,14 @@ impl AppRoot {
                 changed = true;
             }
         }
+        // 局面（服务状态 + 有没有设备）一变就重新计时：那是一次新的搜索/新的等待，
+        // 不是上一个局面的延续——不重置的话「刚打开服务」会立刻显示上一个局面的结论
+        let situation = (self.service_state(), !self.devices.is_empty());
+        if self.last_situation != Some(situation) {
+            self.last_situation = Some(situation);
+            self.note_since = std::time::Instant::now();
+            changed = true;
+        }
         if service_on != self.service_on {
             log::info!("服务开关：{}", if service_on { "开" } else { "关" });
             self.service_on = service_on;
@@ -1539,13 +1576,7 @@ impl Render for AppRoot {
                     // **必须画在图区里**：设计稿的 `.empty-note { top: 268px }` 是相对
                     // `.graph` 的；画到根节点上就少了标题栏那 44px，
                     // 提示会糊到盘底下、把机器名挤到提示下面去（截图上一眼能看出来）。
-                    .when(self.state.phase().shows_searching(), |el| {
-                        el.child(spinner::empty_note(
-                            &t,
-                            self.spin,
-                            self.search_since.elapsed(),
-                        ))
-                    })
+                    .child(spinner::empty_note(&t, self.empty_note(), self.spin))
                     // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
                     // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
