@@ -366,6 +366,18 @@ impl TransferSource for IpcSource {
         Ok(())
     }
 
+    /// 同步调用（不排队）：调用方在后台线程里等这一下。
+    ///
+    /// 回执是 `OK <编号>`——**校验码不在里面**：这一下只是入队，
+    /// 码要等这个文件真的轮到、握完手，才会出现在它的 `TRANSFERS` 行里。
+    fn send(&self, device_id: &str, path: &str) -> Result<String> {
+        let state = read_state()?.ok_or_else(|| GlowError::Missing("后台服务没在跑".into()))?;
+        let mut client = IpcClient::connect(&state)?;
+        let lines = client.call(&format!("SEND {device_id} {path}"))?;
+        let first = lines.first().ok_or_else(|| GlowError::Protocol("SEND 没有回执".into()))?;
+        Ok(first.trim_start_matches("OK ").trim().to_string())
+    }
+
     fn decide(&self, token: &str, accept: bool) -> Result<()> {
         let verb = if accept { "ACCEPT" } else { "REJECT" };
         self.submit(format!("{verb} {token}"));

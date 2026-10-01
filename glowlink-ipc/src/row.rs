@@ -149,6 +149,17 @@ impl TransferState {
         }
     }
 
+    /// 这一档还能再变吗（结束态不再变：进度、文案、按钮都由它决定）。
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TransferState::Done
+                | TransferState::Failed
+                | TransferState::Rejected
+                | TransferState::Canceled
+        )
+    }
+
     pub fn from_token(token: &str) -> Self {
         match token {
             "queued" => TransferState::Queued,

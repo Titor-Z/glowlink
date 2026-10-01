@@ -180,3 +180,70 @@ fn a_queued_file_says_waiting_not_zero_percent() {
     assert!(!card.meta.contains("0 B"), "排队中不该出现「0 B / …」这种进度读数：{}", card.meta);
     assert_eq!(card.fraction, 0.0, "条是空的（还没开始）");
 }
+
+// ── 批次（一次投放 = 一批） ──
+
+fn row_named(name: &str, state: TransferState) -> TransferRow {
+    let mut r = row(0, 100, state);
+    r.name = name.to_string();
+    r.peer = "甲机".into();
+    // 批次只管**发出去**的那些（收下来的不计入这批）
+    r.direction = TransferDirection::Send;
+    r
+}
+
+#[test]
+fn a_batch_counts_position_and_total() {
+    use glowlink_desktop::model::transfer::Batch;
+    let batch = Batch { peer: "甲机".into(), names: vec!["一.mov".into(), "二.mov".into(), "三.mov".into()] };
+    // 第一个在传：1/3
+    let rows = vec![
+        row_named("一.mov", TransferState::Running),
+        row_named("二.mov", TransferState::Queued),
+        row_named("三.mov", TransferState::Queued),
+    ];
+    assert_eq!(batch.position(&rows), (1, 3));
+    assert_eq!(batch.label(&rows).as_deref(), Some("1/3"));
+    // 第一个传完、第二个在传：2/3（位置靠「已结束几个」推出来，不靠猜）
+    let rows = vec![
+        row_named("一.mov", TransferState::Done),
+        row_named("二.mov", TransferState::Running),
+        row_named("三.mov", TransferState::Queued),
+    ];
+    assert_eq!(batch.position(&rows), (2, 3));
+    assert!(!batch.is_finished(&rows));
+    // 全完了：位置停在总数，批次结束
+    let rows = vec![
+        row_named("一.mov", TransferState::Done),
+        row_named("二.mov", TransferState::Done),
+        row_named("三.mov", TransferState::Failed),
+    ];
+    assert_eq!(batch.position(&rows), (3, 3));
+    assert!(batch.is_finished(&rows), "失败也是终态：批次不该永远挂着");
+}
+
+#[test]
+fn a_single_file_batch_has_no_position_label() {
+    use glowlink_desktop::model::transfer::Batch;
+    // 一个文件写「1/1」是废话，还占掉文件名的地方
+    let batch = Batch { peer: "甲机".into(), names: vec!["只有一个.mov".into()] };
+    let rows = vec![row_named("只有一个.mov", TransferState::Running)];
+    assert_eq!(batch.label(&rows), None);
+}
+
+#[test]
+fn canceling_a_batch_targets_every_unfinished_row_of_that_peer() {
+    use glowlink_desktop::model::transfer::Batch;
+    let batch = Batch { peer: "甲机".into(), names: vec!["一.mov".into(), "二.mov".into()] };
+    let mut other = row_named("别的.mov", TransferState::Running);
+    other.peer = "乙机".into();
+    let rows = vec![
+        row_named("一.mov", TransferState::Running),
+        row_named("二.mov", TransferState::Queued),
+        row_named("三.mov", TransferState::Done),
+        other,
+    ];
+    let targets: Vec<&str> = batch.cancel_targets(&rows).iter().map(|r| r.name.as_str()).collect();
+    // 只掐「发给这台、还没结束」的：别的设备不动，已经结束的也不动
+    assert_eq!(targets, vec!["一.mov", "二.mov"]);
+}

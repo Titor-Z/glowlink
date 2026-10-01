@@ -12,7 +12,7 @@ use gpui::{
     WindowBounds, WindowOptions,
 };
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::controller::{
@@ -28,8 +28,13 @@ use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{Phase, UiState};
 use crate::theme::{self, Theme};
-use crate::model::drop::DropState;
+use crate::model::drop::{self, DropState};
 use crate::view::{dropzone, node, paircard, progress, titlebar};
+
+/// 拒收态保持多久（设计稿：抖一下 + 提示 1.8s，然后自己回到常态）。
+const DENY_HOLD: Duration = Duration::from_millis(1800);
+/// 文件悬在窗口上多久没动静就当「已经不悬了」（离开窗口没有回调）。
+const OVER_HOLD: Duration = Duration::from_millis(600);
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -75,8 +80,20 @@ pub struct AppRoot {
     floating: Vec<(String, layout::Point, f32)>,
     /// 上次布局用的设备 ID，用来判断「集合是否真变了」。
     placed_ids: Vec<String>,
-    /// 底部拖拽区的状态（拖入/拒收由 `FileDropEvent` 驱动，见下一步）。
+    /// 底部拖拽区的状态（拖入 / 拒收由文件的拖放事件驱动）。
     drop: DropState,
+    /// 拒收态要显示到什么时候（设计稿 1.8s 后自动回到常态）。
+    deny_until: Option<std::time::Instant>,
+    /// 文件正悬在窗口上的最后时刻：拖放离开窗口**没有回调**（gpui 把
+    /// `FileDropEvent::Exited` 当输入事件发，不会派发到我们这一层），
+    /// 所以用「久无动静」来收起高亮。
+    over_until: Option<std::time::Instant>,
+    /// 用户点拖拽区选中的文件（后台线程写完放进来，`sync` 取走）。
+    picked: Arc<Mutex<Vec<std::path::PathBuf>>>,
+    /// 一批发送里失败的说明（后台线程写，`sync` 取走并提示）。
+    send_errors: Arc<Mutex<Vec<String>>>,
+    /// 正在显示的这一批（一次投放 = 一批，守护进程按顺序发）。
+    batch: Option<transfer::Batch>,
     /// 已选中的目标设备名（点设备节点选中；一台设备时不必选）。
     selected: Option<String>,
     /// 配对能力（预览模式下没有）。
@@ -194,6 +211,11 @@ impl AppRoot {
             floating: Vec::new(),
             placed_ids: Vec::new(),
             drop: DropState::Idle,
+            deny_until: None,
+            over_until: None,
+            picked: Arc::new(Mutex::new(Vec::new())),
+            send_errors: Arc::new(Mutex::new(Vec::new())),
+            batch: None,
             selected: None,
             pairing,
             transfers,
@@ -441,6 +463,150 @@ impl AppRoot {
         }
     }
 
+    /// 点一台设备 = 选中它（再点一下取消）。
+    ///
+    /// 设计稿的 `select()`：单选、可反选；选中后拖拽区文案变成「拖到此处 → 甲机」。
+    /// 选的是**设备 ID**（名字可以重，见 `drop::accept_target`）。
+    pub fn toggle_selected(&mut self, id: &str) {
+        if self.selected.as_deref() == Some(id) {
+            self.selected = None;
+            log::info!("取消选择设备 {id}");
+        } else {
+            self.selected = Some(id.to_string());
+            log::info!("选中设备 {id}");
+        }
+    }
+
+    /// 这批文件该发给谁（`Err` 里是给用户看的那句话）。
+    fn drop_target(&self) -> std::result::Result<DeviceView, &'static str> {
+        let ids: Vec<&str> = self.devices.iter().map(|d| d.id.as_str()).collect();
+        let id = drop::accept_target(&ids, self.selected.as_deref())?;
+        self.devices
+            .iter()
+            .find(|device| device.id == id)
+            .cloned()
+            .ok_or("选中的设备已不在了")
+    }
+
+    /// 拖拽区要显示的目标名（没选就是 `None`）。
+    fn drop_target_name(&self) -> Option<&str> {
+        let id = self.selected.as_deref()?;
+        self.devices
+            .iter()
+            .find(|device| device.id == id)
+            .map(|device| device.name.as_str())
+    }
+
+    /// 拒收：改文案 + 抖一下，1.8s 后自己回到常态（设计稿）。
+    fn deny_drop(&mut self, reason: &'static str) {
+        log::info!("投放被拒：{reason}");
+        // 选中的设备没了就顺手清掉选择，否则用户会一直对着一台不存在的目标
+        if reason == "选中的设备已不在了" {
+            self.selected = None;
+        }
+        self.drop = DropState::Denied(reason);
+        self.deny_until = Some(std::time::Instant::now() + DENY_HOLD);
+    }
+
+    /// 用户扔进来一批文件（拖放或选文件都走这里）。
+    ///
+    /// **一次投放 = 一批**：全部排进守护进程的发送队列（它按顺序一个文件一个文件地发），
+    /// 界面只留一条卡片，位置用 `2/5` 表示。
+    pub fn accept_files(&mut self, paths: Vec<std::path::PathBuf>) {
+        if paths.is_empty() {
+            return;
+        }
+        let target = match self.drop_target() {
+            Ok(target) => target,
+            Err(reason) => {
+                self.deny_drop(reason);
+                return;
+            }
+        };
+        let Some(transfers) = self.transfers.clone() else {
+            self.deny_drop("后台服务没在跑");
+            return;
+        };
+        let names: Vec<String> = paths
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| path.display().to_string())
+            })
+            .collect();
+        log::info!(
+            "投放到「{}」：{} 个文件（{}）",
+            target.name,
+            names.len(),
+            names.join("、")
+        );
+        self.batch = Some(transfer::Batch { peer: target.name.clone(), names });
+        self.drop = DropState::Idle;
+        self.deny_until = None;
+
+        // 入队是同步 IPC（几十微秒），但**必须在后台线程**：这是真实连接，
+        // 放在拖放回调里就是「窗口卡一下」（gpui 的 executor 是裸 pollster，
+        // 阻塞它会连其他后台任务一起拖住）。
+        let errors = Arc::clone(&self.send_errors);
+        let device_id = target.id.clone();
+        std::thread::spawn(move || {
+            for path in paths {
+                let text = path.to_string_lossy().to_string();
+                if let Err(e) = transfers.send(&device_id, &text) {
+                    let note = format!("{}：{e}", path.display());
+                    log::info!("排入发送队列失败：{note}");
+                    errors.lock().unwrap_or_else(|e| e.into_inner()).push(note);
+                }
+            }
+        });
+    }
+
+    /// 点拖拽区 = 用系统对话框选文件（设计稿的 `fileIn.click()`）。
+    ///
+    /// **先查前置条件**：没有可发的设备就别让用户白挑一遍文件
+    /// （拖拽区上本来写着「先选择一台设备」，挑完再说「不能发」是耍人）。
+    pub fn pick_files(&mut self) {
+        if let Err(reason) = self.drop_target() {
+            self.deny_drop(reason);
+            return;
+        }
+        let picked = Arc::clone(&self.picked);
+        // 对话框是**阻塞**的（原生模态窗口）：只能后台开，选完把结果放回共享状态，
+        // 由 `sync` 取走——绝不在渲染或事件回调里等它。
+        std::thread::spawn(move || {
+            let files = rfd::FileDialog::new().pick_files().unwrap_or_default();
+            if !files.is_empty() {
+                picked.lock().unwrap_or_else(|e| e.into_inner()).extend(files);
+            }
+        });
+    }
+
+    /// 卡片上的 ✕：在传 ⇒ **取消这一批**；已结束 ⇒ 收起卡片。
+    pub fn close_transfer_card(&mut self) {
+        let Some(row) = self.transfer.clone() else {
+            return;
+        };
+        if row.state.is_terminal() {
+            self.dismiss_transfer(&row.token);
+            return;
+        }
+        let Some(batch) = self.batch.clone() else {
+            self.cancel_transfer(&row.token);
+            return;
+        };
+        // 整批：正在传的那个 + 还在排队的那些（守护进程按编号各自收尾）
+        let rows = self
+            .transfers
+            .as_ref()
+            .map(|source| source.transfers())
+            .unwrap_or_default();
+        for target in batch.cancel_targets(&rows) {
+            self.cancel_transfer(&target.token);
+        }
+        log::info!("取消这一批（「{}」共 {} 个文件）", batch.peer, batch.total());
+    }
+
     /// 放弃一次配对（配对卡上的 ✕，或断开那台设备的气泡）。
     ///
     /// 两件事：① 让守护进程**放弃**这次配对（它还要掐掉那条连接，
@@ -478,6 +644,22 @@ impl AppRoot {
 
     /// 用户主动关掉传输卡（设计稿：完成后不自动消失，由用户自己关）。
     pub fn dismiss_transfer(&mut self, token: &str) {
+        // 这批已经结束了：把批次也放下（它的使命就是让卡片知道「2/5」）
+        if self
+            .batch
+            .as_ref()
+            .map(|batch| batch.names.iter().any(|_| true))
+            .unwrap_or(false)
+        {
+            let rows: Vec<TransferRow> = self
+                .transfers
+                .as_ref()
+                .map(|source| source.transfers())
+                .unwrap_or_default();
+            if self.batch.as_ref().map(|b| b.is_finished(&rows)).unwrap_or(false) {
+                self.batch = None;
+            }
+        }
         if !self.dismissed.iter().any(|t| t == token) {
             self.dismissed.push(token.to_string());
         }
@@ -859,6 +1041,53 @@ impl AppRoot {
             }
         }
 
+        // 后台线程交回来的东西：先取走（只有它们会让界面有反应）
+        let picked: Vec<std::path::PathBuf> = {
+            let mut guard = self.picked.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        if !picked.is_empty() {
+            changed = true;
+            self.accept_files(picked);
+        }
+        let errors: Vec<String> = {
+            let mut guard = self.send_errors.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        if !errors.is_empty() {
+            changed = true;
+            self.deny_drop("发送没能开始");
+            for note in errors {
+                log::info!("发送失败：{note}");
+            }
+        }
+        // 拒收态到时自动收回（设计稿 1.8s）——**不靠动画自己复位**，
+        // 因为要复位的是状态而不只是那一下抖动
+        if let Some(at) = self.deny_until {
+            if std::time::Instant::now() >= at {
+                self.deny_until = None;
+                if self.drop.is_denied() {
+                    self.drop = DropState::Idle;
+                    changed = true;
+                }
+            }
+        }
+        // 文件不再悬在窗口上：高亮自己退掉（离开窗口没有回调可听）
+        if let Some(at) = self.over_until {
+            if std::time::Instant::now() >= at && self.drop == DropState::Over {
+                self.over_until = None;
+                self.drop = DropState::Idle;
+                changed = true;
+            }
+        }
+        // 选中的设备下线了：清掉选择（拖拽区文案随之回到「先选择一台设备」）
+        if let Some(id) = self.selected.clone() {
+            if !self.devices.iter().any(|device| device.id == id) {
+                log::info!("选中的设备已下线：{id}");
+                self.selected = None;
+                changed = true;
+            }
+        }
         if service_on != self.service_on {
             log::info!("服务开关：{}", if service_on { "开" } else { "关" });
             self.service_on = service_on;
@@ -961,6 +1190,7 @@ impl Render for AppRoot {
                     name: device.name.clone(),
                     kind: device.kind,
                 };
+                let select_id = device.id.clone();
                 let visual = node::node(
                     &t,
                     node::NodeSpec {
@@ -980,6 +1210,12 @@ impl Render for AppRoot {
                         halo: if transferring { self.halo_fast } else { self.halo },
                     },
                 )
+                // 单击 = 选中它（设计稿的 `select()`：单选、再点取消）。
+                // 与拖动共存在同一个元素上：位移一大就变成拖动（gpui 自己分流）。
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_selected(&select_id);
+                    cx.notify();
+                }))
                 // 拖动：被拖起来的**就是这枚节点自己**（不是另做一个拖影）。
                 // 它在运动系统里是「运动学物体」：位置 1:1 跟指针，并作为不可推动的
                 // 障碍物去推别人（拖动的东西必须和指针粘在一起）。
@@ -1064,6 +1300,29 @@ impl Render for AppRoot {
             })
             .collect();
 
+        // 传输卡要用的数字：**在渲染前算好**（渲染层不做判断，也不每帧重算速度）
+        let progress_fraction = self.progress.x() as f64;
+        let transfer_card = self.transfer.clone().map(|row| {
+            let rows: Vec<TransferRow> = self
+                .transfers
+                .as_ref()
+                .map(|source| source.transfers())
+                .unwrap_or_default();
+            let mut numbers = transfer::numbers(&row, self.transfer_speed);
+            let label = self.batch.as_ref().and_then(|batch| batch.label(&rows));
+            // 整批传完：元信息写「这批多大」，而不是最后那一个文件
+            if let Some(batch) = self.batch.as_ref() {
+                if batch.is_finished(&rows) {
+                    numbers.meta = format!(
+                        "{} 个文件 · 共 {}",
+                        batch.total(),
+                        crate::model::format::human_size(batch.total_bytes(&rows))
+                    );
+                }
+            }
+            (row, numbers, label)
+        });
+
         let show_devices = self.state.phase().shows_devices();
         // 连上之后：本机盘也跟着缩小（「把设备拉过来一起变小」）并保持高亮
         let connected_any = !self.connections.is_empty();
@@ -1076,6 +1335,28 @@ impl Render for AppRoot {
             // 这层挂在**整窗根节点**上：不再自己划一块「落点区」的方框——
             // 那块方框按**指针**算、判定却按**气泡**算，两者不一致时就会出现
             // 「灯亮了、一松手却没吸上」（用户真机看到过）。现在判定只看距离。
+            // ── 文件拖放（与设备拖拽并存：gpui 按**拖拽值的类型**分发） ──
+            //
+            // 命中区是**整窗**（不只是那条 44px 的框）：拖拽区是「提示与状态」，
+            // 不是一个小按钮——从 Finder 拖过来时，任何人都会直接往窗口上扔。
+            .on_drag_move(cx.listener(
+                |this, _event: &DragMoveEvent<gpui::ExternalPaths>, _window, cx| {
+                    // 悬停高亮：等用户真把文件拖进来才亮（提前亮＝预判他要做什么）
+                    this.over_until =
+                        Some(std::time::Instant::now() + OVER_HOLD);
+                    if !this.drop.is_denied() {
+                        this.drop = DropState::Over;
+                    }
+                    cx.notify();
+                },
+            ))
+            .on_drop(cx.listener(
+                |this, paths: &gpui::ExternalPaths, _window, cx| {
+                    let files = paths.paths().to_vec();
+                    this.accept_files(files);
+                    cx.notify();
+                },
+            ))
             .on_drop(cx.listener(
                 |this, drag: &DeviceDrag, window, cx| {
                     // 判定用**松手那一刻**的气泡中心（看的是「东西落到盘上」，
@@ -1213,16 +1494,30 @@ impl Render for AppRoot {
                     .when(show_devices, |el| el.children(devices)),
             )
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
-            .child(dropzone::dropzone(&t, self.drop, self.selected.as_deref()))
+            .child(dropzone::dropzone(
+                &t,
+                self.drop,
+                self.drop_target_name(),
+                cx.listener(|this, _, _, cx| {
+                    this.pick_files();
+                    cx.notify();
+                }),
+            ))
             // 浮层卡（配对 / 传输）画在拖拽区**之上**（层级：拖拽区 < 卡 < 隐私浮层）：
             // 两张卡占**同一个槽位**（同一个 `view::card` 外壳），所以同时出现时
             // 配对卡优先——配对是等人拍板的事，传输卡让它一步回去（「一次只强调一件事」）。
             // 槽位只有一个，优先级：**等人的请求**（接收侧）> 出示码（发起侧）> 传输卡
             .when(self.pair.is_none() && self.pair_request.is_none(), |el| {
-                el.when_some(self.transfer.clone(), |el, row| {
-                    let numbers = transfer::numbers(&row, self.transfer_speed);
-                    let fraction = self.progress.x() as f64;
-                    el.child(progress::card(&t, &row, &numbers, fraction, cx))
+                el.when_some(transfer_card, |el, (row, numbers, label)| {
+                    let fraction = progress_fraction;
+                    el.child(progress::card(
+                        &t,
+                        &row,
+                        &numbers,
+                        fraction,
+                        label.as_deref(),
+                        cx,
+                    ))
                 })
             })
             .when_some(self.pair_request.clone(), |el, request| {

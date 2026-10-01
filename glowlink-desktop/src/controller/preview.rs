@@ -185,6 +185,11 @@ impl TransferSource for PreviewTransfer {
         Ok(())
     }
 
+    fn send(&self, _device_id: &str, _path: &str) -> Result<String> {
+        // 预览不真发：给个编号，界面照常走「入队 → 卡片」那条路
+        Ok("001".into())
+    }
+
     fn decide(&self, _token: &str, _accept: bool) -> Result<()> {
         Ok(())
     }

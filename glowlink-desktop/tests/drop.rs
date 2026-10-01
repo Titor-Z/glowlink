@@ -2,6 +2,7 @@
 //!
 //! 渲染测不动（要真实窗口 + 真实 OS 拖放），所以规则全部抽成纯函数钉在这里。
 
+// 判定按**设备 ID**（不是名字）：名字可以重，而「发给谁」必须唯一。
 use glowlink_desktop::model::drop::{accept_target, DropState};
 
 #[test]
@@ -26,15 +27,15 @@ fn denied_text_never_shows_a_target() {
 #[test]
 fn a_single_device_does_not_need_to_be_selected_first() {
     // 用户拍板的语义：一台设备时直接发给它，多台才要求先点选
-    assert_eq!(accept_target(&["甲机"], None).unwrap().as_deref(), Some("甲机"));
-    assert_eq!(accept_target(&["甲机"], Some("甲机")).unwrap().as_deref(), Some("甲机"));
+    assert_eq!(accept_target(&["甲机"], None).unwrap(), "甲机");
+    assert_eq!(accept_target(&["甲机"], Some("甲机")).unwrap(), "甲机");
 }
 
 #[test]
 fn several_devices_require_an_explicit_pick() {
     let devices = ["甲机", "乙机"];
     assert_eq!(accept_target(&devices, None), Err("先选择一台设备"));
-    assert_eq!(accept_target(&devices, Some("乙机")).unwrap().as_deref(), Some("乙机"));
+    assert_eq!(accept_target(&devices, Some("乙机")).unwrap(), "乙机");
 }
 
 #[test]

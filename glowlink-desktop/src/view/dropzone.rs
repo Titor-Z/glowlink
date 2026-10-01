@@ -29,7 +29,14 @@ fn shake_offset(delta: f32) -> f32 {
 }
 
 /// 拖拽区。
-pub fn dropzone(t: &Theme, state: DropState, target: Option<&str>) -> impl IntoElement {
+///
+/// `on_click` 由调用方给（点它 = 用系统对话框选文件；没有可发的设备时会被调用方拒掉）。
+pub fn dropzone(
+    t: &Theme,
+    state: DropState,
+    target: Option<&str>,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     let (border, ink, bg) = match state {
         // 设计稿：拖入时边框转品牌蓝、底色上一层淡蓝
         DropState::Over => (theme::NODE_SELF, t.text_secondary, Some(t.drop_hover_bg)),
@@ -75,7 +82,8 @@ pub fn dropzone(t: &Theme, state: DropState, target: Option<&str>) -> impl IntoE
         .text_color(ink)
         // hover 只提亮文字（设计稿 `.dropzone:hover { color: text-hint }`）：
         // 边框不动，免得跟「拖入」状态抢信号
-        .hover(move |style| style.text_color(t.text_hint));
+        .hover(move |style| style.text_color(t.text_hint))
+        .on_click(on_click);
 
     if !state.is_denied() {
         return base.into_any_element();

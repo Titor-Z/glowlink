@@ -20,6 +20,11 @@ glowlink-ipc = { path = "../glowlink-ipc" }
 gpui-ce = "0.2.2"
 gpui_ce_platform = { version = "0.1.0", features = ["font-kit"] }
 
+# 点拖拽区「选文件」用的系统文件对话框。
+# 它是**阻塞**的（会开一个原生模态窗口），所以只能从后台线程调，
+# 结果经共享状态回灌给界面（渲染/事件回调里绝不调它）。
+rfd = "0.15"
+
 # GPUI 的问题（字体/渲染）会把原因直接打进日志，所以必须真装一个 logger：
 # 没有它 `RUST_LOG=info` 是空转，"先看 stderr" 这条排查规则就落不了地。
 env_logger = "0.11"

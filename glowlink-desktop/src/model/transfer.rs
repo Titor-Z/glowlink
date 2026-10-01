@@ -183,3 +183,79 @@ pub fn pulse(phase: f32) -> (f32, f32) {
         (0.0, bump((cycle - 0.5) * 2.0))
     }
 }
+
+// ── 批次：一次投放 = 一批（守护进程按顺序一个文件一个文件地发） ──
+
+/// 一次投放进去的那几个文件。
+///
+/// 卡片只有一张（设计稿就一个槽位），所以「第几个 / 共几个」靠它算：
+/// 当前在传的那个 = 这批里**还没结束**的第一个。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Batch {
+    /// 发给谁（对端显示名——同时是「哪几行属于这一批」的判据）。
+    pub peer: String,
+    /// 这批的文件名（拖进来的顺序）。
+    pub names: Vec<String>,
+}
+
+impl Batch {
+    pub fn total(&self) -> usize {
+        self.names.len()
+    }
+
+    /// 这一批结束了吗（每个文件都落了终态）。
+    pub fn is_finished(&self, rows: &[TransferRow]) -> bool {
+        self.names.iter().all(|name| {
+            rows.iter().any(|row| {
+                &row.name == name && row.direction == TransferDirection::Send && row.state.is_terminal()
+            })
+        })
+    }
+
+    /// 这一批的总字节数（各行报的大小的和；对不上就只算认得出来的）。
+    pub fn total_bytes(&self, rows: &[TransferRow]) -> u64 {
+        self.names
+            .iter()
+            .filter_map(|name| {
+                rows.iter()
+                    .find(|row| &row.name == name && row.direction == TransferDirection::Send)
+                    .map(|row| row.total)
+            })
+            .sum()
+    }
+
+    /// `(当前第几个, 总数)`：当前 = 这批里第一个还没结束的（都结束了就报总数）。
+    pub fn position(&self, rows: &[TransferRow]) -> (usize, usize) {
+        let total = self.total().max(1);
+        let finished = self
+            .names
+            .iter()
+            .filter(|name| {
+                rows.iter().any(|row| {
+                    &row.name == *name && row.direction == TransferDirection::Send && row.state.is_terminal()
+                })
+            })
+            .count();
+        (finished.min(total - 1) + 1, total)
+    }
+
+    /// 只有多个文件时才需要「2/5」这种位置标签（单个文件写它反而多余）。
+    pub fn label(&self, rows: &[TransferRow]) -> Option<String> {
+        if self.total() < 2 {
+            return None;
+        }
+        let (index, total) = self.position(rows);
+        Some(format!("{index}/{total}"))
+    }
+
+    /// 这一批属于哪个对端（取消整批时按它筛行）。
+    pub fn cancel_targets<'a>(&self, rows: &'a [TransferRow]) -> Vec<&'a TransferRow> {
+        rows.iter()
+            .filter(|row| {
+                row.direction == TransferDirection::Send
+                    && row.peer == self.peer
+                    && !row.state.is_terminal()
+            })
+            .collect()
+    }
+}

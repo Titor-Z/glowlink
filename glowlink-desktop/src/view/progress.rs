@@ -29,6 +29,8 @@ pub fn card(
     row: &TransferRow,
     numbers: &CardNumbers,
     fraction: f64,
+    // 批次位置（`2/5`）；单个文件时为 `None`（写「1/1」是废话）
+    batch: Option<&str>,
     cx: &mut Context<AppRoot>,
 ) -> Stateful<Div> {
     let filled = fraction.clamp(0.0, 1.0) as f32;
@@ -36,8 +38,9 @@ pub fn card(
         TransferDirection::Send => "发送",
         TransferDirection::Receive => "接收",
     };
-    let running = row.state == TransferState::Running;
-    let token = row.token.clone();
+    // ✕ 的语义在 `AppRoot::close_transfer_card` 里判（在传/排队 = 取消这一批）
+    let row = row.clone();
+    let row = &row;
 
     let mut bar = div().relative().h(px(BAR_H)).w_full().rounded_full().bg(t.bar_bg);
     if filled > 0.0 {
@@ -66,11 +69,9 @@ pub fn card(
         t,
         &format!("xfer-{}", row.token),
         cx.listener(move |this, _, _, cx| {
-            if running {
-                this.cancel_transfer(&token);
-            } else {
-                this.dismiss_transfer(&token);
-            }
+            // ✕ 的语义随状态变（同一位置同一图标）：
+            // 在传/排队 = **取消这一批**；已结束 = 收起卡片。
+            this.close_transfer_card();
             cx.notify();
         }),
     );
@@ -96,15 +97,30 @@ pub fn card(
                         .child(SharedString::from(row.name.clone())),
                 )
                 .child(
-                    // 百分比：等宽数字（`tnum`）——字宽一变数字就会左右跳，看着像在抖。
-                    // 右侧给 ✕ 留位置
                     div()
                         .flex_none()
+                        .flex()
+                        .flex_row()
+                        .items_baseline()
+                        .gap(px(6.0))
                         .pr(px(card::title_reserve()))
-                        .text_size(px(theme::TEXT_BODY))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(t.pct)
-                        .child(SharedString::from(numbers.percent.clone())),
+                        // 批次位置：一次投放多个文件时才有（数字要准，所以只写「第几个」）
+                        .when_some(batch.map(str::to_string), |el, label| {
+                            el.child(
+                                div()
+                                    .text_size(px(theme::TEXT_META))
+                                    .text_color(t.text_hint)
+                                    .child(SharedString::from(label)),
+                            )
+                        })
+                        // 百分比：等宽数字（`tnum`）——字宽一变数字就会左右跳，看着像在抖
+                        .child(
+                            div()
+                                .text_size(px(theme::TEXT_BODY))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(t.pct)
+                                .child(SharedString::from(numbers.percent.clone())),
+                        ),
                 ),
         )
         .child(div().h(px(META_GAP)).child(bar))

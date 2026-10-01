@@ -40,30 +40,31 @@ impl DropState {
     }
 }
 
-/// 这批设备下，往拖拽区扔文件能不能发出去。
+/// 这批设备下，往拖拽区扔文件能不能发出去、发给谁。
 ///
-/// - `Ok(None)`：可以发；目标是**已选中的那台**。
-/// - `Ok(Some(名字))`：可以发；只有一台设备，不必先选，直接发给它
-///   （用户拍板的语义：一台就免选，多台才要求先点选）。
+/// 判定输入用的是**设备 ID**（不是名字）：名字可以重（同一台机器上跑两个守护进程时
+/// 就完全一样），而「发给谁」必须是唯一的一台。
+///
+/// - `Ok(id)`：可以发，发给它。只有一台设备时**免选**（用户拍板的语义：一台还要求先点一下是废话）。
 /// - `Err(原因)`：发不出去，原因是给人看的那句话。
 ///
 /// 这条判定单独抽出来：它是**用户看得见的规则**，而事件处理那段测不动。
 pub fn accept_target(
-    device_names: &[&str],
+    device_ids: &[&str],
     selected: Option<&str>,
-) -> std::result::Result<Option<String>, &'static str> {
+) -> std::result::Result<String, &'static str> {
     // 一台都没有：不是「没选」，是根本没得选——文案要说得出来
-    if device_names.is_empty() {
+    if device_ids.is_empty() {
         return Err("附近还没有设备");
     }
     match selected {
         // 选中的还在：就用它
-        Some(name) if device_names.contains(&name) => Ok(Some(name.to_string())),
+        Some(id) if device_ids.contains(&id) => Ok(id.to_string()),
         // 选了但它已经下线：**不许悄悄换一台发出去**——
         // 用户以为发给了甲、实际发给了乙，是最难发现的那种错。
         Some(_) => Err("选中的设备已不在了"),
         // 没选：只有一台就免选（用户拍板的语义），多台要求先点选（设计稿文案）
-        None if device_names.len() == 1 => Ok(Some(device_names[0].to_string())),
+        None if device_ids.len() == 1 => Ok(device_ids[0].to_string()),
         None => Err("先选择一台设备"),
     }
 }

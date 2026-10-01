@@ -85,6 +85,13 @@ pub trait TransferSource: Send + Sync {
     fn transfers(&self) -> Vec<TransferRow>;
     /// 取消一次传输（桌面版的 ✕）。**只请求**：真正的收尾由守护进程的传输线程做。
     fn cancel(&self, token: &str) -> Result<()>;
+
+    /// 把**一个**文件排进发送队列，返回它的编号。
+    ///
+    /// 同步方法（守护进程只入队就回，几十微秒），但调用方**必须在后台线程里调**：
+    /// 它是一次真实连接，放在拖放/点击回调里就是「窗口卡一下」。
+    /// 一次投放的多个文件按顺序逐个调用——顺序由守护进程的队列保证。
+    fn send(&self, device_id: &str, path: &str) -> Result<String>;
     /// 接受 / 拒绝一个待确认的接收请求。
     fn decide(&self, token: &str, accept: bool) -> Result<()>;
     /// 当前待确认请求。
