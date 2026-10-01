@@ -70,3 +70,25 @@ fn the_snap_zone_is_size_aware() {
     assert!(snap_hit(far, center, layout::SELF_RADIUS, 28.0), "拖影大一圈，够得着");
     assert!(!snap_hit(far, center, layout::SELF_RADIUS, 17.0), "缩小的盘够不着就是够不着");
 }
+
+#[test]
+fn a_trusted_peer_never_flashes_a_code_card() {
+    use glowlink_desktop::model::drag::{show_pair_card, CODE_DELAY_MS};
+    use glowlink_ipc::row::PairingState;
+    // 已信任的设备：对端免码放行，卡片只是「短暂路过」——不该显示
+    assert!(!show_pair_card(PairingState::Paired, 0), "已配对不该弹卡片");
+    assert!(
+        !show_pair_card(PairingState::WaitingPeer, CODE_DELAY_MS - 1),
+        "还没等够时间就别亮码（默认无感）"
+    );
+    // 等够了还没答复 ⇒ 说明对端要人工核对，这时必须把码亮出来
+    assert!(show_pair_card(PairingState::WaitingPeer, CODE_DELAY_MS));
+    // 失败 / 被拒 / 放弃：用户需要知道，立刻显示
+    for state in [
+        PairingState::Denied,
+        PairingState::Failed,
+        PairingState::Abandoned,
+    ] {
+        assert!(show_pair_card(state, 0), "{state:?} 应当立刻显示");
+    }
+}

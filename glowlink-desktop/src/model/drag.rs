@@ -55,3 +55,22 @@ pub const SNAP_MARGIN: f32 = 6.0;
 pub fn snap_hit(node_center: layout::Point, self_center: layout::Point, self_radius: f32, node_radius: f32) -> bool {
     layout::distance(node_center, self_center) <= self_radius + node_radius + SNAP_MARGIN
 }
+
+/// 发起侧卡片「等多久还没答复才把码亮出来」。
+///
+/// 信任的设备几乎立刻答复（对端免码放行），这段时间内卡片根本不出现 ⇒「无感」。
+/// 真需要人工核对（陌生设备、或**对端**不信任本机）时，码照样会亮，只是晚 0.8 秒。
+pub const CODE_DELAY_MS: u64 = 800;
+
+/// 发起侧卡片该不该显示？
+///
+/// - `Paired`：不打扰（吸附完成就是回执，不需要再告诉用户「已配对」）；
+/// - `WaitingPeer`：先不打扰，等到超过 [`CODE_DELAY_MS`] 才亮码；
+/// - 被拒 / 失败 / 本机放弃：如实说（这是用户需要知道的）。
+pub fn show_pair_card(state: PairingState, waited_ms: u64) -> bool {
+    match state {
+        PairingState::Paired => false,
+        PairingState::WaitingPeer => waited_ms >= CODE_DELAY_MS,
+        _ => true,
+    }
+}

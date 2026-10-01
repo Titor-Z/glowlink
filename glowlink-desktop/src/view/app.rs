@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::controller::{
-    DeviceSource, DeviceView, IpcSource, PairingSource, TransferRow, TransferSource, TransferState,
+    DeviceSource, DeviceView, IpcSource, PairingSource, PairingView, TransferRow, TransferSource,
+    TransferState,
 };
 use crate::model::connect::{self, Connection};
 use crate::model::drag::{self, DeviceDrag};
@@ -109,6 +110,8 @@ pub struct AppRoot {
     grab_offset: layout::Point,
     /// 本机发起、正在等的配对（编号 + 对端 + 码 + 状态）。
     pair: Option<PairingCard>,
+    /// 发起侧槽位的第一次出现时刻（token + 时刻）：用来决定「等够 0.8s 才亮码」。
+    pair_seen: Option<(String, std::time::Instant)>,
     /// 对端发起、等本机拍板的请求（接收侧卡片）。
     ///
     /// 与 `pair` 一个槽位：一个是「我求人」，一个是「人求我」，不同时强调两件事。
@@ -198,6 +201,7 @@ impl AppRoot {
             meter: SpeedMeter::default(),
             dismissed: Vec::new(),
             dismissed_pairs: Vec::new(),
+            pair_seen: None,
             pair_request: None,
             code_input: CodeInput::new(),
             code_focus: cx.focus_handle(),
@@ -631,15 +635,9 @@ impl AppRoot {
             return;
         };
         match pairing.start(&drag.id) {
-            Ok(()) => {
-                log::info!("发起配对：{}（{}）", drag.name, drag.id);
-                self.pair = Some(PairingCard {
-                    token: String::new(),
-                    peer: drag.name.clone(),
-                    code: String::new(),
-                    state: glowlink_ipc::row::PairingState::WaitingPeer,
-                });
-            }
+            // 不在本地先占一张卡：槽位是守护进程登记的，卡片**由快照决定**。
+            // 已信任的设备会在几十毫秒内拿到放行帧，于是卡片根本不出现（「无感」）。
+            Ok(()) => log::info!("发起配对：{}（{}）", drag.name, drag.id),
             Err(e) => log::info!("配对发起失败：{e}"),
         }
     }
@@ -682,6 +680,51 @@ impl AppRoot {
     ///
     /// 设备表很小，比一次比每次都 `notify()` 好：后者会让窗口每秒白重绘 3 次，
     /// 而重绘会打断正在跑的动画（呼吸圈的相位会被拖回去）。
+    /// 发起侧卡片该显示成什么（`None` = 不显示）。
+    ///
+    /// 三条规矩：
+    /// - **只有守护进程登记的槽位才算数**（界面不自己造卡）；
+    /// - 用户收起过的编号不再弹回来；
+    /// - 信任的设备先**不打扰**：对端免码放行几乎立刻就回，卡片根本不会出现；
+    ///   真需要人工核对时（陌生设备、或对端不信任本机）等够
+    ///   [`drag::CODE_DELAY_MS`] 再把码亮出来。
+    fn next_pair_card(&mut self, row: Option<&PairingView>) -> Option<PairingCard> {
+        let row = row?;
+        let token = row.token.clone();
+        // 记下这个 token 第一次出现的时刻（同一 token 不重置，否则永远等不到 0.8s）
+        match &self.pair_seen {
+            Some((seen, at)) if *seen == token => {
+                let _ = at;
+            }
+            _ => self.pair_seen = Some((token.clone(), std::time::Instant::now())),
+        }
+        let waited_ms = self
+            .pair_seen
+            .as_ref()
+            .map(|(_, at)| at.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        if self.dismissed_pairs.iter().any(|t| *t == token) {
+            return None;
+        }
+        if !drag::show_pair_card(row.state, waited_ms) {
+            return None;
+        }
+        let fresh = PairingCard {
+            token,
+            peer: row.peer.clone(),
+            code: row.code.clone(),
+            state: row.state,
+        };
+        if self.pair.as_ref() != Some(&fresh) {
+            log::info!(
+                "配对卡显示：{}（{}）",
+                drag::pair_state_note(fresh.state),
+                fresh.peer
+            );
+        }
+        Some(fresh)
+    }
+
     pub fn sync(&mut self) -> bool {
         let fresh = self.source.devices();
         let service_on = self.service.as_ref().map(|s| s.running()).unwrap_or(false);
@@ -726,15 +769,33 @@ impl AppRoot {
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
+        // 发起侧的槽位也要先取出来：卡片**由快照决定**，所以它同样不能只靠
+        // 「设备表变了没」来判断（同一类坑：守卫漏了新状态）。
+        let outgoing = self
+            .pairing
+            .as_ref()
+            .and_then(|pairing| pairing.outgoing().into_iter().last());
+        let outgoing_changed = match (&outgoing, &self.pair) {
+            (Some(row), Some(card)) => row.token != card.token || row.state != card.state,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+        // 显示决策每个 tick 都要重算：它还依赖「等了多久」（信任的设备先不亮码）。
+        let next_pair = self.next_pair_card(outgoing.as_ref());
+        let pair_changed = next_pair != self.pair;
         if fresh == self.devices
             && service_on == self.service_on
-            && self.pair.is_none()
             && !transfer_changed
             && !incoming_changed
+            && !outgoing_changed
+            && !pair_changed
         {
             return false;
         }
-        let mut changed = transfer_changed;
+        let mut changed = transfer_changed || pair_changed;
+        if pair_changed {
+            self.pair = next_pair;
+        }
         if fresh != self.devices {
             // 日志落 stderr：排查「界面没反应」时第一眼就知道设备表到底有没有变
             log::info!("设备表更新：{} 台", fresh.len());
@@ -798,43 +859,6 @@ impl AppRoot {
             }
         }
 
-        // 配对卡跟着 `PAIRINGS` 走：码与状态都在那些行里，界面不自己猜
-        if let (Some(card), Some(pairing)) = (self.pair.clone(), self.pairing.clone()) {
-            let rows = pairing.outgoing();
-            let latest = rows
-                .iter()
-                .filter(|row| row.peer == card.peer)
-                .next_back()
-                .cloned();
-            match latest {
-                Some(row) => {
-                    let fresh = PairingCard {
-                        token: row.token,
-                        peer: row.peer,
-                        code: row.code,
-                        state: row.state,
-                    };
-                    // 用户已收起的卡片不再弹回来（守护进程还会保留这条记录一小会儿）
-                    let hidden = self.dismissed_pairs.iter().any(|t| *t == fresh.token);
-                    if hidden {
-                        if self.pair.is_some() {
-                            self.pair = None;
-                            changed = true;
-                        }
-                    } else if fresh != card {
-                        log::info!("配对状态：{}", crate::model::drag::pair_state_note(fresh.state));
-                        self.pair = Some(fresh);
-                        changed = true;
-                    }
-                }
-                // 槽位已经从守护进程的表里消失：收起卡片，不留一张看不出死活的浮层
-                None if !card.token.is_empty() => {
-                    self.pair = None;
-                    changed = true;
-                }
-                None => {}
-            }
-        }
         if service_on != self.service_on {
             log::info!("服务开关：{}", if service_on { "开" } else { "关" });
             self.service_on = service_on;

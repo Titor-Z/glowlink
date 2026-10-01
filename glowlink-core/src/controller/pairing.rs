@@ -242,6 +242,17 @@ impl PairingSession {
         Ok(false)
     }
 
+    /// 接收方：**已信任的对端免码放行**。
+    ///
+    /// 依据不是「码对上了」，而是握手里的**静态 DH 证明**：`SecureProof` 用长期私钥
+    /// 对抄本签名，只有那把私钥的持有者算得出来；而那个指纹本来就在本机信任列表里。
+    /// 码的用途是「第一次认识一台设备时，用人的眼睛确认中间没有别人」——
+    /// 见过一次并记下指纹之后，这一步就不必再做了（中间人依然过不了这一关：
+    /// 它算不出静态 DH 的证明，除非它拿到那把长期私钥）。
+    pub fn approve_trusted(&mut self) -> Result<()> {
+        self.transport.send_frame(&Frame::PairOk)
+    }
+
     /// 接收方：拒绝这次配对（用户点了拒绝、或等待超时）。
     pub fn deny(&mut self, reason: &str) -> Result<()> {
         self.transport.send_frame(&Frame::PairDeny { reason: reason.to_string() })

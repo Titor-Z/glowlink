@@ -41,6 +41,8 @@ enum Answer {
     ExhaustThenDeny,
     /// 直接拒绝。
     Deny,
+    /// **已信任免码放行**（不输任何码）。
+    ApproveWithTrust,
 }
 
 /// 接收方看到的东西。
@@ -131,6 +133,10 @@ fn pair(
             Answer::Deny => {
                 session.deny("用户拒绝").expect("应答应发得出去");
                 false
+            }
+            Answer::ApproveWithTrust => {
+                session.approve_trusted().expect("放行帧应发得出去");
+                true
             }
         };
 
@@ -403,4 +409,26 @@ fn detect_routes_pair_request_to_pairing_and_keeps_the_frame_for_transfer() {
     );
     // 顺手确认另一种明文帧也不会被误判成配对
     assert_eq!(one_shot(Frame::Hello(hello)).unwrap(), Intent::Transfer);
+}
+
+#[test]
+fn a_trusted_peer_is_admitted_without_typing_any_code() {
+    // 「无感」的实现点：接收方在信任列表里认出对端指纹 ⇒ 直接放行，**码一次都没用上**。
+    // 安全性由握手的静态 DH 证明承担（冒名者算不出来），码只管「第一次认识」。
+    let (outcome, report) = pair(Answer::ApproveWithTrust, false, true);
+
+    let outcome = outcome.expect("已信任的设备不该被挡在门外");
+    assert!(report.approved, "免码放行也要真的把 PairOk 发出去");
+    // 全程没人比过码：receipt 的码仍然只是给「万一要核对」用的
+    assert_eq!(outcome.code.len(), 6, "码依然存在（界面要能显示），只是没被比对");
+    assert_eq!(outcome.peer_fingerprint, report.own_fingerprint);
+}
+
+#[test]
+fn without_trust_the_code_is_still_required() {
+    // 反面：接收方不信任对端时，免码放行这条路**不该**被走到
+    // （把「信任」当默认值就等于谁都能连进来）
+    let (outcome, report) = pair(Answer::Deny, false, false);
+    assert!(outcome.is_err(), "不认识的对端必须被拦下");
+    assert!(!report.approved);
 }

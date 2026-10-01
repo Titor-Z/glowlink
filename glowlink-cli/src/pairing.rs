@@ -358,6 +358,23 @@ impl PairingHub {
     /// 返回是否配对成功。
     pub fn handle_incoming(&self, mut session: PairingSession, peer_name: String) -> Result<bool> {
         let code = session.code()?;
+        let peer = session.peer()?;
+
+        // **已信任的设备直接放行**（「无感」就落在这里）：不登记待确认、不要求输码。
+        //
+        // 为什么安全：指纹来自握手的静态 DH 证明（`SecureProof`），只有长期私钥的
+        // 持有者算得出来；这个指纹既然已经在信任列表里，说明第一次配对时人已经用眼睛
+        // 核对过一次。中间人算不出这个证明，所以「免码」不等于「免认证」——
+        // 它只是省掉了**已经做过一次**的那道人眼环节。
+        if self.trust.is_trusted(&peer.peer_fingerprint) {
+            session.approve_trusted()?;
+            append_log(&format!(
+                "「{peer_name}」已在信任列表中，免码放行（指纹 {}）",
+                peer.peer_fingerprint
+            ));
+            return Ok(true);
+        }
+
         let token = self.queue.register(peer_name.clone(), code.clone());
         append_log(&format!(
             "配对请求 #{token} 来自「{peer_name}」；本机校验码 {code}"
