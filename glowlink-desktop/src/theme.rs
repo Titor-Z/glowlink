@@ -364,6 +364,10 @@ pub const TEXT_BRAND: f32 = 14.0;
 pub const TEXT_DEVICE_LABEL: f32 = 10.0;
 pub const TEXT_BODY: f32 = 11.0;
 pub const TEXT_META: f32 = 9.0;
+/// 隐私浮层三行承诺（设计稿 `10.5px`）。
+pub const TEXT_POPOVER_ROW: f32 = 10.5;
+/// 隐私浮层脚注（设计稿 `9.5px`）。
+pub const TEXT_POPOVER_FOOT: f32 = 9.5;
 /// 配对码的字号：全窗最大的字（**唯一需要用户隔屏读数**的地方）。
 pub const TEXT_CODE: f32 = 22.0;
 

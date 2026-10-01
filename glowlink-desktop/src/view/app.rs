@@ -24,6 +24,7 @@ use crate::model::drag::{self, DeviceDrag};
 use crate::model::layout;
 use crate::model::motion::{Ghost, Motion};
 use crate::model::paircode::CodeInput;
+use crate::model::privacy;
 use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{self, Phase, UiState};
@@ -180,6 +181,13 @@ pub struct AppRoot {
     last_zone_note: Option<String>,
     /// 预览专用：把服务当「在跑」（见 `open` 的 `preview_linked`）。真实路径恒为 `false`。
     preview_linked: bool,
+    /// 隐私浮层开着吗（点盾牌开 / 点别处关 / Esc 关）。
+    privacy_open: bool,
+    /// 浮层是**哪一刻**开的：入场进度由它算（`privacy::IN` 之后不再动）。
+    privacy_since: std::time::Instant,
+    privacy_focus: FocusHandle,
+    /// 焦点交过一次了吗（每帧都抢焦点的话，用户点别处也会被抢回来）。
+    privacy_focused: bool,
     /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
     halo_fast: f32,
     /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
@@ -269,6 +277,10 @@ impl AppRoot {
             last_situation: None,
             last_zone_note: None,
             preview_linked: false,
+            privacy_open: false,
+            privacy_since: std::time::Instant::now(),
+            privacy_focus: cx.focus_handle(),
+            privacy_focused: false,
             halo_fast: 0.0,
             flowing_peer: None,
             connections: Vec::new(),
@@ -456,6 +468,40 @@ impl AppRoot {
         self.pair_request = None;
         self.code_input.clear();
         self.code_focused = false;
+    }
+
+    /// 盾牌：开/关隐私浮层（同一个按钮两个方向，用户不必再找关闭键——点别处也行）。
+    pub fn toggle_privacy(&mut self) {
+        self.privacy_open = !self.privacy_open;
+        self.privacy_since = std::time::Instant::now();
+        // 关掉之后要能再交一次（否则第二次打开 Esc 就不灵了）
+        self.privacy_focused = false;
+        log::info!("隐私浮层：{}", if self.privacy_open { "开" } else { "关" });
+    }
+
+    /// 关掉浮层（点窗口别处 / Esc / 再点一次盾牌）。
+    pub fn close_privacy(&mut self) {
+        if self.privacy_open {
+            self.privacy_open = false;
+            log::info!("隐私浮层：关");
+        }
+    }
+
+    /// 入场进度（0..1）：跑完一直是 1，界面不必再为它重绘。
+    pub fn privacy_progress(&self) -> f32 {
+        let total = privacy::IN.as_secs_f32();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        (self.privacy_since.elapsed().as_secs_f32() / total).min(1.0)
+    }
+
+    /// 该不该把键盘焦点交给浮层：开着、且还没交过。
+    ///
+    /// 不交的话 Esc 收不到（键盘事件只发给拿到焦点的元素），而界面上看不出缺了什么——
+    /// 用户只会觉得"Esc 不管用"。**只交一次**：每帧都抢焦点，用户点别处也会被抢回来。
+    pub fn wants_privacy_focus(&self) -> bool {
+        self.privacy_open && !self.privacy_focused
     }
 
     /// 该不该把焦点交给输入框：请求在、已允许、且还没交过。
@@ -852,7 +898,9 @@ impl AppRoot {
         let busy = self.dragging.is_some()
             || !self.tint.is_settled()
             || !self.motion.is_settled()
-            || spinning;
+            || spinning
+            // 浮层入场那 0.2s 要每帧重绘，落定后就安静
+            || (self.privacy_open && privacy::animating(self.privacy_progress()));
         if busy {
             TICK_FAST
         } else {
@@ -1322,19 +1370,31 @@ impl Render for AppRoot {
 
         // 标题栏右侧三个：隐私浮层 · 收进托盘 · 关闭。
         // 关闭是**自绘的窗口控制**（系统红绿灯已经藏掉，见 `crate::platform`）。
-        // 盾牌 = 隐私浮层的入口（"我们的特色"就写在那儿：无云端 / 无中转 / 无账号 / 无日志）。
-        // 浮层本身还没做（DESIGN.md「隐私浮层」）；在那之前这颗按钮只负责把图标亮出来。
+        // 盾牌 = 隐私浮层的入口（"我们的特色"就在浮层里：无云端 / 无中转 / 无账号 / 无日志）。
+        // 开着时墨色提亮：这是"当前打开的是哪一颗"的唯一提示（不加新颜色）。
         let privacy = titlebar::icon_button(
             "privacy",
             &t,
             "icons/shield.svg",
-            t.text_secondary,
+            if self.privacy_open { t.text_primary } else { t.text_secondary },
             None,
             theme::IconHover::Neutral,
             move |_, _, cx| {
-                let _ = cx_handle.update(cx, |_, cx| cx.notify());
+                let _ = cx_handle.update(cx, |root, cx| {
+                    root.toggle_privacy();
+                    cx.notify();
+                });
             },
         );
+        // 点外面关浮层：`on_mouse_down` 在最外层，子元素点一下也会冒泡上来。
+        // 所以**盾牌自己要把事件拦住**（见下面的 wrapper），否则「再点一次盾牌」会先被
+        // 这里关掉、再被按钮打开，看着像没反应。
+        let privacy_guard = div()
+            .absolute()
+            .inset_0()
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, _| {
+                this.close_privacy();
+            }));
         let tray = titlebar::icon_button(
             "tray",
             &t,
@@ -1628,7 +1688,14 @@ impl Render for AppRoot {
                             .items_center()
                             .gap(px(theme::GAP_ICON_BUTTON))
                             .children(toggle)
-                            .child(privacy)
+                            // 拦住鼠标按下：否则「再点一次盾牌」会被外层的关闭先吃掉
+                            .child(
+                                div()
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                        cx.stop_propagation();
+                                    })
+                                    .child(privacy),
+                            )
                             .child(tray)
                             .child(close),
                     ),
@@ -1754,7 +1821,26 @@ impl Render for AppRoot {
                     cx,
                 ))
             })
+            // 隐私浮层：层级最上（拖拽区 < 浮层卡 < 隐私浮层）。它是**只读的说明**，
+            // 不参与任何流程，压住谁也不影响操作。
+            .when(self.privacy_open, |el| {
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .track_focus(&self.privacy_focus)
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            if event.keystroke.key.as_str() == "escape" {
+                                this.close_privacy();
+                                cx.notify();
+                            }
+                        }))
+                        .child(crate::view::privacy::popover(&t, self.privacy_progress())),
+                )
+            })
             .child(titlebar::window_border(&t))
+            // 点外面关：透明、只在浮层开着时才挂上（不然它会挡住所有点击）
+            .when(self.privacy_open, |el| el.child(privacy_guard))
     }
 }
 
@@ -1780,6 +1866,8 @@ pub fn open(
     // 否则拖拽区永远只显示「服务已关闭」，看不到设备那几句文案。
     // **真实路径永远是 `false`**：连接只能由用户拖出来，服务状态只能看真实进程。
     preview_linked: bool,
+    // 预览专用：一开窗就打开隐私浮层（`GLOWLINK_PREVIEW=privacy`）
+    preview_privacy: bool,
     cx: &mut App,
 ) {
     let bounds = corner_bounds(cx);
@@ -1806,6 +1894,9 @@ pub fn open(
             if preview_linked {
                 root.connect_first();
             }
+            if preview_privacy {
+                root.toggle_privacy();
+            }
             root
         });
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
@@ -1821,6 +1912,17 @@ pub fn open(
                     // 输入段一出现就把键盘焦点交过去（**只交一次**）：
                     // 不交的话用户敲数字毫无反应，而界面上看不出缺了什么。
                     // 焦点要在有窗口的地方拿，所以借用窗口句柄走一趟。
+                    if root.wants_privacy_focus() {
+                        let handle = root.privacy_focus.clone();
+                        if let Some(window) = cx.windows().first() {
+                            if window
+                                .update(cx, |_, window, cx| window.focus(&handle, cx))
+                                .is_ok()
+                            {
+                                root.privacy_focused = true;
+                            }
+                        }
+                    }
                     if root.wants_code_focus() {
                         let handle = root.code_focus.clone();
                         if let Some(window) = cx.windows().first() {

@@ -31,7 +31,9 @@ fn main() {
     // 预览变体（`xfer` / `xfer-done` / `pair` / `linked`）
     let variant = std::env::var("GLOWLINK_PREVIEW").unwrap_or_default();
     // `linked` = 一台设备 + 已连接（看拖拽区在「可发」状态下写什么）
-    let preview_linked = variant == "linked";
+    // `privacy` = 一开窗就把隐私浮层打开（看那张卡自己的排版）
+    let preview_linked = variant == "linked" || variant == "privacy";
+    let preview_privacy = variant == "privacy";
     let ipc = IpcSource::spawn();
 
     // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
@@ -84,6 +86,7 @@ fn main() {
                 pairing,
                 transfers,
                 preview_linked,
+                preview_privacy,
                 cx,
             );
             cx.activate(true);

@@ -651,6 +651,10 @@ GlowLink 是一个**闭源、本地优先、去中心化**的跨平台近场文�
   也是与通用盾牌区分开的地方）。
 - **落地注意**：三条承诺与脚注都必须与实现一致——脚注里的端口是 **9267**（设计稿示例写的是 8888），
   机制是"UDP 广播发现 + TCP 点对点传输，文件端到端加密"。
+- **已实现（v1.0）**：`model/privacy.rs` + `view/privacy.rs`。玻璃三件套复用 `view::card` 的常量；
+  每行前面是 4px **品牌色**圆点（`.privacy__row::before`）；入场 `cardIn 0.2s` 用自家时钟的三次缓出
+  + 4px 下落（不用 gpui `Animation`，它会持续请求整窗重绘）；Esc / 点外面 / 再点盾牌 都能关。
+  脚注里的端口**由 `glowlink_core::DISCOVERY_PORT` 生成**并有测试钉住——写死数字迟早与实现分家。
 
 ### 配对（pair-card / pair-code-input）—— 本案新增
 
