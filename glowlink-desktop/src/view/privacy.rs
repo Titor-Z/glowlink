@@ -85,6 +85,6 @@ pub fn popover(t: &Theme, progress: f32) -> impl IntoElement {
                 .border_color(theme::hsla(hairline))
                 .text_size(px(theme::TEXT_POPOVER_FOOT))
                 .text_color(foot_color)
-                .child(SharedString::from(privacy::footnote())),
+                .child(SharedString::from(privacy::FOOTNOTE)),
         )
 }

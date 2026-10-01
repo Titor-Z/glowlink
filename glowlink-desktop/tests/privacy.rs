@@ -13,19 +13,18 @@ fn the_three_promises_are_the_designed_ones() {
 }
 
 #[test]
-fn the_footnote_names_the_port_we_actually_use() {
-    // 设计稿的原话：内容是事实陈述，不是宣传。事实里出现**过期端口**比不写更伤，
-    // 所以端口从 core 常量生成，这里再把两头钉死（写死数字就会漂）。
-    let foot = privacy::footnote();
-    assert!(
-        foot.contains(&glowlink_core::DISCOVERY_PORT.to_string()),
-        "脚注里的端口必须与实现一致：{foot}"
-    );
-    // 早期端口写在设计稿示例里，落地时不许照抄
-    assert!(!foot.contains("8888"), "8888 是早期端口，不该再出现：{foot}");
-    // 机制与加密状态也必须是事实
-    assert!(foot.contains("UDP 广播") && foot.contains("TCP 点对点"));
-    assert!(foot.contains("端到端加密"));
+fn the_footnote_promises_encryption_in_plain_words() {
+    // 脚注不再是"可自行抓包验证：仅 UDP 广播 9267…"（用户拍板改掉）：
+    // ① 那是工程师的话；② 端口被占用会顺延，那时"仅 9267"就是假话——
+    //    可验证的实现细节留给文档，这一层只说用户能懂的那条最强事实。
+    let foot = privacy::FOOTNOTE;
+    assert!(foot.contains("端到端加密"), "必须说清加密：{foot}");
+    assert!(foot.contains("只有你与对方"), "必须说清只有双方能解开：{foot}");
+    assert!(foot.starts_with("本软件承诺"), "口径是承诺，不是宣传：{foot}");
+    // 不许再把实现词写回来：端口/协议/工具名一出现，就说明又漂回工程师视角了
+    for word in ["抓包", "UDP", "TCP", "9267", "8888", "端口"] {
+        assert!(!foot.contains(word), "脚注里不该出现「{word}」：{foot}");
+    }
 }
 
 #[test]
