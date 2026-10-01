@@ -3,6 +3,11 @@
 //! 装配点（依赖注入）只在这里：本机名、数据源、窗口都在这一层决定，
 //! 控制器与视图都只认 trait。
 
+// Windows 发布版不要那个黑框控制台：桌面版是给人双击的，
+// 弹一个命令行窗口在后面既难看又像是出错了。
+// 调试构建**保留**控制台——`RUST_LOG` 要看 stderr，这是唯一的第一手线索。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use gpui::App;
 
 use std::sync::Arc;
