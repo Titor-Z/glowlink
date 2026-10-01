@@ -28,6 +28,10 @@ fn main() {
 
     // 预览模式：只给离线比对设计稿用（设备表是写死的假数据，不碰真实服务）
     let preview = std::env::var_os("GLOWLINK_PREVIEW").is_some();
+    // 预览变体（`xfer` / `xfer-done` / `pair` / `linked`）
+    let variant = std::env::var("GLOWLINK_PREVIEW").unwrap_or_default();
+    // `linked` = 一台设备 + 已连接（看拖拽区在「可发」状态下写什么）
+    let preview_linked = variant == "linked";
     let ipc = IpcSource::spawn();
 
     // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
@@ -41,7 +45,6 @@ fn main() {
         log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
         // 预览默认**不带**卡片（卡片是真实状态）；想单独看排版用
         // `xfer` / `xfer-done` / `pair`（三张卡各自单独看，免得互相挡）
-        let variant = std::env::var("GLOWLINK_PREVIEW").unwrap_or_default();
         let preview_transfer: Option<Arc<dyn TransferSource>> = match variant.as_str() {
             "xfer" => Some(Arc::new(PreviewTransfer::halfway())),
             "xfer-done" => Some(Arc::new(PreviewTransfer::finished_receive())),
@@ -74,7 +77,15 @@ fn main() {
         // 图标必须注册资源源，否则 `svg()` 静默不画（不报错、不警告）
         .with_assets(glowlink_desktop::assets::Assets)
         .run(move |cx: &mut App| {
-            glowlink_desktop::view::app::open(name.clone(), source, service, pairing, transfers, cx);
+            glowlink_desktop::view::app::open(
+                name.clone(),
+                source,
+                service,
+                pairing,
+                transfers,
+                preview_linked,
+                cx,
+            );
             cx.activate(true);
         });
 }

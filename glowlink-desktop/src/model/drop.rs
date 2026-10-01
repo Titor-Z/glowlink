@@ -18,11 +18,14 @@ pub enum DropState {
 impl DropState {
     /// 提示文案。
     ///
-    /// 三条规矩（都是「前置条件提前可见」的推论）：
+    /// 四条规矩（都是「前置条件提前可见」的推论）：
     /// - **一台设备都没有**：写「先打开另一台设备的 GlowLink」——这时候写
     ///   「拖拽文件到这里」是邀请一个必然被拒的动作，用户得白丢一次才知道；
-    /// - **多台、没选**：直接写「先选择一台设备」（用户拍板：提前说，别等丢进去才拒）；
-    /// - **有明确目标**（已选，或只有一台——一台免选）：写「拖到此处 → 甲机」，
+    /// - **有设备但一台都没连接**：写「先把设备拖到中间连接」（用户拍板：**发送的前提是已连接**）。
+    ///   发现 ≠ 可以发：刚看到的陌生设备还没经过配对，写「拖到此处 → 甲机」等于承诺一件
+    ///   流程不允许的事，用户丢进来才发现被拒；
+    /// - **已连接多台、没选**：直接写「先选择一台设备」（提前说，别等丢进去才拒）；
+    /// - **有明确目标**（已选，或只有一台已连接——一台免选）：写「拖到此处 → 甲机」，
     ///   把「会发给谁」摆在明面上。
     pub fn note(self, zone: Zone<'_>) -> String {
         match self {
@@ -42,11 +45,16 @@ impl DropState {
                 }
                 if zone.device_count == 0 {
                     "先打开另一台设备的 GlowLink".to_string()
+                } else if zone.connected == 0 {
+                    // 有设备、但一台都没连上：**先连接**。这一条必须在
+                    // 「拖到此处」之前判——否则就是在承诺一件流程不允许的事。
+                    CONNECT_FIRST.to_string()
                 } else if let Some(name) = zone.target() {
                     format!("拖到此处 → {name}")
-                } else if zone.device_count > 1 {
+                } else if zone.connected > 1 {
                     "先选择一台设备".to_string()
                 } else {
+                    // 只有一台已连接时上面就会给出目标名；走到这里说明调用方漏填 `only`
                     "拖拽文件到这里".to_string()
                 }
             }
@@ -58,31 +66,46 @@ impl DropState {
     }
 }
 
+/// 还没连接时该做什么：这是**流程规则**的文案，判定与提示共用同一句。
+pub const CONNECT_FIRST: &str = "先把设备拖到中间连接";
+
 /// 这批设备下，往拖拽区扔文件能不能发出去、发给谁。
 ///
 /// 判定输入用的是**设备 ID**（不是名字）：名字可以重（同一台机器上跑两个守护进程时
 /// 就完全一样），而「发给谁」必须是唯一的一台。
 ///
-/// - `Ok(id)`：可以发，发给它。只有一台设备时**免选**（用户拍板的语义：一台还要求先点一下是废话）。
+/// **发送的前提是「已连接」**（用户拍板）：`discovered` 里发现到的设备只是「看得见」，
+/// 要往它发文件得先拖到中心连上（配对）。发现 ≠ 可发，所以这里两张名单都要：
+/// `discovered` 只用来区分「附近没有设备」与「有但没连」，**可发名单是 `connected`**。
+///
+/// - `Ok(id)`：可以发，发给它。只有一台已连接时**免选**（一台还要求先点一下是废话）。
 /// - `Err(原因)`：发不出去，原因是给人看的那句话。
 ///
 /// 这条判定单独抽出来：它是**用户看得见的规则**，而事件处理那段测不动。
 pub fn accept_target(
-    device_ids: &[&str],
+    discovered: &[&str],
+    connected: &[&str],
     selected: Option<&str>,
 ) -> std::result::Result<String, &'static str> {
     // 一台都没有：不是「没选」，是根本没得选——文案要说得出来
-    if device_ids.is_empty() {
+    if discovered.is_empty() {
         return Err("附近还没有设备");
     }
+    // 有设备但都没连：不许发（流程规则）。这一条要排在选中之前判，
+    // 否则「选了一台没连的」会被当成正常路径走出去
+    if connected.is_empty() {
+        return Err(CONNECT_FIRST);
+    }
     match selected {
-        // 选中的还在：就用它
-        Some(id) if device_ids.contains(&id) => Ok(id.to_string()),
+        // 选中的已连接：就用它
+        Some(id) if connected.contains(&id) => Ok(id.to_string()),
+        // 选中的还在附近但没连：实话实说（不是「不在了」，别让用户去找设备）
+        Some(id) if discovered.contains(&id) => Err(CONNECT_FIRST),
         // 选了但它已经下线：**不许悄悄换一台发出去**——
         // 用户以为发给了甲、实际发给了乙，是最难发现的那种错。
         Some(_) => Err("选中的设备已不在了"),
-        // 没选：只有一台就免选（用户拍板的语义），多台要求先点选（设计稿文案）
-        None if device_ids.len() == 1 => Ok(device_ids[0].to_string()),
+        // 没选：只有一台已连接就免选（用户拍板的语义），多台要求先点选（设计稿文案）
+        None if connected.len() == 1 => Ok(connected[0].to_string()),
         None => Err("先选择一台设备"),
     }
 }
@@ -92,16 +115,18 @@ pub fn accept_target(
 pub struct Zone<'a> {
     /// 后台服务现在是什么状态（关着的时候，说什么设备都是空话）。
     pub service: crate::model::state::ServiceState,
-    /// 附近有几台设备。
+    /// 附近发现了几台设备（**不等于可以发**：还要连上）。
     pub device_count: usize,
-    /// 已选中的那台的名字。
+    /// **已连接**（环上）的台数——只有它是可发名单的规模。
+    pub connected: usize,
+    /// 已选中的那台名字（只可能是已连接的）。
     pub selected: Option<&'a str>,
-    /// 附近唯一那台的名字（一台**免选**：它就是目标）。
+    /// 唯一那台**已连接**的名字（一台免选：它就是目标）。
     pub only: Option<&'a str>,
 }
 
 impl<'a> Zone<'a> {
-    /// 这批文件实际会发给谁（没选时，只有一台也算有目标）。
+    /// 这批文件实际会发给谁（没选时，只有一台已连接也算有目标）。
     pub fn target(&self) -> Option<&'a str> {
         self.selected.or(self.only)
     }

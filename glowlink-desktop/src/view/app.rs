@@ -176,6 +176,10 @@ pub struct AppRoot {
     note_since: std::time::Instant,
     /// 上一拍看到的局面（服务状态 + 有没有设备），用来判断「换局面了」。
     last_situation: Option<(state::ServiceState, bool)>,
+    /// 上一拍拖拽区显示的那句话（变了就记日志）。
+    last_zone_note: Option<String>,
+    /// 预览专用：把服务当「在跑」（见 `open` 的 `preview_linked`）。真实路径恒为 `false`。
+    preview_linked: bool,
     /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
     halo_fast: f32,
     /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
@@ -263,6 +267,8 @@ impl AppRoot {
             spin: 0.0,
             note_since: std::time::Instant::now(),
             last_situation: None,
+            last_zone_note: None,
+            preview_linked: false,
             halo_fast: 0.0,
             flowing_peer: None,
             connections: Vec::new(),
@@ -498,10 +504,19 @@ impl AppRoot {
         }
     }
 
+    /// 已连接设备的 ID（环上那些）——**可发名单**。
+    fn connected_ids(&self) -> Vec<&str> {
+        self.connections.iter().map(|c| c.id.as_str()).collect()
+    }
+
     /// 这批文件该发给谁（`Err` 里是给用户看的那句话）。
+    ///
+    /// 可发名单是**已连接的**：发现到的设备要先用拖到中心连接（配对）才能收文件
+    /// （用户拍板的流程规则，见 [`drop::accept_target`]）。
     fn drop_target(&self) -> std::result::Result<DeviceView, &'static str> {
-        let ids: Vec<&str> = self.devices.iter().map(|d| d.id.as_str()).collect();
-        let id = drop::accept_target(&ids, self.selected.as_deref())?;
+        let discovered: Vec<&str> = self.devices.iter().map(|d| d.id.as_str()).collect();
+        let connected = self.connected_ids();
+        let id = drop::accept_target(&discovered, &connected, self.selected.as_deref())?;
         self.devices
             .iter()
             .find(|device| device.id == id)
@@ -511,6 +526,10 @@ impl AppRoot {
 
     /// 后台服务对界面而言的三态（`Starting` 那几百毫秒不能说「已关闭」）。
     pub fn service_state(&self) -> state::ServiceState {
+        // 预览没有真服务：只有显式要求「假装在跑」时才走设备那几句文案
+        if self.preview_linked {
+            return state::ServiceState::On;
+        }
         match self.service.as_ref() {
             None => state::ServiceState::Off,
             Some(service) if service.starting() => state::ServiceState::Starting,
@@ -528,21 +547,28 @@ impl AppRoot {
         )
     }
 
-    /// 拖拽区文案要的现状：几台、选了哪台、唯一那台是谁。
+    /// 拖拽区文案要的现状：发现了几台、连了几台、选了哪台、唯一那台已连接的是谁。
     fn zone(&self) -> drop::Zone<'_> {
-        let selected = self.selected.as_deref().and_then(|id| {
+        let name_of = |id: &str| {
             self.devices
                 .iter()
                 .find(|device| device.id == id)
                 .map(|device| device.name.as_str())
-        });
-        let only = if self.devices.len() == 1 {
-            Some(self.devices[0].name.as_str())
+        };
+        // 选中只对**已连接**的设备有意义：选了一台没连的，文案不该说「拖到此处 → 它」
+        let selected = self
+            .selected
+            .as_deref()
+            .filter(|id| self.is_connected(id))
+            .and_then(name_of);
+        let only = if self.connections.len() == 1 {
+            name_of(&self.connections[0].id)
         } else {
             None
         };
         drop::Zone {
             device_count: self.devices.len(),
+            connected: self.connections.len(),
             selected,
             only,
             service: self.service_state(),
@@ -852,6 +878,19 @@ impl AppRoot {
             .unwrap_or(false)
     }
 
+    /// 预览专用：把第一台设备接上（真实路径靠用户拖，这个方法只给 `GLOWLINK_PREVIEW=linked`）。
+    fn connect_first(&mut self) {
+        let Some(device) = self.devices.first().cloned() else {
+            return;
+        };
+        let drag = DeviceDrag {
+            id: device.id.clone(),
+            name: device.name.clone(),
+            kind: device.kind,
+        };
+        self.connect(&drag);
+    }
+
     /// 拖到一起：登记一条连接，槽位**由中心点分配**（不看松手方向）。
     ///
     /// 已经连上的再拖一次 = 不重复登记（位置照旧由槽位说了算）。
@@ -1074,6 +1113,14 @@ impl AppRoot {
         // 显示决策每个 tick 都要重算：它还依赖「等了多久」（信任的设备先不亮码）。
         let next_pair = self.next_pair_card(outgoing.as_ref());
         let pair_changed = next_pair != self.pair;
+        // 拖拽区文案变了就记一条：它写着「能不能发、发给谁」，是**流程规则**的对外表现，
+        // 日志里能看见它，就等于看见规则有没有生效（截图之外的第二条证据）。
+        // 放在早退守卫**之前**：守卫在「什么都变」时会直接返回，正是那种时刻才最需要证据。
+        let zone_note = self.drop.note(self.zone());
+        if self.last_zone_note.as_deref() != Some(zone_note.as_str()) {
+            log::info!("拖拽区：{zone_note}");
+            self.last_zone_note = Some(zone_note);
+        }
         if fresh == self.devices
             && service_on == self.service_on
             && !transfer_changed
@@ -1203,6 +1250,19 @@ impl AppRoot {
                 self.drop = DropState::Idle;
                 changed = true;
             }
+        }
+        // 设备下线：**连接一起摘掉**——留着一台已死设备在环上，它既是假的「已连接」，
+        // 又会被当成可发目标（拖拽区写着「拖到此处 → 它」，其实根本发不出去）
+        let alive: Vec<String> = self.devices.iter().map(|d| d.id.clone()).collect();
+        let gone: Vec<String> = self
+            .connections
+            .iter()
+            .map(|c| c.id.clone())
+            .filter(|id| !alive.contains(id))
+            .collect();
+        for id in gone {
+            self.disconnect(&id);
+            changed = true;
         }
         // 选中的设备下线了：清掉选择（拖拽区文案随之回到「先选择一台设备」）
         if let Some(id) = self.selected.clone() {
@@ -1345,7 +1405,14 @@ impl Render for AppRoot {
                 // 单击 = 选中它（设计稿的 `select()`：单选、再点取消）。
                 // 与拖动共存在同一个元素上：位移一大就变成拖动（gpui 自己分流）。
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.toggle_selected(&select_id);
+                    // 单击 = 选中（只对**已连接**的设备有效）；
+                    // 没连的设备点它不选中，而是把「先连接」这句摆出来——
+                    // 默默无视一次点击，用户只会以为界面卡了。
+                    if this.is_connected(&select_id) {
+                        this.toggle_selected(&select_id);
+                    } else {
+                        this.deny_drop(drop::CONNECT_FIRST);
+                    }
                     cx.notify();
                 }))
                 // 拖动：被拖起来的**就是这枚节点自己**（不是另做一个拖影）。
@@ -1707,6 +1774,10 @@ pub fn open(
     service: Option<Arc<IpcSource>>,
     pairing: Option<Arc<dyn PairingSource>>,
     transfers: Option<Arc<dyn TransferSource>>,
+    // 预览专用（`GLOWLINK_PREVIEW=linked`）：开窗就连上第一台，并把服务当「在跑」——
+    // 否则拖拽区永远只显示「服务已关闭」，看不到设备那几句文案。
+    // **真实路径永远是 `false`**：连接只能由用户拖出来，服务状态只能看真实进程。
+    preview_linked: bool,
     cx: &mut App,
 ) {
     let bounds = corner_bounds(cx);
@@ -1727,7 +1798,14 @@ pub fn open(
     };
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
-        let view = cx.new(|cx| AppRoot::new(cx, device_name, source, service, pairing, transfers));
+        let view = cx.new(|cx| {
+            let mut root = AppRoot::new(cx, device_name, source, service, pairing, transfers);
+            root.preview_linked = preview_linked;
+            if preview_linked {
+                root.connect_first();
+            }
+            root
+        });
         // 快照轮询：**比较**在界面线程（只读内存），真正的 IPC 在后台线程。
         // 窗口关了 `update` 会失败，循环自己退出（不必额外取消机制）。
         let weak = view.downgrade();
