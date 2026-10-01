@@ -161,7 +161,8 @@ pub fn search_note(waited: Duration) -> &'static str {
     if still_looking(waited) {
         "正在搜索附近设备…"
     } else {
-        "附近还没有设备"
+        // 只报结论不够：用户盯着这句话时唯一的疑问是「我该怎么办」
+        "附近还没有设备 · 让对方也打开 GlowLink"
     }
 }
 

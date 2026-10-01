@@ -1527,6 +1527,18 @@ impl Render for AppRoot {
                     .flex_none()
                     .h(px(theme::GRAPH_H))
                     .w_full()
+                    // 空态：只有自机 + spinner + 「正在搜索附近设备…」（设计稿 `.empty-note`）
+                    //
+                    // **必须画在图区里**：设计稿的 `.empty-note { top: 268px }` 是相对
+                    // `.graph` 的；画到根节点上就少了标题栏那 44px，
+                    // 提示会糊到盘底下、把机器名挤到提示下面去（截图上一眼能看出来）。
+                    .when(self.state.phase().shows_searching(), |el| {
+                        el.child(spinner::empty_note(
+                            &t,
+                            self.spin,
+                            self.search_since.elapsed(),
+                        ))
+                    })
                     // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
                     // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
@@ -1581,19 +1593,12 @@ impl Render for AppRoot {
                     // 设备气泡（画在中心盘之后 = 之上；重叠由物理保证不会发生）
                     .when(show_devices, |el| el.children(devices)),
             )
-            // 空态：只有自机 + spinner + 「正在搜索附近设备…」（设计稿 `.empty-note`）
-            .when(self.state.phase().shows_searching(), |el| {
-                el.child(spinner::empty_note(
-                    &t,
-                    self.spin,
-                    self.search_since.elapsed(),
-                ))
-            })
             // 拖拽区：设计稿里它是窗内固定的一段（44px + 16 边距），始终在
             .child(dropzone::dropzone(
                 &t,
                 self.drop,
                 self.drop_target_name(),
+                !self.devices.is_empty(),
                 cx.listener(|this, _, _, cx| {
                     this.pick_files();
                     cx.notify();

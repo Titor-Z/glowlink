@@ -8,17 +8,17 @@ use glowlink_desktop::model::drop::{accept_target, DropState};
 #[test]
 fn idle_text_follows_the_selection() {
     // 设计稿（glowlink.js）：没选 → 「拖拽文件到这里」；选了 → 「拖到此处 → 甲机」
-    assert_eq!(DropState::Idle.note(None), "拖拽文件到这里");
-    assert_eq!(DropState::Idle.note(Some("甲机")), "拖到此处 → 甲机");
+    assert_eq!(DropState::Idle.note(None, true), "拖拽文件到这里");
+    assert_eq!(DropState::Idle.note(Some("甲机"), true), "拖到此处 → 甲机");
     // 悬停中说的是同一句话：拖入本身不改变「发给谁」
-    assert_eq!(DropState::Over.note(Some("甲机")), "拖到此处 → 甲机");
+    assert_eq!(DropState::Over.note(Some("甲机"), true), "拖到此处 → 甲机");
 }
 
 #[test]
 fn denied_text_never_shows_a_target() {
     // 被拒的原因是「还没选」——写上目标名会让人以为已经选好了
     let denied = DropState::Denied("先选择一台设备");
-    assert_eq!(denied.note(Some("甲机")), "先选择一台设备");
+    assert_eq!(denied.note(Some("甲机"), true), "先选择一台设备");
     assert!(denied.is_denied());
     assert!(!DropState::Over.is_denied(), "悬停不是失败");
     assert!(!DropState::Idle.is_denied());
@@ -52,4 +52,20 @@ fn a_stale_selection_is_not_silently_replaced() {
     // 是最难发现的那种错。宁可拒收并说清楚。
     assert_eq!(accept_target(&["乙机"], Some("甲机")), Err("选中的设备已不在了"));
     assert_eq!(accept_target(&["甲机", "乙机"], Some("丙机")), Err("选中的设备已不在了"));
+}
+
+#[test]
+fn with_no_devices_the_zone_says_what_to_do() {
+    // 「拖拽文件到这里」在没有设备时是**邀请一个必然被拒的动作**
+    // （丢进去才告诉你「附近还没有设备」）。前置条件要提前可见。
+    assert_eq!(
+        DropState::Idle.note(None, false),
+        "先打开另一台设备的 GlowLink"
+    );
+    assert_eq!(
+        DropState::Over.note(None, false),
+        "先打开另一台设备的 GlowLink"
+    );
+    // 有设备、没选：仍是设计稿的原文（丢进去才拒）
+    assert_eq!(DropState::Idle.note(None, true), "拖拽文件到这里");
 }

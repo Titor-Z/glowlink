@@ -35,6 +35,7 @@ pub fn dropzone(
     t: &Theme,
     state: DropState,
     target: Option<&str>,
+    has_devices: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let (border, ink, bg) = match state {
@@ -49,7 +50,7 @@ pub fn dropzone(
     // 要走 `ParentElement`，而 hover / cursor 又只认「可交互元素」——两边各让一步，
     // 顺序就成了：先 child，再 id 与交互样式。
     let base = div()
-        .child(SharedString::from(state.note(target)))
+        .child(SharedString::from(state.note(target, has_devices)))
         // 要 id 才算「可交互元素」，hover / cursor 这类交互样式都挂在它上面
         .id("dropzone")
         .flex_none()

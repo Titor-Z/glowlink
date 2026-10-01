@@ -24,9 +24,14 @@ impl DropState {
     /// 「拖拽文件到这里」/「拖到此处 → 甲机」/「先选择一台设备」。
     /// 注意拒绝时**不显示目标名**：那时的问题不是「发给谁」而是「还没选」，
     /// 写上目标名反而让人以为已经选好了。
-    pub fn note(self, target: Option<&str>) -> String {
+    pub fn note(self, target: Option<&str>, has_devices: bool) -> String {
         match self {
             DropState::Denied(reason) => reason.to_string(),
+            // 附近一台设备都没有：这时候写「拖拽文件到这里」是**邀请一个必然被拒的动作**
+            // （丢进去才告诉你「附近还没有设备」）。前置条件要提前可见，用户少白试一次。
+            DropState::Idle | DropState::Over if !has_devices => {
+                "先打开另一台设备的 GlowLink".to_string()
+            }
             DropState::Idle | DropState::Over => match target {
                 Some(name) => format!("拖到此处 → {name}"),
                 None => "拖拽文件到这里".to_string(),

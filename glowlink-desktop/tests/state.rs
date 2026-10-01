@@ -86,7 +86,11 @@ fn the_empty_note_stops_pretending_after_a_while() {
         search_note(SEARCH_PATIENCE - Duration::from_millis(1)),
         "正在搜索附近设备…"
     );
-    assert_eq!(search_note(SEARCH_PATIENCE), "附近还没有设备");
+    assert_eq!(
+        search_note(SEARCH_PATIENCE),
+        "附近还没有设备 · 让对方也打开 GlowLink",
+        "只报结论不够：还要告诉用户下一步能做什么"
+    );
     assert!(still_looking(Duration::from_millis(500)));
     assert!(!still_looking(SEARCH_PATIENCE));
 }
