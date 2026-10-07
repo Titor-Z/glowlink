@@ -131,6 +131,23 @@ fn forget_removes_and_reports() {
 }
 
 #[test]
+fn rename_updates_existing_entry_and_never_creates_one() {
+    // 改名刻意不复用 trust()：那会把改名变成「凭空信任一台陌生设备」
+    let dir = temp_dir("rename");
+    let trust = TrustFile::open(dir.join("trusted.txt")).unwrap();
+    trust.trust("aaaa000011112222", "旧名字").unwrap();
+
+    assert!(trust.rename("aaaa000011112222", "新名字").unwrap());
+    let devices = trust.devices();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0].name, "新名字");
+
+    assert!(!trust.rename("bbbb333344445555", "陌生机").unwrap(), "改不存在的条目应返回 false");
+    assert_eq!(trust.devices().len(), 1, "名单不该多出条目");
+    assert!(!trust.is_trusted("bbbb333344445555"), "改名不许凭空信任");
+}
+
+#[test]
 fn trust_file_tolerates_broken_lines() {
     let dir = temp_dir("broken");
     let path = dir.join("trusted.txt");

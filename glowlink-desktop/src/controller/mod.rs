@@ -12,7 +12,8 @@ pub mod preview;
 pub mod source;
 
 pub use ipc::IpcSource;
-pub use preview::{PreviewPairing, PreviewSource, PreviewTransfer};
+pub use preview::{PreviewPairing, PreviewSource, PreviewTransfer, PreviewTrusts};
 pub use source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, TransferDirection, TransferRow, TransferSource, TransferState,
+    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, ReceiveDirSource,
+    TransferDirection, TransferRow, TransferSource, TransferState, TrustedView, TrustSource,
 };

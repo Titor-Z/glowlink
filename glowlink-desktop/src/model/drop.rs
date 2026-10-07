@@ -49,6 +49,10 @@ impl DropState {
                     // 也**不指使对端**（早先写的「先打开另一台设备的 GlowLink」是把
                     // 「得有个进程在跑」这件实现细节说成了给用户的命令）
                     NOTHING_TO_SEND.to_string()
+                } else if zone.connected == 0 && zone.all_declined {
+                    // 用户把能连的都**主动断开**了：那是他的选择，别回头再劝一次
+                    // （「用户都主动断开了，你还提示」）。只陈述现状。
+                    NOTHING_TO_SEND.to_string()
                 } else if zone.connected == 0 {
                     // 有设备、但一台都没连上：**先连接**。这一条必须在
                     // 「拖到此处」之前判——否则就是在承诺一件流程不允许的事。
@@ -138,6 +142,8 @@ pub struct Zone<'a> {
     pub device_count: usize,
     /// **已连接**（环上）的台数——只有它是可发名单的规模。
     pub connected: usize,
+    /// 附近发现的设备**都被用户明确断开过**（那就不该再劝他连回去）。
+    pub all_declined: bool,
     /// 已选中的那台名字（只可能是已连接的）。
     pub selected: Option<&'a str>,
     /// 唯一那台**已连接**的名字（一台免选：它就是目标）。

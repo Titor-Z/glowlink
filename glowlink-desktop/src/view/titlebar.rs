@@ -111,8 +111,9 @@ fn brand_dot(t: &Theme, phase: f32) -> impl IntoElement {
 /// `HTCLOSE`，让系统给出原生 hover/点击行为；macOS 不用它（用 `on_click`）。
 /// `hover` 决定鼠标经过的观感（见 `theme::IconHover`）；`ink` 是常态墨色
 /// （服务开关靠它上色：开 = 品牌蓝）。
+/// 同类按钮出现在多处时（配对名单每行一颗垃圾桶），id 要带上区分后缀。
 pub fn icon_button(
-    id: &'static str,
+    id: impl Into<SharedString>,
     t: &Theme,
     icon: &'static str,
     ink: Rgba,
@@ -122,10 +123,10 @@ pub fn icon_button(
 ) -> impl IntoElement {
     let (hover_bg, hover_ink) = t.icon_hover(hover);
     // 分组名用按钮 id：每个按钮一个组，组 hover 才能把墨色传到子元素的 svg 上
-    let group = SharedString::from(id);
+    let group = id.into();
 
     let button = div()
-        .id(ElementId::from(id))
+        .id(group.clone())
         .group(group.clone())
         .w(px(22.0))
         .h(px(22.0))

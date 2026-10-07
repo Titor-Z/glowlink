@@ -216,6 +216,20 @@ impl TrustFile {
         Ok(removed)
     }
 
+    /// 改一台**已有**设备的显示名；返回是否真的改了。
+    ///
+    /// 刻意不复用 [`Self::trust`]：那会把改名变成「凭空信任一台陌生设备」——
+    /// 改名的对象只能来自名单里已有的条目。
+    pub fn rename(&self, fingerprint: &str, name: &str) -> Result<bool> {
+        let mut devices = self.lock();
+        let Some(existing) = devices.iter_mut().find(|d| d.fingerprint == fingerprint) else {
+            return Ok(false);
+        };
+        existing.name = name.to_string();
+        self.save(&devices)?;
+        Ok(true)
+    }
+
     fn save(&self, devices: &[TrustedDevice]) -> Result<()> {
         let mut body = String::from(
             "# 萤光 GlowLink 已配对设备：每行「指纹\\t名称\\t配对时间」，删掉一行即取消该设备的免确认\n",

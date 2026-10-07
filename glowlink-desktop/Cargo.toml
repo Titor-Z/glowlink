@@ -34,6 +34,12 @@ log = "0.4"
 # —— 自绘窗口控制：把 macOS 的系统红绿灯真正藏掉 ——
 # gpui-ce 的 `TitlebarOptions` 只能挪位置（`traffic_light_position`），没有 hidden 开关，
 # 所以只能自己调 AppKit。版本跟 `gpui_ce_macos` 对齐，避免 objc2 在两处各一份。
+[dev-dependencies]
+# gpui 的命中测试（occlude / on_click 谁挡住谁）只能用它的 test-support 实证：
+# 测试里能注入真实的鼠标事件（dispatch_event），不用摸黑猜框架行为。
+# 只影响测试编译（cargo test 时才启用），正常构建不带这套。
+gpui-ce = { version = "0.2.2", features = ["test-support"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [

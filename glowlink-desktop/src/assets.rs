@@ -28,15 +28,21 @@ use gpui::{AssetSource, Result, SharedString};
 /// 不写成「扫描目录」是刻意的：`include_bytes!` 要编译期常量，扫描做不到，
 /// 而写错的路径在这里是**编译不过**，不会变成运行时静默丢图标。
 const ICONS: &[(&str, &[u8])] = &[
+    ("icons/back.svg", include_bytes!("../assets/icons/back.svg")),
+    ("icons/chevron.svg", include_bytes!("../assets/icons/chevron.svg")),
     ("icons/close.svg", include_bytes!("../assets/icons/close.svg")),
     ("icons/desktop.svg", include_bytes!("../assets/icons/desktop.svg")),
+    ("icons/folder.svg", include_bytes!("../assets/icons/folder.svg")),
     ("icons/laptop.svg", include_bytes!("../assets/icons/laptop.svg")),
+    ("icons/settings.svg", include_bytes!("../assets/icons/settings.svg")),
     ("icons/shield.svg", include_bytes!("../assets/icons/shield.svg")),
     ("icons/monitor.svg", include_bytes!("../assets/icons/monitor.svg")),
+    ("icons/pencil.svg", include_bytes!("../assets/icons/pencil.svg")),
     ("icons/phone.svg", include_bytes!("../assets/icons/phone.svg")),
     ("icons/tablet.svg", include_bytes!("../assets/icons/tablet.svg")),
     ("icons/toggle-off.svg", include_bytes!("../assets/icons/toggle-off.svg")),
     ("icons/toggle-on.svg", include_bytes!("../assets/icons/toggle-on.svg")),
+    ("icons/trash.svg", include_bytes!("../assets/icons/trash.svg")),
     ("icons/tray.svg", include_bytes!("../assets/icons/tray.svg")),
     ("icons/unlink.svg", include_bytes!("../assets/icons/unlink.svg")),
     ("icons/unknown.svg", include_bytes!("../assets/icons/unknown.svg")),

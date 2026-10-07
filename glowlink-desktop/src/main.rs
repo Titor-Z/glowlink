@@ -14,8 +14,9 @@ use std::sync::Arc;
 
 use glowlink_desktop::controller::{
     DeviceSource, IpcSource, PairingSource, PreviewPairing, PreviewSource, PreviewTransfer,
-    TransferSource,
+    PreviewTrusts, ReceiveDirSource, TransferSource, TrustSource,
 };
+use glowlink_desktop::model::settings;
 
 fn main() {
     // 与 CLI 同一套日志口径：先看 stderr。gpui 的字体/渲染问题会把原因直接打日志，
@@ -34,15 +35,20 @@ fn main() {
     // `privacy` = 一开窗就把隐私浮层打开（看那张卡自己的排版）
     let preview_linked = variant == "linked" || variant == "privacy";
     let preview_privacy = variant == "privacy";
+    let preview_settings = variant == "settings";
+    // 设置先于一切加载：接收目录要在拉起守护进程时带上（`--dir`），主题决定开窗的样子
+    let user_settings = settings::load();
     let ipc = IpcSource::spawn();
 
     // **打开软件即服务在跑**：没跑就拉起（异步，不阻塞开窗）。
     // 不自动拉起的话，每次测试都得先手敲一遍 `glowlink on` —— 那是把服务当命令行工具的用法。
-    let (source, service, pairing, transfers): (
+    let (source, service, pairing, transfers, trusts, receive): (
         Arc<dyn DeviceSource>,
         Option<Arc<IpcSource>>,
         Option<Arc<dyn PairingSource>>,
         Option<Arc<dyn TransferSource>>,
+        Option<Arc<dyn TrustSource>>,
+        Option<Arc<dyn ReceiveDirSource>>,
     ) = if preview {
         log::info!("预览模式（GLOWLINK_PREVIEW=1）：设备表是设计稿里的假数据");
         // 预览默认**不带**卡片（卡片是真实状态）；想单独看排版用
@@ -61,6 +67,8 @@ fn main() {
             None,
             preview_pairing,
             preview_transfer,
+            Some(Arc::new(PreviewTrusts)),
+            Some(Arc::new(PreviewTrusts)),
         )
     } else {
         if !ipc.running() {
@@ -72,6 +80,8 @@ fn main() {
             Some(Arc::clone(&ipc)),
             Some(Arc::clone(&ipc) as Arc<dyn PairingSource>),
             Some(Arc::clone(&ipc) as Arc<dyn TransferSource>),
+            Some(Arc::clone(&ipc) as Arc<dyn TrustSource>),
+            Some(Arc::clone(&ipc) as Arc<dyn ReceiveDirSource>),
         )
     };
 
@@ -85,8 +95,12 @@ fn main() {
                 service,
                 pairing,
                 transfers,
+                trusts,
+                receive,
+                user_settings,
                 preview_linked,
                 preview_privacy,
+                preview_settings,
                 cx,
             );
             cx.activate(true);

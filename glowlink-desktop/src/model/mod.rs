@@ -10,6 +10,8 @@
 //! - `spring`：唯一的运动原语（阻尼比 + 响应时间的弹簧，x/v 两个数）
 //! - `motion`：全场运动状态（意图 → 弹簧 → 接触约束 → 只读位置）
 //! - `transfer`：传输卡的逻辑（速度滑动窗口、该显示哪一条、卡上写什么）
+//! - `settings`：桌面设置（主题、空态开关、接收目录；持久化见本模块 `load`/`save`）
+//! - `namefield`：单行名字输入（配对改名；文本 + 光标 + IME 组文，UTF-16 换算收口在这里）
 
 pub mod connect;
 pub mod drag;
@@ -17,8 +19,10 @@ pub mod drop;
 pub mod format;
 pub mod layout;
 pub mod motion;
+pub mod namefield;
 pub mod paircode;
 pub mod privacy;
+pub mod settings;
 pub mod spring;
 pub mod state;
 pub mod transfer;

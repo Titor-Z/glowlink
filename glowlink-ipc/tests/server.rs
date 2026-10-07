@@ -370,3 +370,75 @@ fn pair_cancel_abandons_the_outgoing_pairing() {
     assert!(lines[0].starts_with("ERR "), "{}", lines[0]);
     assert_eq!(*host.pair_canceled.lock().unwrap(), vec!["004".to_string()]);
 }
+
+#[test]
+fn trusts_lists_rows_and_untrust_removes_by_fingerprint() {
+    // 配对名单是设置页「配对名单」的数据源：列表归守护进程管，界面经协议读改
+    use glowlink_ipc::row::TrustRow;
+    let host = FakeHost::default();
+    host.trusts.lock().unwrap().push(TrustRow {
+        fingerprint: "aaaa000011112222".into(),
+        name: "带 空格的名字".into(),
+        paired_at: 1_700_000_000,
+    });
+
+    let (lines, keep_open) = handle_line(&host, "TRUSTS");
+    assert!(keep_open);
+    assert_eq!(lines[0], "OK 1");
+    let row = TrustRow::from_line(&lines[1]).expect("数据行要能被客户端解析");
+    assert_eq!(row.name, "带 空格的名字");
+
+    let (ok, _) = handle_line(&host, "UNTRUST aaaa000011112222");
+    assert_eq!(ok[0], "OK 已删除 aaaa000011112222");
+    assert_eq!(handle_line(&host, "TRUSTS").0[0], "OK 0");
+
+    // 删不存在的：如实报错，不假装成功
+    let (err, _) = handle_line(&host, "UNTRUST aaaa000011112222");
+    assert!(err[0].starts_with("ERR "), "实际：{}", err[0]);
+}
+
+#[test]
+fn rename_updates_existing_trust_only() {
+    use glowlink_ipc::row::TrustRow;
+    let host = FakeHost::default();
+    host.trusts.lock().unwrap().push(TrustRow {
+        fingerprint: "aaaa000011112222".into(),
+        name: "旧名字".into(),
+        paired_at: 0,
+    });
+
+    // 名字带空格：协议只按第一个空白切分，剩下的都算名字
+    let (ok, _) = handle_line(&host, "RENAME aaaa000011112222 我 的 甲机");
+    assert_eq!(ok[0], "OK 已改名 aaaa000011112222");
+    assert_eq!(host.trusts.lock().unwrap()[0].name, "我 的 甲机");
+
+    // 改不存在的条目必须失败：改名不该凭空造出一条信任
+    let (err, _) = handle_line(&host, "RENAME bbbb333344445555 新名字");
+    assert!(err[0].starts_with("ERR "), "实际：{}", err[0]);
+
+    // 缺名字：用法错误
+    let (err, _) = handle_line(&host, "RENAME aaaa000011112222");
+    assert!(err[0].starts_with("ERR "), "实际：{}", err[0]);
+}
+
+#[test]
+fn untrust_without_fingerprint_is_a_usage_error() {
+    let host = FakeHost::default();
+    let (lines, _) = handle_line(&host, "UNTRUST");
+    assert!(lines[0].starts_with("ERR "), "实际：{}", lines[0]);
+}
+
+#[test]
+fn recvdir_sets_the_directory() {
+    let host = FakeHost::default();
+    // 路径带空格：同样只切第一个空白
+    let (ok, _) = handle_line(&host, "RECVDIR /Users/t/我的 接收");
+    assert_eq!(ok[0], "OK /Users/t/我的 接收");
+    assert_eq!(
+        host.recv_dir.lock().unwrap().as_deref(),
+        Some("/Users/t/我的 接收")
+    );
+
+    let (err, _) = handle_line(&host, "RECVDIR");
+    assert!(err[0].starts_with("ERR "), "实际：{}", err[0]);
+}

@@ -46,10 +46,12 @@ pub const RESULT_NOTE_HOLD: Duration = Duration::from_secs(6);
 /// 空态现在该说什么、还转不转。
 ///
 /// `waited` = 「当前这个局面」持续了多久（换局面就重新计时，见 `AppRoot::sync`）。
+/// `persistent` = 用户要求**常驻**（设置页「空态提示常驻」）：结论句不再退场。
 pub fn empty_state(
     service: ServiceState,
     devices: usize,
     waited: Duration,
+    persistent: bool,
 ) -> Option<(EmptyNote, bool)> {
     // 有设备：图上就有东西，不再需要一句提示挡在中间
     if devices > 0 {
@@ -57,13 +59,17 @@ pub fn empty_state(
     }
     match service {
         ServiceState::Off => {
-            (waited < SERVICE_NOTE_HOLD).then_some((EmptyNote::ServiceOff, false))
+            if persistent || waited < SERVICE_NOTE_HOLD {
+                Some((EmptyNote::ServiceOff, false))
+            } else {
+                None
+            }
         }
         ServiceState::Starting => Some((EmptyNote::Starting, false)),
         ServiceState::On => {
             if still_looking(waited) {
                 Some((EmptyNote::Searching, true))
-            } else if waited < SEARCH_PATIENCE + RESULT_NOTE_HOLD {
+            } else if persistent || waited < SEARCH_PATIENCE + RESULT_NOTE_HOLD {
                 Some((EmptyNote::NoDevices, false))
             } else {
                 // 报完了：收起。要做什么，拖拽区一直写着

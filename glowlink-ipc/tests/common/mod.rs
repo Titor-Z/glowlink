@@ -13,7 +13,7 @@ use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::{Device, DeviceId};
 use glowlink_ipc::row::{
-    PairingRow, PairingState, PendingRow, SendTicket, TransferRow, TransferState,
+    PairingRow, PairingState, PendingRow, SendTicket, TransferRow, TransferState, TrustRow,
 };
 use glowlink_ipc::server::IpcHost;
 use glowlink_ipc::state::State;
@@ -84,6 +84,10 @@ pub struct FakeHost {
     pub canceled: Mutex<Vec<String>>,
     /// 被放弃的配对编号（测 `PAIR_CANCEL`）。
     pub pair_canceled: Mutex<Vec<String>>,
+    /// 配对名单（测 `TRUSTS` / `UNTRUST` / `RENAME`）。
+    pub trusts: Mutex<Vec<TrustRow>>,
+    /// 接收目录（测 `RECVDIR`）。
+    pub recv_dir: Mutex<Option<String>>,
     /// 让 `send_file` 报错（测错误分支）。
     pub send_fails: AtomicBool,
 }
@@ -210,5 +214,36 @@ impl IpcHost for FakeHost {
         }
         canceled.push(token.to_string());
         Ok(token.to_string())
+    }
+
+    fn trusts(&self) -> Vec<TrustRow> {
+        self.trusts.lock().unwrap().clone()
+    }
+
+    fn untrust(&self, fingerprint: &str) -> Result<String> {
+        let mut trusts = self.trusts.lock().unwrap();
+        let before = trusts.len();
+        trusts.retain(|row| row.fingerprint != fingerprint);
+        if trusts.len() == before {
+            return Err(GlowError::Missing(format!("没有这台已配对设备：{fingerprint}")));
+        }
+        Ok(fingerprint.to_string())
+    }
+
+    fn rename_trust(&self, fingerprint: &str, name: &str) -> Result<String> {
+        let mut trusts = self.trusts.lock().unwrap();
+        let Some(row) = trusts
+            .iter_mut()
+            .find(|row| row.fingerprint == fingerprint)
+        else {
+            return Err(GlowError::Missing(format!("没有这台已配对设备：{fingerprint}")));
+        };
+        row.name = name.to_string();
+        Ok(fingerprint.to_string())
+    }
+
+    fn set_receive_dir(&self, path: &str) -> Result<String> {
+        *self.recv_dir.lock().unwrap() = Some(path.to_string());
+        Ok(path.to_string())
     }
 }

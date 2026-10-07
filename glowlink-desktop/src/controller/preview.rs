@@ -10,8 +10,8 @@ use glowlink_core::DeviceKind;
 use glowlink_core::model::error::{GlowError, Result};
 
 use crate::controller::source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, TransferDirection, TransferRow,
-    TransferSource, TransferState,
+    DeviceSource, DeviceView, PairingSource, PairingView, ReceiveDirSource, TransferDirection,
+    TransferRow, TransferSource, TransferState, TrustedView, TrustSource,
 };
 
 /// 固定的一组「附近设备」：与设计稿上的三台一一对应。
@@ -196,5 +196,50 @@ impl TransferSource for PreviewTransfer {
 
     fn pending(&self) -> Vec<crate::controller::source::PendingView> {
         Vec::new()
+    }
+}
+
+/// 预览配对名单 + 接收目录：设置面板要能离线比对排版。
+#[derive(Clone, Debug, Default)]
+pub struct PreviewTrusts;
+
+impl TrustSource for PreviewTrusts {
+    fn trusts(&self) -> Vec<TrustedView> {
+        vec![
+            TrustedView {
+                fingerprint: "a21cfb23e10383e7".into(),
+                name: "Pixel 9".into(),
+                paired_at: 0,
+            },
+            TrustedView {
+                fingerprint: "9f14e2bd6c07a551".into(),
+                name: "iPad mini".into(),
+                paired_at: 0,
+            },
+            TrustedView {
+                fingerprint: "04d3aa91c2b87e60".into(),
+                name: "桌面主机".into(),
+                paired_at: 0,
+            },
+        ]
+    }
+
+    fn untrust(&self, _fingerprint: &str) -> Result<()> {
+        // 预览是死的：动作不落盘，但也不该报错吓人
+        Ok(())
+    }
+
+    fn rename(&self, _fingerprint: &str, _name: &str) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl ReceiveDirSource for PreviewTrusts {
+    fn receive_dir(&self) -> Option<String> {
+        Some("~/Downloads".into())
+    }
+
+    fn set_receive_dir(&self, _path: &str) -> Result<()> {
+        Ok(())
     }
 }

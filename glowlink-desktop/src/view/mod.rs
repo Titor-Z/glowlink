@@ -11,5 +11,6 @@ pub mod paircard;
 pub mod pending;
 pub mod privacy;
 pub mod progress;
+pub mod settings;
 pub mod spinner;
 pub mod titlebar;

@@ -11,7 +11,7 @@ use glowlink_core::model::error::{GlowError, Result};
 use glowlink_core::Device;
 
 use crate::codec::{error_reply, END};
-use crate::row::{DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow};
+use crate::row::{DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow, TrustRow};
 use crate::state::State;
 
 /// 本地 IPC 首选端口。与发现端口（9267）无关：IPC 只监听回环，
@@ -92,6 +92,30 @@ pub trait IpcHost: Send + Sync {
     /// 返回被取消的编号。默认实现如实报错：不支持取消的守护进程不该静默成功。
     fn cancel(&self, _token: &str) -> Result<String> {
         Err(GlowError::Usage("这个守护进程不支持 CANCEL".into()))
+    }
+
+    /// 已配对设备名单（设置页「配对名单」）。默认为空：替身/老守护进程如实给空表。
+    fn trusts(&self) -> Vec<TrustRow> {
+        Vec::new()
+    }
+
+    /// 删除一条配对（设置页的垃圾桶）：下次连接要重新配对。
+    ///
+    /// 返回被删的指纹。默认实现如实报错：不支持删除的守护进程不该静默成功。
+    fn untrust(&self, _fingerprint: &str) -> Result<String> {
+        Err(GlowError::Usage("这个守护进程不支持 UNTRUST".into()))
+    }
+
+    /// 改一台已配对设备的显示名（设置页的改名）。只更新**已有**条目——
+    /// 改名不该凭空造出一条信任。
+    fn rename_trust(&self, _fingerprint: &str, _name: &str) -> Result<String> {
+        Err(GlowError::Usage("这个守护进程不支持 RENAME".into()))
+    }
+
+    /// 更换接收目录（设置页「接收」）。运行时立即生效；持久化由拉起方负责
+    /// （桌面版把目录记进自己的设置，下次拉起守护进程带 `--dir`）。
+    fn set_receive_dir(&self, _path: &str) -> Result<String> {
+        Err(GlowError::Usage("这个守护进程不支持 RECVDIR".into()))
     }
 }
 
@@ -250,6 +274,59 @@ pub fn handle_line(host: &dyn IpcHost, line: &str) -> (Vec<String>, bool) {
                 true,
             ),
         },
+        // `TRUSTS`：已配对设备名单（设置页「配对名单」）。
+        // 名字可能带空格：行内是 `\t` 分列，与 `DEVICES` 同一套转义思路（不转义，列表本身就是整行）。
+        "TRUSTS" => {
+            let rows = host.trusts();
+            let mut lines = vec![format!("OK {}", rows.len())];
+            for row in &rows {
+                lines.push(row.to_line());
+            }
+            (lines, true)
+        }
+        // `UNTRUST <指纹>`：删除一条配对。指纹是 16 位十六进制，本身不会带空格。
+        "UNTRUST" => {
+            if arg.is_empty() {
+                (
+                    vec![error_reply(&GlowError::Usage("用法：UNTRUST <指纹>".into()))],
+                    true,
+                )
+            } else {
+                match host.untrust(arg) {
+                    Ok(fingerprint) => (vec![format!("OK 已删除 {fingerprint}")], true),
+                    Err(e) => (vec![error_reply(&e)], true),
+                }
+            }
+        }
+        // `RENAME <指纹> <新名字>`：名字可能带空格（设备名常态），只切第一个空白。
+        "RENAME" => match arg.split_once(char::is_whitespace) {
+            Some((fingerprint, name)) if !name.trim().is_empty() => {
+                match host.rename_trust(fingerprint, name.trim()) {
+                    Ok(fingerprint) => (vec![format!("OK 已改名 {fingerprint}")], true),
+                    Err(e) => (vec![error_reply(&e)], true),
+                }
+            }
+            _ => (
+                vec![error_reply(&GlowError::Usage(
+                    "用法：RENAME <指纹> <新名字>".into(),
+                ))],
+                true,
+            ),
+        },
+        // `RECVDIR <路径>`：更换接收目录。路径可能带空格，同样只切第一个空白。
+        "RECVDIR" => {
+            if arg.is_empty() {
+                (
+                    vec![error_reply(&GlowError::Usage("用法：RECVDIR <路径>".into()))],
+                    true,
+                )
+            } else {
+                match host.set_receive_dir(arg) {
+                    Ok(path) => (vec![format!("OK {path}")], true),
+                    Err(e) => (vec![error_reply(&e)], true),
+                }
+            }
+        }
         "STOP" => {
             host.request_stop();
             (vec!["OK 正在停止".to_string()], false)

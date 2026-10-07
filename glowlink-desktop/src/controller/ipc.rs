@@ -25,11 +25,14 @@ use glowlink_core::model::error::{GlowError, Result};
 
 use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::daemon;
-use glowlink_ipc::row::{parse_transfers, DeviceRow, PairingRow, PendingRow, TransferRow};
+use glowlink_ipc::row::{
+    parse_transfers, DeviceRow, PairingRow, PendingRow, TransferRow, TrustRow,
+};
 use glowlink_ipc::state::{read_state, state_dir};
 
 use crate::controller::source::{
-    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, TransferSource,
+    DeviceSource, DeviceView, PairingSource, PairingView, PendingView, ReceiveDirSource,
+    TransferSource, TrustedView, TrustSource,
 };
 
 /// 轮询周期：界面 3 次/秒够用，再密只是让守护进程空转。
@@ -62,6 +65,10 @@ struct Snapshot {
     pairing_pending: Vec<PairingView>,
     /// 传输登记表（含刚结束的：完成态卡片要留着给人看）。
     transfers: Vec<TransferRow>,
+    /// 已配对设备名单（设置页「配对名单」）。
+    trusts: Vec<TrustedView>,
+    /// 接收目录（`None` = 守护进程没在跑，没有可显示的事实）。
+    receive_dir: Option<String>,
     /// 最近一次失败的原因；成功时 `None`。
     error: Option<String>,
 }
@@ -231,17 +238,25 @@ fn run_service_request(request: ServiceRequest) -> Result<()> {
 
 /// 桌面版拉起守护进程时带的参数。
 ///
-/// - `--yes`：对**已信任**设备免确认自动接收。桌面版现在还没有待确认入口，
-///   不带这个开关的话，收到文件会卡在「等人确认」直到超时被拒。
-///   （等 GUI 做出待确认列表再改回默认。）
-/// - `--dir`：接收目录给**绝对路径** `~/.glowlink/received`。相对路径会跟着
-///   「谁把它拉起来的、当时在哪个目录」跑，文件落在哪儿全凭运气。
+/// **绝不带 `--yes`**：PRD §4.4 的原话是「**任何设备**向本机发送文件前，本机必须弹出
+/// 系统级确认（确认接收 / 拒绝），防止恶意骚扰」——`--yes` 会让已信任设备免确认，
+/// 直接违反这一条。曾经为了让「无感」带上它（当时还没有待确认入口），
+/// 结果真机上表现成「谁发都自动收」：盘里躺着的旧信任条目全变成了静默接收的通道。
+/// 要免确认，只能由用户自己显式给守护进程加开关（`glowlink on --yes`）。
+///
+/// `--dir` 给**绝对路径**：相对路径会跟着「谁把它拉起来的、当时在哪个目录」跑，
+/// 文件落在哪儿全凭运气。目录本身来自桌面设置（设置页「接收」）；
+/// 没改过就是内置默认 `~/.glowlink/received`。用户自己 `glowlink on` 起的服务
+/// 不受这里影响——桌面版不越权改 CLI 的配置文件。
 fn launch_args() -> Vec<String> {
+    let dir = crate::model::settings::load()
+        .receive_dir
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| state_dir().join("received"));
     vec![
         daemon::DAEMON_COMMAND.to_string(),
-        "--yes".to_string(),
         "--dir".to_string(),
-        state_dir().join("received").display().to_string(),
+        dir.display().to_string(),
     ]
 }
 
@@ -263,6 +278,7 @@ fn fetch() -> Result<Snapshot> {
     let pairing_outgoing = client.call("PAIRINGS")?;
     let pairing_pending = client.call("PAIRPENDING")?;
     let transfers = client.call("TRANSFERS")?;
+    let trusts = client.call("TRUSTS")?;
     Ok(Snapshot {
         running: true,
         starting: false,
@@ -281,6 +297,13 @@ fn fetch() -> Result<Snapshot> {
             .map(pairing_view)
             .collect(),
         transfers: parse_transfers(&transfers),
+        trusts: trusts
+            .iter()
+            .skip(1)
+            .filter_map(|l| TrustRow::from_line(l))
+            .map(trust_view)
+            .collect(),
+        receive_dir: Some(state.receive_dir.display().to_string()),
         error: None,
     })
 }
@@ -302,6 +325,10 @@ fn device_view(row: DeviceRow) -> DeviceView {
 
 fn pending_view(row: PendingRow) -> PendingView {
     PendingView { token: row.token, peer: row.peer, name: row.name, size: row.size, code: row.code }
+}
+
+fn trust_view(row: TrustRow) -> TrustedView {
+    TrustedView { fingerprint: row.fingerprint, name: row.name, paired_at: row.paired_at }
 }
 
 fn pairing_view(row: PairingRow) -> PairingView {
@@ -412,5 +439,49 @@ impl TransferSource for IpcSource {
             .unwrap_or_else(|e| e.into_inner())
             .pending
             .clone()
+    }
+}
+
+impl TrustSource for IpcSource {
+    fn trusts(&self) -> Vec<TrustedView> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .trusts
+            .clone()
+    }
+
+    fn untrust(&self, fingerprint: &str) -> Result<()> {
+        self.submit(format!("UNTRUST {fingerprint}"));
+        Ok(())
+    }
+
+    fn rename(&self, fingerprint: &str, name: &str) -> Result<()> {
+        // 名字可能带空格：RENAME 只按第一个空白切分，原样塞进去即可
+        self.submit(format!("RENAME {fingerprint} {name}"));
+        Ok(())
+    }
+}
+
+impl ReceiveDirSource for IpcSource {
+    fn receive_dir(&self) -> Option<String> {
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .receive_dir
+            .clone()
+    }
+
+    fn set_receive_dir(&self, path: &str) -> Result<()> {
+        // 路径可能带空格：IPC 只按第一个空白切分指令与参数，原样塞进去即可
+        self.submit(format!("RECVDIR {path}"));
+        // **乐观更新快照**：不给这一下，界面在守护进程回话前仍读到旧值，
+        // 下一轮 `sync` 会把刚选好的目录又改回旧的（用户看到的就是「选了不变」）。
+        // 守护进程真的改失败时，下一轮快照会把它改回事实。
+        self.shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .receive_dir = Some(path.to_string());
+        Ok(())
     }
 }

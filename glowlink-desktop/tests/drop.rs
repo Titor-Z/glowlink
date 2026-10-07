@@ -11,22 +11,22 @@ fn the_zone_note_always_says_what_can_happen_now() {
     use glowlink_desktop::model::drop::Zone;
     // 一台都没有：说清**现状**（不是「拖拽文件到这里」那种必然被拒的邀请，
     // 也不是「去打开另一台设备」那种冲着对端发的指令）
-    let empty = Zone { service: ServiceState::On, device_count: 0, connected: 0, selected: None, only: None };
+    let empty = Zone { all_declined: false, service: ServiceState::On, device_count: 0, connected: 0, selected: None, only: None };
     assert_eq!(DropState::Idle.note(empty), "暂无可发送的设备");
     assert_eq!(DropState::Over.note(empty), "暂无可发送的设备");
 
     // 多台、没选：**提前**说「先选择一台设备」（用户拍板：别等丢进去才拒）
-    let many = Zone { service: ServiceState::On, device_count: 3, connected: 3, selected: None, only: None };
+    let many = Zone { all_declined: false, service: ServiceState::On, device_count: 3, connected: 3, selected: None, only: None };
     assert_eq!(DropState::Idle.note(many), "先选择一台设备");
     assert_eq!(DropState::Over.note(many), "先选择一台设备");
 
     // 只有一台：**免选**，它就是目标——把「发给谁」摆在明面上
-    let single = Zone { service: ServiceState::On, device_count: 1, connected: 1, selected: None, only: Some("甲机") };
+    let single = Zone { all_declined: false, service: ServiceState::On, device_count: 1, connected: 1, selected: None, only: Some("甲机") };
     assert_eq!(single.target(), Some("甲机"));
     assert_eq!(DropState::Idle.note(single), "拖到此处 → 甲机");
 
     // 选中了：显示目标名（多台时也一样）；悬停不改变「发给谁」
-    let picked = Zone { service: ServiceState::On, device_count: 3, connected: 3, selected: Some("乙机"), only: None };
+    let picked = Zone { all_declined: false, service: ServiceState::On, device_count: 3, connected: 3, selected: Some("乙机"), only: None };
     assert_eq!(DropState::Idle.note(picked), "拖到此处 → 乙机");
     assert_eq!(DropState::Over.note(picked), "拖到此处 → 乙机");
 }
@@ -36,7 +36,7 @@ fn denied_text_never_shows_a_target() {
     use glowlink_desktop::model::drop::Zone;
     // 被拒的原因是「还没选」——写上目标名会让人以为已经选好了
     let denied = DropState::Denied("先选择一台设备");
-    let picked = Zone { service: ServiceState::On, device_count: 3, connected: 3, selected: Some("甲机"), only: None };
+    let picked = Zone { all_declined: false, service: ServiceState::On, device_count: 3, connected: 3, selected: Some("甲机"), only: None };
     assert_eq!(denied.note(picked), "先选择一台设备");
     assert!(denied.is_denied());
     assert!(!DropState::Over.is_denied(), "悬停不是失败");
@@ -84,6 +84,7 @@ fn the_zone_says_the_service_is_off_before_anything_else() {
     assert_eq!(DropState::Idle.note(starting), "正在启动…");
     // 服务在跑才轮到设备那几句话
     let on = Zone {
+        all_declined: false,
         service: ServiceState::On,
         device_count: 1,
         connected: 1,
@@ -108,10 +109,11 @@ fn sending_requires_a_connection() {
     assert_eq!(accept_target(&["a"], &["a"], None), Ok("a".to_string()));
 
     // 文案同一条规矩：有设备但没连接 → 「先把设备拖到中间连接」
-    let seen = Zone { service: ServiceState::On, device_count: 1, connected: 0, ..Default::default() };
+    let seen = Zone { all_declined: false, service: ServiceState::On, device_count: 1, connected: 0, ..Default::default() };
     assert_eq!(DropState::Idle.note(seen), CONNECT_HINT);
     // 已连接一台 → 才写「拖到此处 → 甲机」
     let linked = Zone {
+        all_declined: false,
         service: ServiceState::On,
         device_count: 1,
         connected: 1,
@@ -120,7 +122,7 @@ fn sending_requires_a_connection() {
     };
     assert_eq!(DropState::Idle.note(linked), "拖到此处 → 甲机");
     // 已连接多台、没选 → 先选择
-    let many = Zone { service: ServiceState::On, device_count: 3, connected: 3, ..Default::default() };
+    let many = Zone { all_declined: false, service: ServiceState::On, device_count: 3, connected: 3, ..Default::default() };
     assert_eq!(DropState::Idle.note(many), "先选择一台设备");
 }
 
@@ -136,6 +138,7 @@ fn a_selected_but_unconnected_device_is_not_a_target() {
     assert_eq!(accept_target(&["a", "b"], &["a", "b"], Some("b")), Ok("b".to_string()));
     // 文案：选中的没连 → 也不能写目标名
     let z = Zone {
+        all_declined: false,
         service: ServiceState::On,
         device_count: 2,
         connected: 0,
@@ -143,4 +146,39 @@ fn a_selected_but_unconnected_device_is_not_a_target() {
         selected: Some("乙机"),
     };
     assert_eq!(DropState::Idle.note(z), CONNECT_HINT);
+}
+
+#[test]
+fn a_device_you_disconnected_is_not_nagged_about() {
+    // 用户拍板：**主动断开是用户的选择**，拖拽区不该回头再劝一次
+    // （「用户都主动断开了，你还提示，这不是有毛病么」）。
+    use glowlink_desktop::model::drop::{DropState, Zone, CONNECT_HINT, NOTHING_TO_SEND};
+    use glowlink_desktop::model::state::ServiceState;
+
+    // 刚发现、还没连过 → 说的是「拖到中间就能发」（教一次手势，是收益不是命令）
+    let fresh = Zone {
+        all_declined: false,
+        service: ServiceState::On,
+        device_count: 1,
+        connected: 0,
+        only: None,
+        selected: None,
+    };
+    assert_eq!(DropState::Idle.note(fresh), CONNECT_HINT);
+
+    // 他刚把这台断开 → 不再劝，只说现状
+    let declined = Zone { all_declined: true, ..fresh };
+    assert_eq!(DropState::Idle.note(declined), NOTHING_TO_SEND);
+
+    // 断开的那台离线了、又发现了另一台新的 → 重新提示（新的一轮相遇）
+    let again = Zone { all_declined: false, ..fresh };
+    assert_eq!(DropState::Idle.note(again), CONNECT_HINT);
+    // 已经连上一台时，当然还是说目标
+    let linked = Zone {
+        all_declined: false,
+        connected: 1,
+        only: Some("甲机"),
+        ..fresh
+    };
+    assert_eq!(DropState::Idle.note(linked), "拖到此处 → 甲机");
 }

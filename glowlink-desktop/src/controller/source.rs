@@ -47,6 +47,35 @@ pub struct PairingView {
 /// 再包一层同字段的 View 只会多一处要同步的拷贝。
 pub use glowlink_ipc::row::{TransferDirection, TransferRow, TransferState};
 
+/// 一台已配对设备（设置页「配对名单」）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedView {
+    /// 身份指纹（删除/改名的寻址键；界面显示用短指纹或设备名）。
+    pub fingerprint: String,
+    /// 配对时记下的显示名。
+    pub name: String,
+    /// 配对时间（Unix 秒；0 = 旧条目）。
+    pub paired_at: u64,
+}
+
+/// 配对名单来源（信任列表归守护进程管，界面只经它读改）。
+pub trait TrustSource: Send + Sync {
+    /// 全部已配对设备（快照）。
+    fn trusts(&self) -> Vec<TrustedView>;
+    /// 删除一条配对：下次连接要重新配对。
+    fn untrust(&self, fingerprint: &str) -> Result<()>;
+    /// 改一台已配对设备的显示名（只更新已有条目）。
+    fn rename(&self, fingerprint: &str, name: &str) -> Result<()>;
+}
+
+/// 接收目录来源（设置页「接收」）。
+pub trait ReceiveDirSource: Send + Sync {
+    /// 当前接收目录（守护进程没在跑时为 `None`：没有可显示的事实）。
+    fn receive_dir(&self) -> Option<String>;
+    /// 更换接收目录。异步：指令进队列，成败看下一轮快照。
+    fn set_receive_dir(&self, path: &str) -> Result<()>;
+}
+
 /// 设备表来源。
 pub trait DeviceSource: Send + Sync {
     /// 当前已知设备（快照）。

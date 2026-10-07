@@ -85,25 +85,40 @@ fn the_empty_note_reports_then_retires() {
     let on = ServiceState::On;
 
     // 刚开：正在搜 + **转**
-    let (note, spinning) = empty_state(on, 0, Duration::from_secs(0)).expect("应显示");
+    let (note, spinning) = empty_state(on, 0, Duration::from_secs(0), false).expect("应显示");
     assert_eq!(note, EmptyNote::Searching);
     assert!(spinning, "这时候转圈是对的：确实在做事");
 
     // 搜满耐心：出结论，**停转**
     let (note, spinning) =
-        empty_state(on, 0, SEARCH_PATIENCE).expect("应显示结论");
+        empty_state(on, 0, SEARCH_PATIENCE, false).expect("应显示结论");
     assert_eq!(note, EmptyNote::NoDevices);
     assert!(!spinning, "静止的结论不该还在转");
 
     // 结论留一小会儿之后**收起**：常驻说明在拖拽区，中央别一直唠叨
     assert_eq!(
-        empty_state(on, 0, SEARCH_PATIENCE + RESULT_NOTE_HOLD),
+        empty_state(on, 0, SEARCH_PATIENCE + RESULT_NOTE_HOLD, false),
         None
     );
-    assert_eq!(empty_state(on, 0, Duration::from_secs(600)), None);
+    assert_eq!(empty_state(on, 0, Duration::from_secs(600), false), None);
 
     // 有设备：图上就有东西，不需要提示挡在中间
-    assert_eq!(empty_state(on, 3, Duration::from_secs(0)), None);
+    assert_eq!(empty_state(on, 3, Duration::from_secs(0), false), None);
+}
+
+#[test]
+fn the_persistent_note_never_retires() {
+    // 设置页「空态提示常驻」：结论句不再退场（服务关闭那句同理）
+    use glowlink_desktop::model::state::{empty_state, EmptyNote, ServiceState};
+    use std::time::Duration;
+    let on = ServiceState::On;
+    let (note, _) = empty_state(on, 0, Duration::from_secs(600), true).expect("常驻不退场");
+    assert_eq!(note, EmptyNote::NoDevices);
+    let (note, _) = empty_state(ServiceState::Off, 0, Duration::from_secs(600), true)
+        .expect("常驻不退场");
+    assert_eq!(note, EmptyNote::ServiceOff);
+    // 常驻改变的是「留多久」，不是「有设备了还挂着」
+    assert_eq!(empty_state(on, 3, Duration::from_secs(0), true), None);
 }
 
 #[test]
@@ -114,17 +129,17 @@ fn the_empty_note_tells_the_truth_about_the_service() {
     use std::time::Duration;
     // 服务关着还说「正在搜索附近设备」是假话——没有任何东西在搜
     let (note, spinning) =
-        empty_state(ServiceState::Off, 0, Duration::from_secs(1)).expect("应显示");
+        empty_state(ServiceState::Off, 0, Duration::from_secs(1), false).expect("应显示");
     assert_eq!(note, EmptyNote::ServiceOff);
     assert!(!spinning, "没在搜就不许转圈");
     // 「服务已关闭」也是**过渡报告**：看一眼就够，开关就在上面
     assert_eq!(
-        empty_state(ServiceState::Off, 0, SERVICE_NOTE_HOLD),
+        empty_state(ServiceState::Off, 0, SERVICE_NOTE_HOLD, false),
         None
     );
     // 拉起服务那几百毫秒：说「正在启动」，不许说「已关闭」
     let (note, spinning) =
-        empty_state(ServiceState::Starting, 0, Duration::from_secs(0)).expect("应显示");
+        empty_state(ServiceState::Starting, 0, Duration::from_secs(0), false).expect("应显示");
     assert_eq!(note, EmptyNote::Starting);
     assert!(!spinning);
 }
@@ -153,6 +168,7 @@ fn the_copy_talks_about_this_machine_not_the_other_one() {
                 service,
                 device_count: devices,
                 connected,
+                all_declined: false,
                 only: None,
                 selected: None,
             };
@@ -175,6 +191,7 @@ fn the_copy_talks_about_this_machine_not_the_other_one() {
         service: ServiceState::On,
         device_count: 0,
         connected: 0,
+        all_declined: false,
         only: None,
         selected: None,
     };
@@ -188,6 +205,7 @@ fn the_copy_talks_about_this_machine_not_the_other_one() {
         service: ServiceState::On,
         device_count: 1,
         connected: 0,
+        all_declined: false,
         only: None,
         selected: None,
     };

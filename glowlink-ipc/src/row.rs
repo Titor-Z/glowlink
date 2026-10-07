@@ -354,3 +354,32 @@ impl PendingRow {
         Some(PendingRow { token, peer, name, size, fingerprint, code })
     }
 }
+
+/// `TRUSTS` 的一行：一台已配对设备（设置页「配对名单」用）。
+///
+/// 数据来自守护进程的信任列表（`~/.glowlink/trusted.txt`）：列表归守护进程管，
+/// 界面不读那份文件——两处各读一份必然不一致。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustRow {
+    /// 设备身份指纹（16 位十六进制），删除/改名都以它寻址。
+    pub fingerprint: String,
+    /// 配对时记下的显示名（改名改的就是它）。
+    pub name: String,
+    /// 配对时间（Unix 秒；0 = 旧条目没记时间）。
+    pub paired_at: u64,
+}
+
+impl TrustRow {
+    pub fn to_line(&self) -> String {
+        format!("{}\t{}\t{}", self.fingerprint, self.name, self.paired_at)
+    }
+
+    /// 名字可能为空（旧手改的行），其余缺了就是坏行。
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut parts = line.split('\t');
+        let fingerprint = parts.next()?.to_string();
+        let name = parts.next().unwrap_or("").to_string();
+        let paired_at = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        Some(TrustRow { fingerprint, name, paired_at })
+    }
+}

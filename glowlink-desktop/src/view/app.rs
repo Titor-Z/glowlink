@@ -7,37 +7,44 @@
 //! Windows = DWM 组合属性），窗内再叠 `backdrop_filter` 做卡片玻璃。
 
 use gpui::{
-    div, prelude::*, px, App, Context, DragMoveEvent, ElementId, FocusHandle, IntoElement,
-    MouseButton, ParentElement, Render, SharedString, Styled, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowOptions,
+    div, prelude::*, px, App, Bounds, Context, DragMoveEvent, ElementId, EntityInputHandler,
+    FocusHandle, IntoElement, MouseButton, ParentElement, Pixels, Render, SharedString, Styled,
+    UTF16Selection, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions,
 };
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::controller::{
-    DeviceSource, DeviceView, IpcSource, PairingSource, PairingView, PendingView, TransferRow,
-    TransferSource, TransferState,
+    DeviceSource, DeviceView, IpcSource, PairingSource, PairingView, PendingView, ReceiveDirSource,
+    TransferRow, TransferSource, TransferState, TrustedView, TrustSource,
 };
 use crate::model::connect::{self, Connection};
 use crate::model::drag::{self, DeviceDrag};
 use crate::model::layout;
 use crate::model::motion::{Ghost, Motion};
+use crate::model::namefield::{char_index_from_utf16, utf16_index_from_char, NameField};
 use crate::model::paircode::CodeInput;
 use crate::model::privacy;
+use crate::model::settings::{self as settings_model, Settings, ThemeChoice};
 use crate::model::spring::{Spring, ZETA_CRITICAL, ZETA_MOMENTUM};
 use crate::model::transfer::{self, SpeedMeter};
 use crate::model::state::{self, Phase, UiState};
 use crate::theme::{self, Theme};
 use crate::model::drop::{self, DropState};
 use crate::view::{
-    dropzone, node, paircard, pending as pending_card, progress, spinner, titlebar,
+    dropzone, node, paircard, pending as pending_card, progress, settings as settings_panel,
+    spinner, titlebar,
 };
 
 /// 拒收态保持多久（设计稿：抖一下 + 提示 1.8s，然后自己回到常态）。
 const DENY_HOLD: Duration = Duration::from_millis(1800);
 /// 文件悬在窗口上多久没动静就当「已经不悬了」（离开窗口没有回调）。
 const OVER_HOLD: Duration = Duration::from_millis(600);
+
+/// 设置页分段控件的滑块时长（设计稿 `.seg__thumb` 的 `--motion-base` = 200ms）。
+const SEG_SLIDE: Duration = Duration::from_millis(200);
 
 /// 界面刷新周期。真正抓数据在 `IpcSource` 的后台线程里（每 300ms），
 /// 这里只比内存快照——渲染路径里不做任何 IO。
@@ -186,12 +193,49 @@ pub struct AppRoot {
     /// 浮层是**哪一刻**开的：入场进度由它算（`privacy::IN` 之后不再动）。
     privacy_since: std::time::Instant,
     privacy_focus: FocusHandle,
+    /// 用户**主动断开**过的设备 id：不再劝他连回去（他刚做过选择）。
+    /// 设备下线（不在发现表里了）就清掉——下次发现是**新的一轮**，该提示还得提示。
+    declined: std::collections::HashSet<String>,
     /// 焦点交过一次了吗（每帧都抢焦点的话，用户点别处也会被抢回来）。
     privacy_focused: bool,
     /// **传输中**的呼吸相位：设计稿要求光圈加快到 1.5s（表示「正在跑」）。
     halo_fast: f32,
     /// 正在传数据的对端显示名（`None` = 没有传输）。线、节点、卡片三处共用它。
     flowing_peer: Option<String>,
+    /// 配对名单来源（设置页；预览模式下是假数据）。
+    trusts: Option<Arc<dyn TrustSource>>,
+    /// 接收目录来源（设置页）。
+    receive: Option<Arc<dyn ReceiveDirSource>>,
+    /// 桌面设置（主题、空态开关、接收目录；持久化见 `model::settings`）。
+    /// `pub(crate)`：设置面板的开关回调要读当前值再取反（`view::settings`）。
+    pub(crate) settings: Settings,
+    /// 配对名单快照（设置面板画的就这份）。
+    trusts_list: Vec<TrustedView>,
+    /// 接收目录快照。
+    receive_dir: Option<String>,
+    /// 用户在设置页选的新目录（后台线程写完放进来，`sync` 取走）。
+    picked_dir: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// 设置面板开着吗（标题栏齿轮点开 / 返回或 Esc 关）。
+    settings_open: bool,
+    /// 面板是**哪一刻**开的：入场进度由它算。
+    settings_since: std::time::Instant,
+    /// 分段控件滑块的起点档位与起始时刻（gpui 没有 CSS transition，用自家时钟）。
+    seg_from: f32,
+    seg_since: std::time::Instant,
+    settings_focus: FocusHandle,
+    /// 焦点交过一次了吗（与隐私浮层同一套做法）。
+    settings_focused: bool,
+    /// 正在确认删除的配对（指纹）：删除走两步，一步到位就是替用户省掉反悔的机会。
+    /// `pub(crate)`：确认按钮从这取「正在删哪条」（`view::settings`）。
+    pub(crate) confirm_delete: Option<String>,
+    /// 正在改名的配对（`None` = 没有在改）。
+    rename: Option<RenameSession>,
+    /// 改名输入框的焦点：键盘事件只发给拿到焦点的元素，IME 也是。
+    rename_focus: FocusHandle,
+    /// 焦点交过一次了吗（与配对码输入同一套做法）。
+    rename_focused: bool,
+    /// 输入框在屏幕上的位置（paint 时由 canvas 记下，IME 候选窗定位要用）。
+    rename_bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
     /// 已「拖到一起」的设备（连接环上的方位）。
     connections: Vec<Connection>,
     /// 断开之后就地留下的落点（按设备 ID 记）。
@@ -199,6 +243,13 @@ pub struct AppRoot {
     /// 是**种子**而不是钉子：它不回原位，但也不能压在中心盘或别人身上，
     /// 所以交给排斥迭代推到最近的合法位置。
     seeds: Vec<layout::Seed>,
+}
+
+/// 正在改名的配对（哪一台 + 输入状态）。一次只改一台。
+#[derive(Clone, Debug, PartialEq)]
+struct RenameSession {
+    fingerprint: String,
+    field: NameField,
 }
 
 /// 界面要显示的配对卡内容。
@@ -218,6 +269,9 @@ impl AppRoot {
         service: Option<Arc<IpcSource>>,
         pairing: Option<Arc<dyn PairingSource>>,
         transfers: Option<Arc<dyn TransferSource>>,
+        trusts: Option<Arc<dyn TrustSource>>,
+        receive: Option<Arc<dyn ReceiveDirSource>>,
+        settings: Settings,
     ) -> Self {
         let devices = source.devices();
         let service_on = service.as_ref().map(|s| s.running()).unwrap_or(false);
@@ -280,9 +334,27 @@ impl AppRoot {
             privacy_open: false,
             privacy_since: std::time::Instant::now(),
             privacy_focus: cx.focus_handle(),
+            declined: std::collections::HashSet::new(),
             privacy_focused: false,
             halo_fast: 0.0,
             flowing_peer: None,
+            trusts,
+            receive,
+            settings,
+            trusts_list: Vec::new(),
+            receive_dir: None,
+            picked_dir: Arc::new(Mutex::new(None)),
+            settings_open: false,
+            settings_since: std::time::Instant::now(),
+            seg_from: 0.0,
+            seg_since: std::time::Instant::now(),
+            settings_focus: cx.focus_handle(),
+            settings_focused: false,
+            confirm_delete: None,
+            rename: None,
+            rename_focus: cx.focus_handle(),
+            rename_focused: false,
+            rename_bounds: Arc::new(Mutex::new(None)),
             connections: Vec::new(),
             seeds: Vec::new(),
         };
@@ -487,6 +559,218 @@ impl AppRoot {
         }
     }
 
+    // ----------------------------------------------------- 设置面板
+
+    /// 齿轮：开/关设置面板（返回按钮、Esc、点别处……不，点别处不关：
+    /// 面板里全是可点的控件，「点外面关」会把误触变成丢设置）。
+    pub fn toggle_settings(&mut self) {
+        self.settings_open = !self.settings_open;
+        self.settings_since = std::time::Instant::now();
+        self.settings_focused = false;
+        self.confirm_delete = None;
+        log::info!("设置面板：{}", if self.settings_open { "开" } else { "关" });
+    }
+
+    pub fn close_settings(&mut self) {
+        if self.settings_open {
+            self.settings_open = false;
+            self.confirm_delete = None;
+            log::info!("设置面板：关");
+        }
+    }
+
+    /// 面板入场进度（0..1）：与隐私浮层同一条曲线（`privacy::pop_in`）。
+    pub fn settings_progress(&self) -> f32 {
+        let total = crate::model::privacy::IN.as_secs_f32();
+        if total <= 0.0 {
+            return 1.0;
+        }
+        (self.settings_since.elapsed().as_secs_f32() / total).min(1.0)
+    }
+
+    pub fn wants_settings_focus(&self) -> bool {
+        self.settings_open && !self.settings_focused
+    }
+
+    /// 改设置项并落盘。**只有真的变了才写**：每 300ms 的快照轮询不该变成磁盘写入器。
+    fn change_settings(&mut self, note: &str, change: impl FnOnce(&mut Settings)) {
+        let before = self.settings.clone();
+        change(&mut self.settings);
+        if self.settings == before {
+            return;
+        }
+        log::info!("设置：{note}");
+        if let Err(e) = settings_model::save(&self.settings) {
+            log::info!("设置保存失败：{e}");
+        }
+    }
+
+    pub fn set_theme(&mut self, theme: ThemeChoice) {
+        if self.settings.theme != theme {
+            // 记住从哪一档出发：滑块要滑过去，不是跳过去
+            self.seg_from = self.settings.theme.index() as f32;
+            self.seg_since = std::time::Instant::now();
+        }
+        self.change_settings(&format!("主题 → {:?}", theme), |s| s.theme = theme);
+    }
+
+    /// 分段控件滑块的当前位置（浮点档位）：200ms 内从上一档滑到 `to`。
+    ///
+    /// gpui 没有 CSS transition，也没有 transform，所以位移由自家时钟算——
+    /// 与面板入场同一条缓出曲线（快起慢收）。
+    pub fn seg_position(&self, to: usize) -> f32 {
+        let total = SEG_SLIDE.as_secs_f32();
+        let p = if total <= 0.0 {
+            1.0
+        } else {
+            (self.seg_since.elapsed().as_secs_f32() / total).min(1.0)
+        };
+        let eased = 1.0 - (1.0 - p).powi(3);
+        self.seg_from + (to as f32 - self.seg_from) * eased
+    }
+
+    /// 滑块还在滑吗（在滑就得每帧重绘）。
+    pub fn seg_animating(&self) -> bool {
+        self.seg_since.elapsed() < SEG_SLIDE
+    }
+
+    pub fn set_self_name_in_empty(&mut self, on: bool) {
+        self.change_settings(&format!("空态显示本机名字 → {on}"), |s| {
+            s.self_name_in_empty = on
+        });
+    }
+
+    pub fn set_note_persistent(&mut self, on: bool) {
+        self.change_settings(&format!("空态提示常驻 → {on}"), |s| s.note_persistent = on);
+    }
+
+    /// 配对名单：进入删除确认态（第二步才真的删）。
+    pub fn begin_delete_trust(&mut self, fingerprint: &str) {
+        log::info!("删除配对（待确认）：{fingerprint}");
+        self.confirm_delete = Some(fingerprint.to_string());
+    }
+
+    pub fn cancel_delete_trust(&mut self) {
+        self.confirm_delete = None;
+    }
+
+    /// 真的删：交给守护进程（名单归它管），名单下一轮快照里少一条。
+    pub fn confirm_delete_trust(&mut self, fingerprint: &str) {
+        self.confirm_delete = None;
+        let Some(source) = self.trusts.clone() else {
+            log::info!("预览模式：不真的删除配对 {fingerprint}");
+            return;
+        };
+        log::info!("删除配对：{fingerprint}");
+        if let Err(e) = source.untrust(fingerprint) {
+            log::info!("删除配对失败：{e}");
+        }
+    }
+
+    /// 进入改名态：输入框预填当前名字，焦点等下一帧交（`wants_rename_focus`）。
+    pub fn begin_rename(&mut self, fingerprint: &str, current: &str) {
+        log::info!("改名（开始）：{fingerprint}");
+        self.confirm_delete = None;
+        self.rename_focused = false;
+        self.rename = Some(RenameSession {
+            fingerprint: fingerprint.to_string(),
+            field: NameField::new(current),
+        });
+    }
+
+    pub fn cancel_rename(&mut self) {
+        if self.rename.take().is_some() {
+            log::info!("改名：取消");
+        }
+        self.rename_focused = false;
+    }
+
+    /// 保存改名：空名字不发（那是删名字不是改名），没变也不发（别让守护进程白写盘）。
+    pub fn save_rename(&mut self) {
+        let Some(session) = self.rename.take() else { return };
+        self.rename_focused = false;
+        let name = session.field.text().trim().to_string();
+        if name.is_empty() {
+            log::info!("改名：名字是空的，当作取消");
+            return;
+        }
+        let unchanged = self
+            .trusts_list
+            .iter()
+            .find(|trust| trust.fingerprint == session.fingerprint)
+            .map(|trust| trust.name == name)
+            .unwrap_or(false);
+        if unchanged {
+            log::info!("改名：名字没变");
+            return;
+        }
+        let Some(source) = self.trusts.clone() else {
+            log::info!("预览模式：不真的改名");
+            return;
+        };
+        log::info!("改名：{} → {}", session.fingerprint, name);
+        if let Err(e) = source.rename(&session.fingerprint, &name) {
+            log::info!("改名失败：{e}");
+        }
+    }
+
+    /// 改名输入框的键盘：只吃退格 / 回车 / Esc。
+    ///
+    /// **打印字符不在这里接**——它们走输入处理器（`EntityInputHandler`，
+    /// 中文 IME 与普通字符同一条路）。这里返回 `true` 的键要拦下冒泡
+    /// （否则 Esc 会把整个设置面板一起关掉）。
+    pub fn rename_key(&mut self, key: &str) -> bool {
+        let Some(session) = self.rename.as_mut() else { return false };
+        match key {
+            "backspace" => {
+                session.field.backspace();
+                true
+            }
+            "enter" => {
+                self.save_rename();
+                true
+            }
+            "escape" => {
+                self.cancel_rename();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn wants_rename_focus(&self) -> bool {
+        self.rename.is_some() && !self.rename_focused
+    }
+
+    /// 改名输入框当前显示的文本（`view::settings` 画输入框用）。
+    pub fn rename_text(&self) -> String {
+        self.rename
+            .as_ref()
+            .map(|session| session.field.text().to_string())
+            .unwrap_or_default()
+    }
+
+    /// 输入框焦点句柄（paint 期注册输入处理器要用）。
+    pub fn rename_focus_handle(&self) -> FocusHandle {
+        self.rename_focus.clone()
+    }
+
+    /// 输入框位置槽（paint 期写入，IME 候选窗定位读取）。
+    pub fn rename_bounds_slot(&self) -> Arc<Mutex<Option<Bounds<Pixels>>>> {
+        Arc::clone(&self.rename_bounds)
+    }
+
+    /// 换接收目录：系统对话框选一个，结果经 `picked_dir` 在 `sync` 里落地
+    /// （对话框是阻塞的原生模态，只能后台开——与选文件同一套做法）。
+    pub fn choose_receive_dir(&mut self) {
+        let picked = Arc::clone(&self.picked_dir);
+        std::thread::spawn(move || {
+            if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                *picked.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+            }
+        });
+    }
+
     /// 入场进度（0..1）：跑完一直是 1，界面不必再为它重绘。
     pub fn privacy_progress(&self) -> f32 {
         let total = privacy::IN.as_secs_f32();
@@ -590,6 +874,7 @@ impl AppRoot {
             self.service_state(),
             self.devices.len(),
             self.note_since.elapsed(),
+            self.settings.note_persistent,
         )
     }
 
@@ -607,6 +892,12 @@ impl AppRoot {
             .as_deref()
             .filter(|id| self.is_connected(id))
             .and_then(name_of);
+        // 发现的设备是不是**一台可劝的都没有**了（都被主动断开过）
+        let all_declined = !self.devices.is_empty()
+            && self
+                .devices
+                .iter()
+                .all(|device| self.declined.contains(&device.id));
         let only = if self.connections.len() == 1 {
             name_of(&self.connections[0].id)
         } else {
@@ -615,6 +906,7 @@ impl AppRoot {
         drop::Zone {
             device_count: self.devices.len(),
             connected: self.connections.len(),
+            all_declined,
             selected,
             only,
             service: self.service_state(),
@@ -900,7 +1192,9 @@ impl AppRoot {
             || !self.motion.is_settled()
             || spinning
             // 浮层入场那 0.2s 要每帧重绘，落定后就安静
-            || (self.privacy_open && privacy::animating(self.privacy_progress()));
+            || (self.privacy_open && privacy::animating(self.privacy_progress()))
+            || (self.settings_open && privacy::animating(self.settings_progress()))
+            || self.seg_animating();
         if busy {
             TICK_FAST
         } else {
@@ -971,6 +1265,8 @@ impl AppRoot {
 
     /// 断开连接：**位置留在原地**（不回到最初拖来的地方）。
     fn disconnect(&mut self, id: &str) {
+        // 记下「这是他主动断的」：拖拽区就不再说「把设备拖到中间即可发送」
+        self.declined.insert(id.to_string());
         let Some(index) = self.connections.iter().position(|c| c.id == id) else {
             return;
         };
@@ -1147,6 +1443,16 @@ impl AppRoot {
             (Some(_), None) | (None, Some(_)) => true,
             (None, None) => false,
         };
+        // 配对名单与接收目录也是**外来状态**（守护进程的）：进守卫，
+        // 否则删了一条配对、换了目录，面板却因为「设备表没变」不重绘——同一类坑。
+        let trusts_next: Vec<TrustedView> = self
+            .trusts
+            .as_ref()
+            .map(|source| source.trusts())
+            .unwrap_or_default();
+        let trusts_changed = trusts_next != self.trusts_list;
+        let receive_next = self.receive.as_ref().and_then(|source| source.receive_dir());
+        let receive_changed = receive_next != self.receive_dir;
         // 发起侧的槽位也要先取出来：卡片**由快照决定**，所以它同样不能只靠
         // 「设备表变了没」来判断（同一类坑：守卫漏了新状态）。
         let outgoing = self
@@ -1169,6 +1475,13 @@ impl AppRoot {
             log::info!("拖拽区：{zone_note}");
             self.last_zone_note = Some(zone_note);
         }
+        // 设置页选的新目录：**必须在早退守卫之前取出来**。
+        // 否则「只选了个目录、别的什么都没变」时守卫直接返回，这一取永远轮不到
+        // ——用户看到的就是「选了新目录，界面不刷新」。
+        let picked_dir: Option<std::path::PathBuf> = {
+            let mut guard = self.picked_dir.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
         if fresh == self.devices
             && service_on == self.service_on
             && !transfer_changed
@@ -1176,10 +1489,36 @@ impl AppRoot {
             && !outgoing_changed
             && !pair_changed
             && !pending_changed
+            && !trusts_changed
+            && !receive_changed
+            && picked_dir.is_none()
         {
             return false;
         }
         let mut changed = transfer_changed || pair_changed || pending_changed;
+        if trusts_changed {
+            self.trusts_list = trusts_next;
+            changed = true;
+        }
+        if receive_changed {
+            self.receive_dir = receive_next;
+            changed = true;
+        }
+        // 发给守护进程（下一连接生效）+ 记进设置（下次拉起带 `--dir`）
+        if let Some(dir) = picked_dir {
+            let text = dir.display().to_string();
+            if let Some(receive) = self.receive.clone() {
+                if let Err(e) = receive.set_receive_dir(&text) {
+                    log::info!("更换接收目录失败：{e}");
+                }
+            }
+            let old = self.settings.receive_dir.clone();
+            self.receive_dir = Some(text.clone());
+            self.change_settings(&format!("接收目录 → {text}"), |s| s.receive_dir = Some(text.clone()));
+            if old != self.settings.receive_dir {
+                changed = true;
+            }
+        }
         if pair_changed {
             self.pair = next_pair;
         }
@@ -1312,6 +1651,9 @@ impl AppRoot {
             self.disconnect(&id);
             changed = true;
         }
+        // 断开的名单只对**仍在附近**的设备有意义：设备下线就清掉——
+        // 下次再发现它是一次新的相遇，该提示的还得提示
+        self.declined.retain(|id| self.devices.iter().any(|d| &d.id == id));
         // 选中的设备下线了：清掉选择（拖拽区文案随之回到「先选择一台设备」）
         if let Some(id) = self.selected.clone() {
             if !self.devices.iter().any(|device| device.id == id) {
@@ -1339,9 +1681,19 @@ impl AppRoot {
 
 impl Render for AppRoot {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let t = Theme::DARK;
+        // 主题：用户挑的档位说了算；「跟随系统」每次渲染现问窗口
+        // （系统外观一变 gpui 会触发重绘，50ms 的界面时钟也会把它带出来）。
+        let light = match self.settings.theme {
+            ThemeChoice::System => matches!(
+                cx.window_appearance(),
+                WindowAppearance::Light | WindowAppearance::VibrantLight
+            ),
+            ThemeChoice::Light => true,
+            ThemeChoice::Dark => false,
+        };
+        let t = Theme::pick(light);
         // 动画回调要求 `'static`：捕获的是这个「按值的一份」，不是 `t` 的借用
-        let t_theme = Theme::DARK;
+        let t_theme = t;
         let cx_handle = cx.entity().clone();
 
         // 服务开关（预览模式下不显示）：开 = 品牌蓝 + 滑块在右，关 = 次白墨色 + 滑块在左。
@@ -1368,7 +1720,24 @@ impl Render for AppRoot {
             )
         });
 
-        // 标题栏右侧三个：隐私浮层 · 收进托盘 · 关闭。
+        // 齿轮 = 设置面板的入口。开着时墨色提亮：与盾牌同一套「当前在哪」的提示。
+        let cx_handle_settings = cx.entity().clone();
+        let settings_btn = titlebar::icon_button(
+            "settings",
+            &t,
+            "icons/settings.svg",
+            if self.settings_open { t.text_primary } else { t.text_secondary },
+            None,
+            theme::IconHover::Neutral,
+            move |_, _, cx| {
+                let _ = cx_handle_settings.update(cx, |root, cx| {
+                    root.toggle_settings();
+                    cx.notify();
+                });
+            },
+        );
+
+        // 标题栏右侧：设置 · 隐私浮层 · 收进托盘 · 关闭。
         // 关闭是**自绘的窗口控制**（系统红绿灯已经藏掉，见 `crate::platform`）。
         // 盾牌 = 隐私浮层的入口（"我们的特色"就在浮层里：无云端 / 无中转 / 无账号 / 无日志）。
         // 开着时墨色提亮：这是"当前打开的是哪一颗"的唯一提示（不加新颜色）。
@@ -1688,6 +2057,7 @@ impl Render for AppRoot {
                             .items_center()
                             .gap(px(theme::GAP_ICON_BUTTON))
                             .children(toggle)
+                            .child(settings_btn)
                             // 拦住鼠标按下：否则「再点一次盾牌」会被外层的关闭先吃掉
                             .child(
                                 div()
@@ -1716,7 +2086,14 @@ impl Render for AppRoot {
                     // 中心盘：和设备**同一层**（物理世界保证不重叠：它是钉死的不动体，
                     // 会把压上来的气泡挤开）。位置钉在圆心，缩放也不挪中心。
                     .child({
-                        let name = self.device_name.clone();
+                        // 空态显不显示本机名字（设置页可关）：设备在图上时名字始终显示
+                        let name = if self.devices.is_empty()
+                            && !self.settings.self_name_in_empty
+                        {
+                            String::new()
+                        } else {
+                            self.device_name.to_string()
+                        };
                         let center = self
                             .motion
                             .position(layout::SELF_ID)
@@ -1735,7 +2112,7 @@ impl Render for AppRoot {
                             node::NodeSpec {
                                 id: ElementId::Name("node-self".into()),
                                 who: node::NodeWho::SelfNode,
-                                label: &name.to_string(),
+                                label: &name,
                                 look,
                                 scale: self_scale,
                                 halo: self_halo,
@@ -1748,7 +2125,7 @@ impl Render for AppRoot {
                             node::NodeSpec {
                                 id: ElementId::Name("node-self-tinted".into()),
                                 who: node::NodeWho::SelfNode,
-                                label: &name.to_string(),
+                                label: &name,
                                 look: node::NodeLook::self_node_blended(1.0, self.tint_tone),
                                 scale: self_scale,
                                 halo: self_halo,
@@ -1821,7 +2198,52 @@ impl Render for AppRoot {
                     cx,
                 ))
             })
-            // 隐私浮层：层级最上（拖拽区 < 浮层卡 < 隐私浮层）。它是**只读的说明**，
+            // 设置面板：盖在浮层卡之上（它在「管理」这张窗），在隐私浮层之下。
+            // Esc 要能关，就得先有焦点——与隐私浮层同一套做法（只交一次）。
+            .when(self.settings_open, |el| {
+                let trusts = self.trusts_list.clone();
+                let devices = self.devices.clone();
+                let receive_dir = self.receive_dir.clone();
+                let confirm_del = self.confirm_delete.clone();
+                let settings = self.settings.clone();
+                let rename = self
+                    .rename
+                    .as_ref()
+                    .map(|session| (session.fingerprint.clone(), session.field.clone()));
+                let rename_ctx = settings_panel::RenameCtx {
+                    entity: cx.entity().clone(),
+                    focus: self.rename_focus_handle(),
+                    bounds: self.rename_bounds_slot(),
+                };
+                el.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .track_focus(&self.settings_focus)
+                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                            if event.keystroke.key.as_str() == "escape" {
+                                this.close_settings();
+                                cx.notify();
+                            }
+                        }))
+                        .child(settings_panel::panel(
+                            &t,
+                            &settings,
+                            &trusts,
+                            &devices,
+                            receive_dir.as_deref(),
+                            confirm_del.as_deref(),
+                            rename.as_ref().map(|(fingerprint, field)| {
+                                (fingerprint.as_str(), field)
+                            }),
+                            &rename_ctx,
+                            self.settings_progress(),
+                            self.seg_position(settings.theme.index()),
+                            cx,
+                        )),
+                )
+            })
+            // 隐私浮层：层级最上（拖拽区 < 浮层卡 < 设置面板 < 隐私浮层）。它是**只读的说明**，
             // 不参与任何流程，压住谁也不影响操作。
             .when(self.privacy_open, |el| {
                 el.child(
@@ -1844,6 +2266,111 @@ impl Render for AppRoot {
     }
 }
 
+/// 输入处理：把改名输入框接进系统文本栈（IME 靠它，普通字符也走它）。
+///
+/// 契约（gpui `EntityInputHandler`）：区间一律 **UTF-16 下标**；换算收口在
+/// `model::namefield`。没有改名会话时全部如实返回 `None` / 不接受——
+/// 输入处理器是「当前焦点元素」的，我们只有这一个输入场景，用它当开关刚好。
+impl EntityInputHandler for AppRoot {
+    fn text_for_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        adjusted_range: &mut Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let text = self.rename.as_ref()?.field.text();
+        let start = char_index_from_utf16(text, range.start);
+        let end = char_index_from_utf16(text, range.end);
+        let selected: String = text.chars().skip(start).take(end - start).collect();
+        *adjusted_range = Some(range.start..range.start + selected.encode_utf16().count());
+        Some(selected)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        let session = self.rename.as_ref()?;
+        let caret = utf16_index_from_char(session.field.text(), session.field.caret());
+        // 不做选区：光标只是一个点
+        Some(UTF16Selection { range: caret..caret, reversed: false })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::ops::Range<usize>> {
+        let session = self.rename.as_ref()?;
+        let (start, end) = session.field.marked()?;
+        let text = session.field.text();
+        Some(utf16_index_from_char(text, start)..utf16_index_from_char(text, end))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(session) = self.rename.as_mut() {
+            session.field.unmark();
+        }
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.rename.as_mut() {
+            session.field.replace_utf16_range(range, new_text);
+        }
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range: Option<std::ops::Range<usize>>,
+        new_text: &str,
+        _new_selected_range: Option<std::ops::Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.rename.as_mut() {
+            session.field.replace_and_mark_utf16(range, new_text);
+        }
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range: std::ops::Range<usize>,
+        _element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        // 输入框的位置在 paint 时由 canvas 记下（见 `view::settings` 的改名输入框）
+        self.rename_bounds.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        // 点击定位光标（v1 不做）：如实告诉平台「我不知道」，别瞎猜一个位置
+        None
+    }
+
+    fn text_length_utf16(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
+        Some(self.rename.as_ref()?.field.text().encode_utf16().count())
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.rename.is_some()
+    }
+}
+
 /// 指针位置（`Pixels`，**窗口坐标**）→ 图区坐标。
 ///
 /// **全项目唯一的窗口→图区换算**。曾经布局产出全窗坐标、渲染容器用图区坐标，
@@ -1862,12 +2389,17 @@ pub fn open(
     service: Option<Arc<IpcSource>>,
     pairing: Option<Arc<dyn PairingSource>>,
     transfers: Option<Arc<dyn TransferSource>>,
+    trusts: Option<Arc<dyn TrustSource>>,
+    receive: Option<Arc<dyn ReceiveDirSource>>,
+    settings: Settings,
     // 预览专用（`GLOWLINK_PREVIEW=linked`）：开窗就连上第一台，并把服务当「在跑」——
     // 否则拖拽区永远只显示「服务已关闭」，看不到设备那几句文案。
     // **真实路径永远是 `false`**：连接只能由用户拖出来，服务状态只能看真实进程。
     preview_linked: bool,
     // 预览专用：一开窗就打开隐私浮层（`GLOWLINK_PREVIEW=privacy`）
     preview_privacy: bool,
+    // 预览专用：一开窗就打开设置面板（`GLOWLINK_PREVIEW=settings`）
+    preview_settings: bool,
     cx: &mut App,
 ) {
     let bounds = corner_bounds(cx);
@@ -1889,13 +2421,26 @@ pub fn open(
     cx.open_window(options, move |window, cx| {
         crate::platform::hide_system_window_buttons(window);
         let view = cx.new(|cx| {
-            let mut root = AppRoot::new(cx, device_name, source, service, pairing, transfers);
+            let mut root = AppRoot::new(
+                cx,
+                device_name,
+                source,
+                service,
+                pairing,
+                transfers,
+                trusts,
+                receive,
+                settings,
+            );
             root.preview_linked = preview_linked;
             if preview_linked {
                 root.connect_first();
             }
             if preview_privacy {
                 root.toggle_privacy();
+            }
+            if preview_settings {
+                root.toggle_settings();
             }
             root
         });
@@ -1920,6 +2465,28 @@ pub fn open(
                                 .is_ok()
                             {
                                 root.privacy_focused = true;
+                            }
+                        }
+                    }
+                    if root.wants_rename_focus() {
+                        let handle = root.rename_focus.clone();
+                        if let Some(window) = cx.windows().first() {
+                            if window
+                                .update(cx, |_, window, cx| window.focus(&handle, cx))
+                                .is_ok()
+                            {
+                                root.rename_focused = true;
+                            }
+                        }
+                    }
+                    if root.wants_settings_focus() {
+                        let handle = root.settings_focus.clone();
+                        if let Some(window) = cx.windows().first() {
+                            if window
+                                .update(cx, |_, window, cx| window.focus(&handle, cx))
+                                .is_ok()
+                            {
+                                root.settings_focused = true;
                             }
                         }
                     }

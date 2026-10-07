@@ -2,7 +2,7 @@
 
 use glowlink_ipc::row::{
     parse_transfers, DeviceRow, PairingRow, PairingState, PendingRow, TransferDirection,
-    TransferRow, TransferState,
+    TransferRow, TransferState, TrustRow,
 };
 use glowlink_core::model::packet::DeviceKind;
 use glowlink_core::{Device, DeviceId};
@@ -212,4 +212,25 @@ fn abandoned_pairing_is_its_own_state() {
         remaining: 0,
     };
     assert_eq!(PairingRow::from_line(&row.to_line()).unwrap(), row);
+}
+
+#[test]
+fn trust_row_roundtrips_with_spaces_in_name() {
+    // 名字是设备名常态（可能带空格）：`\t` 分列不受影响
+    let row = TrustRow {
+        fingerprint: "aaaa000011112222".into(),
+        name: "我 的 甲机".into(),
+        paired_at: 1_700_000_000,
+    };
+    let parsed = TrustRow::from_line(&row.to_line()).expect("要能还原");
+    assert_eq!(parsed, row);
+}
+
+#[test]
+fn trust_row_tolerates_missing_name_and_time() {
+    // 旧手改的行可能没写名字与时间：缺了就当空 / 0，指纹在就行
+    let parsed = TrustRow::from_line("aaaa000011112222").expect("要能还原");
+    assert_eq!(parsed.fingerprint, "aaaa000011112222");
+    assert_eq!(parsed.name, "");
+    assert_eq!(parsed.paired_at, 0);
 }

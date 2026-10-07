@@ -18,7 +18,7 @@ use glowlink_ipc::client::IpcClient;
 use glowlink_ipc::codec;
 use glowlink_ipc::daemon;
 use glowlink_ipc::row::{
-    DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow,
+    DeviceRow, PairingRow, PendingRow, SendTicket, TransferRow, TrustRow,
 };
 use glowlink_ipc::server::{self as ipc_server, IpcHost};
 use glowlink_ipc::state;
@@ -1182,6 +1182,50 @@ impl IpcHost for DaemonShared {
             .ok_or_else(|| GlowError::Missing(format!("没有正在进行的传输 #{token}")))
     }
 
+    fn trusts(&self) -> Vec<TrustRow> {
+        self.trust
+            .devices()
+            .into_iter()
+            .map(|device| TrustRow {
+                fingerprint: device.fingerprint,
+                name: device.name,
+                paired_at: device.paired_at,
+            })
+            .collect()
+    }
+
+    fn untrust(&self, fingerprint: &str) -> Result<String> {
+        // 「删掉一条不存在的配对」是用户列表与守护进程脱节了，如实报错而不是当成功
+        if self.trust.forget(fingerprint)? {
+            state::append_log(&format!("已删除配对 {fingerprint}"));
+            Ok(fingerprint.to_string())
+        } else {
+            Err(GlowError::Missing(format!("没有这台已配对设备：{fingerprint}")))
+        }
+    }
+
+    fn rename_trust(&self, fingerprint: &str, name: &str) -> Result<String> {
+        if self.trust.rename(fingerprint, name)? {
+            state::append_log(&format!("已改名 {fingerprint} → {name}"));
+            Ok(fingerprint.to_string())
+        } else {
+            Err(GlowError::Missing(format!("没有这台已配对设备：{fingerprint}")))
+        }
+    }
+
+    /// 更换接收目录：立即生效（下一连接就落新目录），并把状态文件同步改掉
+    /// （它是客户端了解「东西会收到哪儿」的唯一入口，不改就是谎报）。
+    fn set_receive_dir(&self, path: &str) -> Result<String> {
+        let dir = PathBuf::from(path);
+        fs::create_dir_all(&dir)?;
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.receive_dir = dir.clone();
+        state::write_state(&state)?;
+        drop(state);
+        state::append_log(&format!("接收目录改为 {}", dir.display()));
+        Ok(dir.display().to_string())
+    }
+
     /// 把文件发给某台设备：握手**在这里等**（校验码要立刻能显示），传输丢给线程。
     fn send_file(&self, device_id: &str, path: &str) -> Result<SendTicket> {
         let device = self.find(device_id).ok_or_else(|| GlowError::NotFound(device_id.to_string()))?;
@@ -1361,7 +1405,6 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
         let listener: Arc<Box<dyn TransferListener>> = Arc::from(listener);
         let chunk_size = config.chunk_size();
         let ring_capacity = config.ring_capacity();
-        let dir = dir.clone();
         let trust = Arc::clone(&trust);
         let identity_key = Arc::clone(&identity_key);
         let auto_accept = shared.auto_accept;
@@ -1378,7 +1421,6 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                 Ok((stream, _peer)) => {
                     let trust = Arc::clone(&trust);
                     let identity_key = Arc::clone(&identity_key);
-                    let dir = dir.clone();
                     let pending = Arc::clone(&pending);
                     let pairing = Arc::clone(&pairing);
                     let transfers = Arc::clone(&transfers_for_recv);
@@ -1431,6 +1473,14 @@ fn cmd_daemon(config: &Config, args: &[String]) -> Result<()> {
                             Arc::clone(&transfers),
                         );
                         let mut stream = Preloaded::new(secure, first);
+                        // 接收目录**每连接现读**（不锁死启动时那一份）：设置页换目录后，
+                        // 下一个到达的文件就落进新目录，不必重启守护进程。
+                        let dir = shared_conn
+                            .state
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .receive_dir
+                            .clone();
                         match transfer.receive_file(&mut stream, &dir, &label, &view) {
                             Ok(path) => {
                                 view.finish();
