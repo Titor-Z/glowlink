@@ -33,6 +33,17 @@ fn temp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// 端口的分配是「先问系统要一个、立刻释放」，本质是 TOCTOU：
+/// 同一进程里并行跑的用例会拿到**同一个**端口（Windows 上还允许重复绑定 UDP 端口），
+/// 于是 A 的报文被 B 收走、B 的广播被 A 当成事件，表现为「事件数比预期多」。
+/// 所以凡是用固定端口的用例，先取这把锁。
+fn port_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// 借系统分配一个空闲端口后立刻释放，供适配器绑定。
 fn free_udp_port() -> u16 {
     let probe = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
@@ -83,6 +94,7 @@ fn tcp_adapters_transfer_over_real_socket() {
 
 #[test]
 fn receives_query_and_replies_unicast() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let adapter = UdpDiscoveryAdapter::bind(port).unwrap();
     assert_eq!(adapter.bound_port().unwrap(), port);
@@ -126,6 +138,7 @@ fn receives_query_and_replies_unicast() {
 
 #[test]
 fn receives_hello_reply() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let adapter = UdpDiscoveryAdapter::bind(port).unwrap();
 
@@ -144,6 +157,7 @@ fn receives_hello_reply() {
 
 #[test]
 fn ignores_foreign_datagrams() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let adapter = UdpDiscoveryAdapter::bind(port).unwrap();
 
@@ -157,6 +171,7 @@ fn ignores_foreign_datagrams() {
 
 #[test]
 fn degrades_to_send_only_when_port_is_taken() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let holder = UdpDiscoveryAdapter::bind(port).unwrap();
     assert!(!holder.degraded());
@@ -167,9 +182,6 @@ fn degrades_to_send_only_when_port_is_taken() {
     // 关键语义：降级节点不绑定固定的发现端口（否则会把端口永远占死，
     // 让后来启动的节点再也无法成为应答方），但仍持有临时端口用于收应答。
     assert_eq!(degraded.bound_port(), None);
-    // Windows 的 UDP 端口复用语义与 Unix 不同：同一个端口被占用后仍可能有报文
-    // 落到降级节点上，所以这条「降级后收不到东西」只在 Unix 上成立。
-    #[cfg(not(windows))]
     assert!(degraded.poll(Duration::from_millis(10)).unwrap().is_empty());
     degraded.query(&hello()).expect("降级节点仍应能发送查询");
 }
@@ -188,6 +200,7 @@ fn reply_target_prefers_declared_reply_port() {
 
 #[test]
 fn query_sends_broadcast_without_error() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let adapter = UdpDiscoveryAdapter::bind(port).unwrap();
     adapter.query(&hello()).expect("广播查询应当发送成功");
@@ -207,6 +220,7 @@ fn query_sends_broadcast_without_error() {
 )]
 #[test]
 fn broadcast_failure_does_not_fail_the_round() {
+    let _ports = port_guard();
     let port = free_udp_port();
     let watcher = UdpSocket::bind(("127.0.0.1", port)).unwrap();
     watcher
