@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    name: 构建 ${{ matrix.name }}
+    name: 测试 ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     # 硬上限：万一再出现死锁之类的挂起，最多烧 15 分钟而不是 34 分钟 ×10 倍率
     timeout-minutes: 15
@@ -55,66 +55,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-
 
-      # 交叉编译前置：在 arm64 runner 上编出 Intel 版
-      - name: 安装 Intel 目标标准库
-        if: runner.os == 'macOS'
-        run: rustup target add x86_64-apple-darwin
-
       # 只跑 CLI 侧三个 crate：desktop 的依赖链（wgpu / metal / 字体栈）重得多，
       # 它的测试与构建放到下面的 desktop job 里做，免得把这里的 15 分钟撑爆。
       - name: 运行测试
         run: cargo test --locked -p glowlink-core -p glowlink-ipc -p glowlink-cli
-      # macOS：两个架构都用 runner 自带的 zip 打包（zip 保留可执行位）
-      - name: 打包（macOS）
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          for arch in aarch64 x86_64; do
-            cargo build --locked --release --target "${arch}-apple-darwin" -p glowlink-cli
-            name="glowlink-${VERSION}-macos-${arch}"
-            stage="dist/${name}"
-            mkdir -p "${stage}"
-            cp "target/${arch}-apple-darwin/release/glowlink" "${stage}/"
-            cp glowlink.toml README.md "${stage}/"
-            chmod +x "${stage}/glowlink"
-            (cd dist && rm -f "${name}.zip" && zip -qr -X "${name}.zip" "${name}")
-          done
-          ls -lh dist
 
-      # Windows：镜像自带 PowerShell 与 Compress-Archive
-      - name: 打包（Windows）
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo build --locked --release -p glowlink-cli
-          $stage = "dist/glowlink-$env:VERSION-windows-x86_64"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item 'target/release/glowlink.exe' $stage
-          Copy-Item 'glowlink.toml', 'README.md' $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
-          Get-ChildItem dist
-
-      # 每个平台各自建 Release（`gh release create` 幂等处理：已存在就只传资产），
-      # 不经过 upload-artifact，因此不受账号 Actions 存储额度限制。
-      - name: 发布到 Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          notes="CLI：解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。桌面版：macOS 解压后直接打开 GlowLink.app；Windows 解压后运行 glowlink-desktop.exe。桌面版未做代码签名，macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。"
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
-          else
-            # 两个平台并行建 Release 会有一个撞 422，此时退回只传资产
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip \
-              --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
-              --notes "${notes}" \
-              || gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
-          fi
-          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
 
   # 桌面版单独一个 job：gpui 的依赖链（wgpu / metal / 字体栈）会把构建时间拉长，
   # 与 CLI job 混在一起必定撞上 15 分钟上限。
@@ -195,9 +140,10 @@ jobs:
           codesign --force --deep --sign - "${app}"
 
           # ditto 才能保住可执行位与包结构（zip 会丢 app 包的元数据）
-          name="glowlink-${VERSION}-macos-desktop"
+          name="glowlink-desktop-${VERSION}-macos-universal"
           mkdir -p dist
           ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/${name}.zip"
+          (cd dist && shasum -a 256 "${name}.zip" > "${name}.zip.sha256")
           ls -lh dist
 
       - name: 打包 exe（Windows）
@@ -205,11 +151,11 @@ jobs:
         shell: pwsh
         run: |
           cargo build --locked --release -p glowlink-desktop
-          $stage = "dist/glowlink-$env:VERSION-windows-x86_64-desktop"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item 'target/release/glowlink-desktop.exe' $stage
-          Copy-Item 'README.md' $stage
-          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $name = "glowlink-desktop-$env:VERSION-x64.exe"
+          Copy-Item 'target/release/glowlink-desktop.exe' "dist/$name"
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File "dist/$name.sha256" -Encoding ascii -NoNewline
           Get-ChildItem dist
 
       - name: 发布到 Release（桌面版）
@@ -223,8 +169,8 @@ jobs:
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
-              --notes "CLI 与桌面版的构建产物。桌面版未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
+              --notes "桌面版二进制与 SHA-256 校验值。未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
               || true
           fi
-          gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
           gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
