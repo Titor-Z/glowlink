@@ -172,5 +172,6 @@ jobs:
               --notes "桌面版二进制与 SHA-256 校验值。未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
               || true
           fi
-          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          # 只传文件：dist 里还留着 GlowLink.app 目录，gh 会把目录也当资产去读
+          gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/*.exe dist/*.sha256 --clobber
           gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
