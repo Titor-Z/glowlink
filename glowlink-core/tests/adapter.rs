@@ -167,6 +167,9 @@ fn degrades_to_send_only_when_port_is_taken() {
     // 关键语义：降级节点不绑定固定的发现端口（否则会把端口永远占死，
     // 让后来启动的节点再也无法成为应答方），但仍持有临时端口用于收应答。
     assert_eq!(degraded.bound_port(), None);
+    // Windows 的 UDP 端口复用语义与 Unix 不同：同一个端口被占用后仍可能有报文
+    // 落到降级节点上，所以这条「降级后收不到东西」只在 Unix 上成立。
+    #[cfg(not(windows))]
     assert!(degraded.poll(Duration::from_millis(10)).unwrap().is_empty());
     degraded.query(&hello()).expect("降级节点仍应能发送查询");
 }
@@ -198,6 +201,10 @@ fn query_sends_broadcast_without_error() {
 ///
 /// 复现手法：把套接字绑在回环地址上——内核没有「127.0.0.1 → 255.255.255.255」的路由，
 /// 广播必然报 EADDRNOTAVAIL，而回环那一份照样发得出去（同机节点不该受影响）。
+#[cfg_attr(
+    windows,
+    ignore = "Windows 能从回环地址发广播，没法用这个手法复现「广播发不出去」"
+)]
 #[test]
 fn broadcast_failure_does_not_fail_the_round() {
     let port = free_udp_port();
@@ -227,6 +234,11 @@ fn broadcast_failure_does_not_fail_the_round() {
 
 /// 对照实验：证明上面那条用例确实处在一个「广播发不出去」的环境里。
 /// 否则它可能只是碰巧通过（比如日后的系统允许从回环广播）。
+///
+/// Windows 上这条前提**不成立**（回环地址可以发广播），所以只在这条前提为真
+/// 的 Unix 上跑；Windows 那边的 `broadcast_failure_does_not_fail_the_round`
+/// 因此也不再能证明任何东西，一并跳过。
+#[cfg_attr(windows, ignore = "Windows 能从回环地址发广播，这条前提不成立")]
 #[test]
 fn broadcast_from_loopback_really_is_impossible() {
     let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();

@@ -36,7 +36,7 @@ jobs:
         include:
           # 两个 macOS 架构合成一个 job：私有仓库的 macOS 计费是 ×10，少起一个 job 省一半
           - name: macOS（arm64 + x86_64）
-            os: macos-14
+            os: macos-15
           - name: Windows（x86_64）
             os: windows-latest
     steps:
@@ -133,7 +133,7 @@ jobs:
       matrix:
         include:
           - name: macOS（通用 App）
-            os: macos-14
+            os: macos-15
           - name: Windows（x86_64）
             os: windows-latest
     steps:
