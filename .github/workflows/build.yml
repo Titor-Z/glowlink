@@ -60,8 +60,10 @@ jobs:
         if: runner.os == 'macOS'
         run: rustup target add x86_64-apple-darwin
 
+      # 只跑 CLI 侧三个 crate：desktop 的依赖链（wgpu / metal / 字体栈）重得多，
+      # 它的测试与构建放到下面的 desktop job 里做，免得把这里的 15 分钟撑爆。
       - name: 运行测试
-        run: cargo test --locked --workspace
+        run: cargo test --locked -p glowlink-core -p glowlink-ipc -p glowlink-cli
       # macOS：两个架构都用 runner 自带的 zip 打包（zip 保留可执行位）
       - name: 打包（macOS）
         if: runner.os == 'macOS'
@@ -102,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          notes="解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。当前为 Phase 1（CLI 概念验证）：尚无端到端加密。"
+          notes="CLI：解压对应平台的压缩包，按其中的 README.md 运行 glowlink serve / list / send。桌面版：macOS 解压后直接打开 GlowLink.app；Windows 解压后运行 glowlink-desktop.exe。桌面版未做代码签名，macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。"
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
           else
@@ -112,4 +114,117 @@ jobs:
               --notes "${notes}" \
               || gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
           fi
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
+
+  # 桌面版单独一个 job：gpui 的依赖链（wgpu / metal / 字体栈）会把构建时间拉长，
+  # 与 CLI job 混在一起必定撞上 15 分钟上限。
+  # macOS 一次编两个架构再 lipo 成通用 App；Windows 只出 exe。
+  desktop:
+    name: 桌面版 ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    # 冷缓存下 macOS 要编两遍 release（arm64 原生 + x86_64 交叉）再跑一遍 debug 测试，
+    # 本机 4 核实测单架构 release 就 13.5 分钟 → 冷启动按 60 分钟留余量；
+    # 缓存命中后（key 里带 Cargo.lock 哈希）后续发版约 2~3 分钟。
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS（通用 App）
+            os: macos-14
+          - name: Windows（x86_64）
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 CLI job 分开的缓存键：gpui 那套依赖只在这里编译，
+      # 混用同一个 key 会让先跑完的那个把后者的缓存写丢。
+      - name: 缓存 Cargo 依赖与构建产物（桌面版）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-desktop-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-
+
+      - name: 安装 Intel 目标标准库
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin
+
+      - name: 运行测试（桌面版）
+        run: cargo test --locked -p glowlink-desktop
+
+      - name: 打包 App（macOS）
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for arch in aarch64 x86_64; do
+            cargo build --locked --release -p glowlink-desktop --target "${arch}-apple-darwin"
+          done
+
+          app="dist/GlowLink.app"
+          mkdir -p "${app}/Contents/MacOS" "${app}/Contents/Resources"
+          # lipo 会破坏链接时写入的 ad-hoc 签名，所以合并之后必须重新签（arm64 无有效签名根本起不来）
+          lipo -create \
+            target/aarch64-apple-darwin/release/glowlink-desktop \
+            target/x86_64-apple-darwin/release/glowlink-desktop \
+            -output "${app}/Contents/MacOS/GlowLink"
+          cat > "${app}/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>GlowLink</string>
+            <key>CFBundleDisplayName</key><string>萤光 GlowLink</string>
+            <key>CFBundleIdentifier</key><string>com.titor.glowlink</string>
+            <key>CFBundleExecutable</key><string>GlowLink</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - "${app}"
+
+          # ditto 才能保住可执行位与包结构（zip 会丢 app 包的元数据）
+          name="glowlink-${VERSION}-macos-desktop"
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent "${app}" "dist/${name}.zip"
+          ls -lh dist
+
+      - name: 打包 exe（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --locked --release -p glowlink-desktop
+          $stage = "dist/glowlink-$env:VERSION-windows-x86_64-desktop"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'target/release/glowlink-desktop.exe' $stage
+          Copy-Item 'README.md' $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "$stage.zip" -Force
+          Get-ChildItem dist
+
+      - name: 发布到 Release（桌面版）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # 只传本平台的资产：另一个平台由它自己的 job 上传，两个 job 并行不冲突
+          if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
+              --notes "CLI 与桌面版的构建产物。桌面版未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
+              || true
+          fi
+          gh release upload "${GITHUB_REF_NAME}" dist/*.zip --clobber
           gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name'
