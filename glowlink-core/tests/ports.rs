@@ -8,7 +8,9 @@ use glowlink_core::model::ports::{
 
 #[test]
 fn probe_reports_bound_for_free_port() {
-    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    // 必须占用 **0.0.0.0** 而不是 127.0.0.1：`probe_udp` 绑的是 0.0.0.0，
+    // Windows 允许「0.0.0.0:P」与「127.0.0.1:P」共存，拿回环地址当占位会得出「端口空闲」的假结论。
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
     let port = socket.local_addr().unwrap().port();
     // 该端口此刻被自己持有，探测必须报「被占」（说明 probe 用的是真 bind 结果）
     assert_eq!(probe_udp(port), BindOutcome::Taken);
@@ -17,7 +19,7 @@ fn probe_reports_bound_for_free_port() {
 
 #[test]
 fn probe_reports_bound_after_release() {
-    let socket = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).unwrap();
     let port = socket.local_addr().unwrap().port();
     drop(socket);
     // 释放后应当可用；万一被别的进程抢走则跳过（不制造假故障）
