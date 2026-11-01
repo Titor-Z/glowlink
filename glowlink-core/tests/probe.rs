@@ -23,8 +23,19 @@ fn free_udp_port() -> u16 {
     panic!("找不到可用端口");
 }
 
+/// 端口的分配是「先问系统要一个、立刻释放」，本质是 TOCTOU：同一进程里并行跑的
+/// 用例会拿到**同一个**端口，于是 A 占着的端口被 B 抢绑（CI 上实际撞到过
+/// `AddrInUse`）。凡是要绑固定端口的用例，先取这把锁。
+fn port_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn probe_roundtrip_carries_version_and_pid() {
+    let _guard = port_guard();
     let port = free_udp_port();
     let listener = UdpSocket::bind(("0.0.0.0", port)).expect("刚验证过的端口应可绑定");
     listener.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -55,6 +66,7 @@ fn probe_roundtrip_carries_version_and_pid() {
 
 #[test]
 fn identify_reports_stale_when_nobody_answers() {
+    let _guard = port_guard();
     let port = free_udp_port();
     // 占住端口但完全不收包 → 无人应答，应判为 Stale（残留绑定），不是“别的程序”
     let _holder = UdpSocket::bind(("0.0.0.0", port)).unwrap();
@@ -74,6 +86,7 @@ fn identify_reports_stale_when_nobody_answers() {
 
 #[test]
 fn identify_reports_stranger_for_foreign_response() {
+    let _guard = port_guard();
     let port = free_udp_port();
     let responder = UdpSocket::bind(("0.0.0.0", port)).unwrap();
     responder.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
@@ -97,6 +110,7 @@ fn identify_reports_stranger_for_foreign_response() {
 
 #[test]
 fn bind_or_identify_returns_free_socket_when_available() {
+    let _guard = port_guard();
     let port = free_udp_port();
     let (socket, owner) = bind_or_identify(port).unwrap();
     assert_eq!(owner, PortOwner::Free);
@@ -106,6 +120,7 @@ fn bind_or_identify_returns_free_socket_when_available() {
 
 #[test]
 fn bind_or_identify_detects_own_running_node() {
+    let _guard = port_guard();
     let port = free_udp_port();
     let held = UdpSocket::bind(("0.0.0.0", port)).unwrap();
     held.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
