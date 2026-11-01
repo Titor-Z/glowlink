@@ -3,7 +3,9 @@
 //! 全是纯解析与取值，所以能单测。这里的重点是**不静默**：
 //! 未知键、非法值、缺「=」都要报出来——静默忽略会让用户以为改了却没生效。
 
-use glowlink_desktop::model::settings::{apply_line, parse, serialize, Settings, ThemeChoice};
+use glowlink_desktop::model::settings::{
+    apply_line, effective_receive_dir, parse, serialize, Settings, ThemeChoice,
+};
 
 #[test]
 fn defaults_match_design() {
@@ -94,4 +96,20 @@ fn theme_index_matches_seg_order() {
     assert_eq!(ThemeChoice::System.index(), 0);
     assert_eq!(ThemeChoice::Dark.index(), 1);
     assert_eq!(ThemeChoice::Light.index(), 2);
+}
+
+#[test]
+fn receive_dir_prefers_daemon_then_settings() {
+    // 守护进程在跑：以它报的为准（用户可能用 CLI 改过目录）
+    assert_eq!(
+        effective_receive_dir(Some("/tmp/事实".into()), Some("/tmp/设置")),
+        Some("/tmp/事实".into())
+    );
+    // 守护进程没跑：不能拿 None 把刚选的目录冲掉
+    assert_eq!(
+        effective_receive_dir(None, Some("/tmp/设置")),
+        Some("/tmp/设置".into())
+    );
+    // 两处都没有：交给调用方用内置默认
+    assert_eq!(effective_receive_dir(None, None), None);
 }

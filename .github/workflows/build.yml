@@ -109,8 +109,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 桌面版**必须**和守护进程宿主 `glowlink` 一起发：
+          # `daemon::find_host_binary` 只认「与本程序同目录的 glowlink」或 PATH，
+          # 少了它，界面点开关只会报「找不到 glowlink」，服务永远起不来。
           for arch in aarch64 x86_64; do
             cargo build --locked --release -p glowlink-desktop --target "${arch}-apple-darwin"
+            cargo build --locked --release -p glowlink-cli --target "${arch}-apple-darwin"
           done
 
           app="dist/GlowLink.app"
@@ -120,6 +124,11 @@ jobs:
             target/aarch64-apple-darwin/release/glowlink-desktop \
             target/x86_64-apple-darwin/release/glowlink-desktop \
             -output "${app}/Contents/MacOS/GlowLink"
+          lipo -create \
+            target/aarch64-apple-darwin/release/glowlink \
+            target/x86_64-apple-darwin/release/glowlink \
+            -output "${app}/Contents/MacOS/glowlink"
+          chmod +x "${app}/Contents/MacOS/glowlink"
           cat > "${app}/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -137,6 +146,8 @@ jobs:
           </dict>
           </plist>
           PLIST
+          # lipo 之后两个 Mach-O 的签名都失效了：先逐个签，再签整个包
+          codesign --force --sign - "${app}/Contents/MacOS/glowlink"
           codesign --force --deep --sign - "${app}"
 
           # ditto 才能保住可执行位与包结构（zip 会丢 app 包的元数据）
@@ -146,16 +157,23 @@ jobs:
           (cd dist && shasum -a 256 "${name}.zip" > "${name}.zip.sha256")
           ls -lh dist
 
-      - name: 打包 exe（Windows）
+      - name: 打包 zip（Windows）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # 守护进程宿主 `glowlink.exe` 要和桌面版放在同一目录（`find_host_binary` 只认这个）
           cargo build --locked --release -p glowlink-desktop
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $name = "glowlink-desktop-$env:VERSION-x64.exe"
-          Copy-Item 'target/release/glowlink-desktop.exe' "dist/$name"
-          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $name" | Out-File "dist/$name.sha256" -Encoding ascii -NoNewline
+          cargo build --locked --release -p glowlink-cli
+          $name = "glowlink-desktop-$env:VERSION-x64"
+          $stage = "dist/$name"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item 'target/release/glowlink-desktop.exe' $stage
+          Copy-Item 'target/release/glowlink.exe' $stage
+          Copy-Item 'README.md' $stage
+          Compress-Archive -Path "$stage/*" -DestinationPath "dist/$name.zip" -Force
+          $zip = "dist/$name.zip"
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File "dist/$name.zip.sha256" -Encoding ascii -NoNewline
           Get-ChildItem dist
 
       - name: 发布到 Release（桌面版）
@@ -169,7 +187,7 @@ jobs:
           if ! gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${GITHUB_REF_NAME}" \
               --title "萤光 GlowLink ${GITHUB_REF_NAME}" \
-              --notes "桌面版二进制与 SHA-256 校验值。未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
+              --notes "桌面版与守护进程一并打包（缺一不可）。未做代码签名：macOS 首次打开需右键「打开」，Windows 可能提示 SmartScreen。" \
               || true
           fi
           # 只传文件：dist 里还留着 GlowLink.app 目录，gh 会把目录也当资产去读。

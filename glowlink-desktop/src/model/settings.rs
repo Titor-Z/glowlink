@@ -162,6 +162,16 @@ pub fn serialize(settings: &Settings) -> String {
     body
 }
 
+/// 接收目录的「当前值」：守护进程在跑就以它为准（那是事实），
+/// 否则退回本机设置——服务没在跑时守护进程报不出目录，
+/// 不这么兜底就会拿 `None` 把用户刚选的目录冲掉（界面看着像「选了不变」）。
+pub fn effective_receive_dir(
+    from_daemon: Option<String>,
+    configured: Option<&str>,
+) -> Option<String> {
+    from_daemon.or_else(|| configured.map(str::to_string))
+}
+
 /// 设置文件位置：`~/.config/glowlink/settings.toml`（与用户配置同一层）。
 pub fn settings_path() -> PathBuf {
     let home = std::env::var_os("HOME")

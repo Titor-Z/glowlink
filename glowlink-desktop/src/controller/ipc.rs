@@ -130,6 +130,8 @@ impl IpcSource {
                     version.fetch_add(1, Ordering::SeqCst);
                 }
                 if let Err(e) = outcome {
+                    // 失败只进快照的话，日志里一个字都没有（真机上排查「开关点了没反应」全靠猜）
+                    log::error!("服务启停失败：{e}");
                     fail(&shared, &version, e.to_string());
                 }
             }

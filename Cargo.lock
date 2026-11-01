@@ -2345,7 +2345,7 @@ dependencies = [
 
 [[package]]
 name = "glowlink-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "crossterm",
  "glowlink-core",
@@ -2355,7 +2355,7 @@ dependencies = [
 
 [[package]]
 name = "glowlink-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "chacha20poly1305",
  "hkdf",
@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "glowlink-desktop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "env_logger",
  "glowlink-core",
@@ -2384,7 +2384,7 @@ dependencies = [
 
 [[package]]
 name = "glowlink-ipc"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "glowlink-core",
 ]

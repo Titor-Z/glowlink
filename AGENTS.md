@@ -1158,8 +1158,44 @@
 - **未做**：「关闭窗口时」（收进托盘/退出）—— 托盘没落地，先摆就是撒谎。
 - 设计侧全程走聿Canvas MCP（`get_conventions` → `write_artboard` → `screenshot_artboard` 自检）。
 
+### 2026-11-02 【发布包缺守护进程 - v1】桌面版必须带上 `glowlink`
+
+- **现象**：桌面版启动后服务永远起不来，界面上只有「已暂停查找设备」；开了 `RUST_LOG=info` 也只有
+  「服务没在跑，正在拉起守护进程…」，没有后续、没有错误。
+- **根因**（`git show 59f3388`）：那次把 Release 改成「只发桌面版二进制」，**连带把 CLI 也从包里拿掉了**；
+  而 `daemon::find_host_binary()` 只认「与桌面版**同目录**的 `glowlink`」或 `PATH`。
+  macOS 的 `.app` 从 Finder 启动时 `PATH` 只有系统目录 → 两边都找不到，
+  于是 `ensure_running` 直接返回 `Missing("找不到 glowlink…")`。
+- **验证**：`target/release` 里没有 `glowlink` 时桌面版起不来；把 CLI 编到同目录后
+  `服务已启动（PID …，IPC 10000）`，`state.json` 出现、守护进程真实在跑。
+- **修**：macOS 的 `GlowLink.app/Contents/MacOS/` 与 Windows 包内都放一份 `glowlink`（两个架构各自
+  `lipo`、分别重签）；Windows 因变成两个文件改发 zip。发布说明同步改成「桌面版与守护进程一并打包」。
+- **顺带**：服务启停失败原来只写进快照、**日志一个字都没有**，本次在失败处补 `log::error!`——
+  下次缺文件/端口被占，第一时间能看到原因。
+
+### 2026-11-02 【接收目录显示/打开 - v1】服务没跑时不能被 `None` 冲掉
+
+- **现象**：设置页换了接收目录，行内文字不变；「打开目录」打开的也不是设置里的目录。
+- **显示不更新的根因**：`sync()` 把守护进程的 `receive_dir` 当成唯一来源，而服务没在跑时
+  `IpcSource::receive_dir()` 返回 `None`；于是下一轮把刚选的目录改回 `None`（显示回「—」）。
+  服务在跑时，刚选的那一拍也可能被旧快照盖回去。
+- **打开目录的根因**：`open_received_folder()` 硬编码 `~/.glowlink/received`，完全没看配置。
+- **修**：新增 `settings::effective_receive_dir(daemon, configured)`——服务在跑以守护进程为事实，
+  否则退回本机设置；显示与「打开目录」共用这一个取值，只有两处都没有才用内置默认。
+  测试 `desktop:settings` 12 例（新增 1 例：事实 > 设置 > 默认）。
+
 ## CHANGELOG
 > 这里存放项目更新历史记录
+
+### 2026-11-02 v0.1.4-desktop.daemon-pkg — 发布包补上守护进程
+
+- 修：桌面版 Release 没带 `glowlink`，`find_host_binary` 找不到宿主，服务永远起不来。
+  macOS 把它放进 `GlowLink.app/Contents/MacOS/glowlink`（双架构 lipo + 单独重签）；
+  Windows 改为发 zip，内含 `glowlink-desktop.exe` + `glowlink.exe`。
+- 服务启停失败补 `log::error!`（原来只进快照，日志无痕）。
+
+- 修：设置页换接收目录后显示不更新（服务没跑时被 `None` 冲掉）、「打开目录」打开硬编码的
+  `~/.glowlink/received`——两处共用 `effective_receive_dir`（事实 > 本机设置 > 默认）。
 
 ### 2026-10-07 v0.1.4-desktop.settings-v2 — 设置页对齐 glowdrop 新版
 

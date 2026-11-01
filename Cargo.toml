@@ -3,7 +3,7 @@ members = ["glowlink-core", "glowlink-ipc", "glowlink-cli", "glowlink-desktop"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 
 # 编译产物全部留在项目内（与 CLI 一致）：不进用户全局 target，便于整体清理

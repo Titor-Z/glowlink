@@ -466,7 +466,14 @@ impl AppRoot {
     /// 用系统自带的打开方式，不引 `rfd` 之类的依赖：这是内部工具，
     /// 「在访达 / 资源管理器里看到文件」够用了。
     pub fn open_received_folder(&mut self) {
-        let dir = glowlink_ipc::state::state_dir().join("received");
+        // 目录以界面上那个值为准（守护进程的实际情况；没在跑时退回本机设置），
+        // 只有两处都没有才用内置默认——不然改了目录，这里仍会打开旧位置。
+        let dir = settings_model::effective_receive_dir(
+            self.receive_dir.clone(),
+            self.settings.receive_dir.as_deref(),
+        )
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| glowlink_ipc::state::state_dir().join("received"));
         log::info!("打开接收目录：{}", dir.display());
         let dir = dir.display().to_string();
         #[cfg(target_os = "macos")]
@@ -1501,7 +1508,10 @@ impl AppRoot {
             changed = true;
         }
         if receive_changed {
-            self.receive_dir = receive_next;
+            // 服务没在跑时守护进程报不出目录：不能拿 `None` 把刚选的目录冲掉，
+            // 退回本机设置（服务在跑时仍以守护进程为事实来源）。
+            self.receive_dir =
+                settings_model::effective_receive_dir(receive_next, self.settings.receive_dir.as_deref());
             changed = true;
         }
         // 发给守护进程（下一连接生效）+ 记进设置（下次拉起带 `--dir`）
