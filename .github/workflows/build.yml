@@ -123,7 +123,10 @@ jobs:
           lipo -create \
             target/aarch64-apple-darwin/release/glowlink-desktop \
             target/x86_64-apple-darwin/release/glowlink-desktop \
-            -output "${app}/Contents/MacOS/GlowLink"
+            -output "${app}/Contents/MacOS/glowlink-desktop"
+          # ⚠️ 主程序**不能叫 GlowLink**：macOS 默认卷大小写不敏感，
+          # `GlowLink` 与同一个目录里的 `glowlink` 是**同一个文件名**——
+          # lipo 第二个二进制会把桌面版直接覆盖成 CLI（v0.1.5 就栽在这里）。
           lipo -create \
             target/aarch64-apple-darwin/release/glowlink \
             target/x86_64-apple-darwin/release/glowlink \
@@ -137,7 +140,7 @@ jobs:
             <key>CFBundleName</key><string>GlowLink</string>
             <key>CFBundleDisplayName</key><string>萤光 GlowLink</string>
             <key>CFBundleIdentifier</key><string>com.titor.glowlink</string>
-            <key>CFBundleExecutable</key><string>GlowLink</string>
+            <key>CFBundleExecutable</key><string>glowlink-desktop</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>${VERSION}</string>
             <key>CFBundleVersion</key><string>${VERSION}</string>

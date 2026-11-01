@@ -1172,6 +1172,13 @@
   `lipo`、分别重签）；Windows 因变成两个文件改发 zip。发布说明同步改成「桌面版与守护进程一并打包」。
 - **顺带**：服务启停失败原来只写进快照、**日志一个字都没有**，本次在失败处补 `log::error!`——
   下次缺文件/端口被占，第一时间能看到原因。
+- **v0.1.5 发出去才发现（已撤回重发）**：macOS 默认卷**大小写不敏感**，
+  `Contents/MacOS/GlowLink` 与同目录的 `glowlink` 是**同一个文件名**，第二个 `lipo`
+  直接把桌面版覆盖成了 CLI（包里的"主程序"其实是命令行）。
+  纠正：`.app` 主程序名改为 `glowlink-desktop`（`CFBundleExecutable` 同步），
+  本地用同一命令链（copy → codesign → ditto → unzip）验到两个 Mach-O 都在。
+  教训：跨平台打包里「两个名字只差大小写」只在 macOS/Windows 的默认卷上才撞，
+  必须在**目标平台**拆包看一眼。
 
 ### 2026-11-02 【接收目录显示/打开 - v1】服务没跑时不能被 `None` 冲掉
 
@@ -1187,13 +1194,14 @@
 ## CHANGELOG
 > 这里存放项目更新历史记录
 
-### 2026-11-02 v0.1.4-desktop.daemon-pkg — 发布包补上守护进程
+### 2026-11-02 v0.1.6-desktop.daemon-pkg — 发布包补上守护进程（含大小写撞名修复）
 
 - 修：桌面版 Release 没带 `glowlink`，`find_host_binary` 找不到宿主，服务永远起不来。
   macOS 把它放进 `GlowLink.app/Contents/MacOS/glowlink`（双架构 lipo + 单独重签）；
   Windows 改为发 zip，内含 `glowlink-desktop.exe` + `glowlink.exe`。
+- 修（v0.1.5 撤回后）：macOS 卷大小写不敏感，`GlowLink` 与 `glowlink` 撞名 → 主程序被覆盖成 CLI；
+  `.app` 主程序改名为 `glowlink-desktop`，`CFBundleExecutable` 同步。
 - 服务启停失败补 `log::error!`（原来只进快照，日志无痕）。
-
 - 修：设置页换接收目录后显示不更新（服务没跑时被 `None` 冲掉）、「打开目录」打开硬编码的
   `~/.glowlink/received`——两处共用 `effective_receive_dir`（事实 > 本机设置 > 默认）。
 
